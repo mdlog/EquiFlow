@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="logo-equiflow.png" alt="EquiFlow" width="120" />
+</p>
+
 # EquiFlow
 
 **Yield-generating stock collateralization on Robinhood Chain (Arbitrum L3).**

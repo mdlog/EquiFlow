@@ -36,6 +36,8 @@ yarn-error.log*
 # docs & claude config (not for repo)
 docs/
 .claude/
+CLAUDE.md
+AGENTS.md
 
 # vercel
 .vercel
