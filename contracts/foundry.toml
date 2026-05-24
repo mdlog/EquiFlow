@@ -1,0 +1,21 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.24"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+remappings = [
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/",
+    "@pythnetwork/pyth-sdk-solidity/=lib/pyth-sdk-solidity/",
+    "forge-std/=lib/forge-std/src/",
+]
+
+[rpc_endpoints]
+# Robinhood Chain Testnet — RPC URL injected at runtime via $RBN_RPC_URL
+rbn_testnet = "${RBN_RPC_URL}"
+
+[etherscan]
+rbn_testnet = { key = "${RBN_EXPLORER_KEY}", url = "${RBN_EXPLORER_API_URL}" }

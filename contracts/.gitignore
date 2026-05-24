@@ -1,0 +1,14 @@
+# Foundry
+cache/
+out/
+broadcast/*/dry-run/
+broadcast/**/*.json
+!broadcast/**/run-latest.json
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store

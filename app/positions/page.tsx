@@ -1,0 +1,2199 @@
+"use client";
+
+import { useMemo, useState } from "react";
+import Link from "next/link";
+import {
+  useAccount,
+  useBlockNumber,
+  useConnect,
+  useReadContract,
+} from "wagmi";
+import { PageNav } from "@/components/PageNav";
+import { OraclePing } from "@/components/OraclePing";
+import { SiteFooter } from "@/components/SiteFooter";
+import { StaleOracleBanner } from "@/components/StaleOracleBanner";
+import { BorrowMoreModal } from "@/components/BorrowMoreModal";
+import { WithdrawCollateralModal } from "@/components/WithdrawCollateralModal";
+import { RepayDebtModal } from "@/components/RepayDebtModal";
+import { LpDepositModal } from "@/components/LpDepositModal";
+import { LpWithdrawModal } from "@/components/LpWithdrawModal";
+import { STOCKS, findStock } from "@/lib/config/stocks";
+import { useProtocolStats, useListedAssets } from "@/lib/hooks/use-protocol-stats";
+import { fmt } from "@/lib/format";
+import {
+  EQUIFLOW_VAULT_ABI,
+  EQUIFLOW_VAULT_ADDRESS,
+  STOCK_TOKEN_ADDRESSES,
+  explorerTx,
+  shortAddr,
+} from "@/lib/contracts";
+import { AssetLogo } from "@/components/AssetLogo";
+import { ROBINHOOD_CHAIN_TESTNET_ID } from "@/lib/config/chain";
+import { usePosition, type LiveCollateralLine } from "@/lib/hooks/use-position";
+import { usePositionEvents } from "@/lib/hooks/use-position-events";
+import { useActiveWallet } from "@/lib/hooks/use-active-wallet";
+import { useLiveAdapterTick, useStockPrices } from "@/lib/hooks/use-adapter-price";
+import { SessionBadge } from "@/components/SessionBadge";
+import { AutoDefenderModal } from "@/components/AutoDefenderModal";
+import {
+  useDefenderStatus,
+  type DefenderStatus,
+} from "@/lib/hooks/use-defender-status";
+import { revokeSessionKey } from "@/lib/aa/session-key";
+import { useSmartWallet } from "@/lib/aa/use-smart-wallet";
+import type { Address } from "viem";
+
+export default function PositionsPage() {
+  const pos = usePosition();
+  const { isConnected } = useAccount();
+  const { connectors, connect } = useConnect();
+  const listed = useListedAssets();
+  const protocolStats = useProtocolStats(listed);
+
+  // ── derived display ──────────────────────────────────────────────────
+  const lines = pos.lines;
+  const collateralUsd = pos.collateralUsd;
+  const borrowedUsd = pos.borrowedUsd;
+  const healthFactorRaw =
+    pos.healthFactor === Number.POSITIVE_INFINITY ? 99 : pos.healthFactor;
+  const ltvCapBps = blendedLtv(lines);
+  const liqAtBps = pos.liqThresholdPct != null
+    ? pos.liqThresholdPct * 100
+    : blendedLiq(lines);
+  const ltvActual =
+    collateralUsd > 0 ? (borrowedUsd / collateralUsd) * 100 : 0;
+  const ltvCap = ltvCapBps / 100;
+  const liqAt = liqAtBps / 100;
+  const healthFactor = healthFactorRaw;
+  const tension = Math.max(0, Math.min(1, (2.5 - healthFactor) / 1.5));
+  const HFTone =
+    healthFactor > 2.5
+      ? "var(--up)"
+      : healthFactor > 1.5
+        ? "var(--amber)"
+        : "var(--down)";
+  const statusLabel =
+    healthFactor > 2 ? "HEALTHY" : healthFactor > 1.3 ? "WATCH" : "AT-RISK";
+
+  const equity = collateralUsd - borrowedUsd;
+  const headroom = Math.max(0, collateralUsd * (ltvCap / 100) - borrowedUsd);
+  const borrowApr = protocolStats.derived ? protocolStats.derived.borrowAprBps / 100 : null;
+  const vaultApr = protocolStats.derived ? protocolStats.derived.supplyAprBps / 100 : null;
+
+  return (
+    <div className="flex flex-col min-h-screen">
+      <PageNav
+        current="positions"
+        rightExtras={
+          <OraclePing
+            label={pos.vaultConfigured ? "Vault · on-chain" : `${lines.length} oracles streaming`}
+          />
+        }
+      />
+
+      {pos.oracleStale && <StaleOracleBanner />}
+
+      <div className="max-w-[1320px] w-full mx-auto flex-1 flex flex-col">
+        {/* Position selector bar */}
+        <PositionSelectorBar
+          assetCount={lines.length}
+          statusLabel={statusLabel}
+          HFTone={HFTone}
+          isConnected={isConnected}
+        />
+
+        {/* 5-KPI banner */}
+        <section
+          className="grid grid-cols-5 bg-paper-alt"
+          style={{ borderBottom: "1px solid var(--ink)" }}
+        >
+          <Kpi
+            label="Collateral · total"
+            value={fmt.usd(collateralUsd, 0)}
+            sub={`${lines.length} asset${lines.length !== 1 ? "s" : ""} pledged`}
+          />
+          <Kpi
+            label="Debt · USDG"
+            value={fmt.usd(borrowedUsd, 0)}
+            sub={borrowApr != null ? `@ ${borrowApr.toFixed(2)}% APR` : "—"}
+          />
+          <Kpi
+            label="Net equity"
+            value={fmt.usd(equity, 0)}
+            sub={`LTV ${ltvActual.toFixed(1)}% / cap ${ltvCap.toFixed(0)}%`}
+          />
+          <Kpi
+            label="Health factor"
+            value={healthFactor >= 99 ? "∞" : healthFactor.toFixed(2)}
+            valueColor={HFTone}
+            sub={`liquidates at 1.00 · liq LTV ${liqAt.toFixed(0)}%`}
+          />
+          <Kpi
+            label="Borrow capacity"
+            value={fmt.usd(headroom, 0)}
+            sub="remaining headroom"
+            last
+          />
+        </section>
+
+        <AutoDefenderCard
+          lines={lines}
+          healthFactor={healthFactor}
+        />
+
+        {!isConnected && (
+          <div
+            className="border-b border-hairline-soft flex items-center justify-between"
+            style={{ padding: "12px 32px", background: "var(--amber-soft)" }}
+          >
+            <span style={{ fontSize: 12 }} className="text-ink-soft">
+              Wallet not connected — connect to view your position.
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                const c = connectors[0];
+                if (c)
+                  connect({
+                    connector: c,
+                    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
+                  });
+              }}
+              className="px-3 py-1.5 bg-ink text-paper rounded-[2px] font-medium"
+              style={{ fontSize: 12 }}
+            >
+              Connect wallet
+            </button>
+          </div>
+        )}
+
+        {/* Orbit + Collateral/Debt tables */}
+        {pos.hasPosition || !isConnected ? (
+          <section
+            className="grid border-b border-hairline"
+            style={{ gridTemplateColumns: "1.05fr 1fr" }}
+          >
+            {/* LEFT: orbit */}
+            <div
+              className="border-r border-hairline"
+              style={{ padding: "24px 28px" }}
+            >
+              <div className="flex justify-between items-end mb-1">
+                <div>
+                  <div className="eyebrow mb-1">Position view</div>
+                  <h2
+                    className="font-serif font-medium m-0"
+                    style={{
+                      fontSize: 22,
+                      letterSpacing: "-0.025em",
+                      lineHeight: 1.05,
+                    }}
+                  >
+                    {lines.length} stocks holding a{" "}
+                    <em>{fmt.usd(borrowedUsd, 0)}</em> loan in orbit.
+                  </h2>
+                </div>
+                <span
+                  className="font-mono text-ink-mute"
+                  style={{ fontSize: 10, letterSpacing: "0.06em" }}
+                >
+                  REAL-TIME · {lines.length} oracles
+                </span>
+              </div>
+
+              <Orbit
+                positions={lines}
+                tension={tension}
+                borrowed={borrowedUsd}
+              />
+
+              <div
+                className="mt-4 bg-paper-alt border border-hairline-soft flex gap-5 flex-wrap"
+                style={{ padding: "12px 14px" }}
+              >
+                <LegendItem dot="var(--ink)" label="Loan" desc="USDG borrowed" />
+                <LegendItem
+                  ring
+                  label="Collateral"
+                  desc="orbit radius ∝ contribution"
+                />
+                <LegendItem
+                  dot="var(--up)"
+                  label="Breathing"
+                  desc="oracle tick"
+                />
+                <LegendItem
+                  dot="var(--down)"
+                  label="Liquidation arc"
+                  desc="collapses if LTV breaches"
+                />
+              </div>
+            </div>
+
+            {/* RIGHT: collateral + debt tables */}
+            <div className="flex flex-col">
+              <CollateralTable
+                positions={lines}
+                totalCollat={collateralUsd}
+              />
+              <DebtPanel
+                borrowed={borrowedUsd}
+                borrowApr={borrowApr}
+                vaultApr={vaultApr}
+              />
+            </div>
+          </section>
+        ) : (
+          <EmptyState />
+        )}
+
+        {pos.hasPosition || !isConnected ? (
+          <>
+            <PerfChart
+              healthFactor={healthFactor}
+              totalCollat={collateralUsd}
+            />
+
+            <PositionActions
+              hasPosition={pos.hasPosition && pos.vaultConfigured}
+              borrowedUsd={borrowedUsd}
+              headroom={headroom}
+              lines={lines}
+              collateralUsd={collateralUsd}
+              ltvCap={ltvCap}
+              liqAt={liqAt}
+            />
+
+            <LpPoolPanel />
+
+            <section
+              className="grid"
+              style={{ gridTemplateColumns: "1fr 1fr" }}
+            >
+              <OracleActivityLog
+                stocks={lines}
+                healthFactor={healthFactor}
+              />
+              <TxHistory />
+            </section>
+          </>
+        ) : null}
+      </div>
+
+      <SiteFooter />
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────
+   POSITION SELECTOR BAR
+   ────────────────────────────────────────────────────────── */
+function PositionSelectorBar({
+  assetCount,
+  statusLabel,
+  HFTone,
+  isConnected,
+}: {
+  assetCount: number;
+  statusLabel: string;
+  HFTone: string;
+  isConnected: boolean;
+}) {
+  // LP shares are keyed by the address that called `lpDeposit`. In AA mode
+  // that's the smart account, so query via the active wallet.
+  const { address } = useActiveWallet();
+  const [depositOpen, setDepositOpen] = useState(false);
+  const [withdrawLpOpen, setWithdrawLpOpen] = useState(false);
+
+  // Read user's LP shares to decide whether to show "Withdraw LP" button
+  const { data: lpPos } = useReadContract({
+    abi: EQUIFLOW_VAULT_ABI,
+    address: EQUIFLOW_VAULT_ADDRESS,
+    functionName: "lpPositionOf",
+    args: address ? [address] : undefined,
+    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
+    query: {
+      enabled: !!EQUIFLOW_VAULT_ADDRESS && !!address,
+      refetchInterval: 15_000,
+    },
+  });
+  const userHasShares =
+    !!lpPos &&
+    ((lpPos as readonly [bigint, bigint, bigint])[0]) > 0n;
+
+  return (
+    <section
+      className="flex items-center justify-between border-b border-hairline-soft"
+      style={{ padding: "14px 28px" }}
+    >
+      <div className="flex items-center gap-5">
+        <div
+          className="flex items-center gap-2.5 border border-ink rounded-[2px] cursor-pointer"
+          style={{ padding: "6px 12px" }}
+        >
+          <span
+            className="font-mono text-ink-mute uppercase"
+            style={{ fontSize: 11, letterSpacing: "0.06em" }}
+          >
+            POSITION
+          </span>
+          <span
+            className="font-serif font-medium"
+            style={{ fontSize: 15, letterSpacing: "-0.015em" }}
+          >
+            #{assetCount > 0 ? "001" : "—"}
+          </span>
+          <svg
+            width="10"
+            height="10"
+            viewBox="0 0 10 10"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+          >
+            <path d="M2 4l3 3 3-3" />
+          </svg>
+        </div>
+        <div
+          className="flex items-center gap-4 flex-wrap"
+          style={{ fontSize: 12 }}
+        >
+          <MetaItem k="Opened" v="—" />
+          <MetaItem k="Pledged" v={`${assetCount} assets`} />
+          <MetaItem k="Loan" v="USDG" />
+          <MetaItem
+            k="Status"
+            v={
+              <span style={{ color: HFTone, fontWeight: 500 }}>
+                {isConnected ? statusLabel : "DEMO"}
+              </span>
+            }
+          />
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={() => setDepositOpen(true)}
+          className="font-medium rounded-[2px]"
+          style={{
+            padding: "7px 12px",
+            fontSize: 12,
+            background: "var(--up-soft)",
+            color: "var(--ink)",
+            border: "1px solid var(--up)",
+          }}
+          title="Deposit USDG as LP · earn APY from borrow spread"
+        >
+          ✦ Deposit LP
+        </button>
+        {userHasShares && (
+          <button
+            type="button"
+            onClick={() => setWithdrawLpOpen(true)}
+            className="bg-transparent text-ink border border-ink rounded-[2px] font-medium"
+            style={{ padding: "7px 12px", fontSize: 12 }}
+          >
+            Withdraw LP
+          </button>
+        )}
+        <button
+          type="button"
+          className="bg-transparent text-ink border border-hairline rounded-[2px] font-medium"
+          style={{ padding: "7px 12px", fontSize: 12 }}
+        >
+          Export · CSV
+        </button>
+      </div>
+      <LpDepositModal
+        open={depositOpen}
+        onClose={() => setDepositOpen(false)}
+      />
+      <LpWithdrawModal
+        open={withdrawLpOpen}
+        onClose={() => setWithdrawLpOpen(false)}
+      />
+    </section>
+  );
+}
+
+function MetaItem({ k, v }: { k: string; v: React.ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span
+        className="font-mono text-ink-mute uppercase"
+        style={{ fontSize: 10, letterSpacing: "0.06em" }}
+      >
+        {k}
+      </span>
+      <span className="font-mono" style={{ fontSize: 11 }}>
+        {v}
+      </span>
+    </span>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────
+   5-KPI CELL
+   ────────────────────────────────────────────────────────── */
+function Kpi({
+  label,
+  value,
+  valueColor,
+  sub,
+  subColor,
+  last,
+}: {
+  label: string;
+  value: string;
+  valueColor?: string;
+  sub: string;
+  subColor?: string;
+  last?: boolean;
+}) {
+  return (
+    <div
+      style={{
+        padding: "20px 26px",
+        borderRight: last ? "none" : "1px solid var(--hairline)",
+      }}
+    >
+      <div className="eyebrow" style={{ marginBottom: 10 }}>
+        {label}
+      </div>
+      <div
+        className="font-serif font-medium tabular"
+        style={{
+          fontSize: 30,
+          letterSpacing: "-0.03em",
+          lineHeight: 1,
+          color: valueColor ?? "var(--ink)",
+        }}
+      >
+        {value}
+      </div>
+      <div
+        className="font-mono tabular"
+        style={{
+          fontSize: 11,
+          color: subColor ?? "var(--ink-mute)",
+          marginTop: 8,
+        }}
+      >
+        {sub}
+      </div>
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────
+   COLLATERAL TABLE
+   ────────────────────────────────────────────────────────── */
+function CollateralTable({
+  positions,
+  totalCollat,
+}: {
+  positions: LiveCollateralLine[];
+  totalCollat: number;
+}) {
+  const enriched = useMemo(() => {
+    return positions
+      .map((p) => {
+        const stock = findStock(p.sym);
+        const value = stock.price * p.shares;
+        return { ...p, stock, value, weight: value / Math.max(totalCollat, 1) };
+      })
+      .sort((a, b) => b.value - a.value);
+  }, [positions, totalCollat]);
+
+  return (
+    <div
+      className="border-b border-hairline"
+      style={{ padding: "20px 24px 12px" }}
+    >
+      <div className="flex justify-between items-baseline" style={{ marginBottom: 12 }}>
+        <div>
+          <div className="eyebrow mb-1">
+            Collateral · {enriched.length} assets
+          </div>
+          <h3
+            className="font-serif font-medium m-0"
+            style={{ fontSize: 16, letterSpacing: "-0.02em" }}
+          >
+            Per-asset breakdown
+          </h3>
+        </div>
+        <span
+          className="font-mono tabular font-medium"
+          style={{ fontSize: 14 }}
+        >
+          {fmt.usd(totalCollat, 0)}
+        </span>
+      </div>
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead>
+          <tr style={{ borderBottom: "1px solid var(--ink)" }}>
+            <th style={collatHeadStyle}>Asset</th>
+            <th style={{ ...collatHeadStyle, textAlign: "right" }}>Shares</th>
+            <th style={{ ...collatHeadStyle, textAlign: "right" }}>Live price</th>
+            <th style={{ ...collatHeadStyle, textAlign: "right" }}>Value</th>
+            <th style={{ ...collatHeadStyle, textAlign: "right" }}>Weight</th>
+          </tr>
+        </thead>
+        <tbody>
+          {enriched.map((p) => (
+            <CollatRow key={p.sym} pos={p} />
+          ))}
+          <tr>
+            <td
+              colSpan={3}
+              className="font-mono text-ink-mute uppercase"
+              style={{
+                padding: "12px 0 6px",
+                fontSize: 11,
+                letterSpacing: "0.04em",
+              }}
+            >
+              Total
+            </td>
+            <td
+              style={{ padding: "12px 8px 6px", textAlign: "right" }}
+            >
+              <span
+                className="font-mono tabular font-semibold"
+                style={{ fontSize: 13 }}
+              >
+                {fmt.usd(totalCollat, 0)}
+              </span>
+            </td>
+            <td
+              style={{ padding: "12px 8px 6px", textAlign: "right" }}
+            >
+              <span
+                className="font-mono tabular text-ink-mute"
+                style={{ fontSize: 12 }}
+              >
+                100.0%
+              </span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+const collatHeadStyle: React.CSSProperties = {
+  padding: "8px 8px",
+  textAlign: "left",
+  fontSize: 10,
+  letterSpacing: "0.1em",
+  textTransform: "uppercase",
+  color: "var(--ink-mute)",
+  fontWeight: 500,
+};
+
+function CollatRow({
+  pos: p,
+}: {
+  pos: LiveCollateralLine & {
+    stock: ReturnType<typeof findStock>;
+    value: number;
+    weight: number;
+  };
+}) {
+  // Single source of truth: on-chain Pyth price via adapter.latestRoundData.
+  // Falls back to static catalogue for assets without an on-chain adapter.
+  const live = useLiveAdapterTick(p.sym, (v) => fmt.usd(v));
+  const livePrice = live.value;
+  const up = live.dir >= 0;
+  return (
+    <tr style={{ borderBottom: "1px dashed var(--hairline-soft)" }}>
+      <td style={{ padding: "12px 8px" }}>
+        <div className="flex items-center gap-2.5">
+          <div
+            className="border border-ink bg-paper rounded-[2px] flex items-center justify-center"
+            style={{ width: 26, height: 26 }}
+          >
+            <AssetLogo sym={p.sym} size={18} />
+          </div>
+          <div>
+            <div className="font-mono font-semibold" style={{ fontSize: 12 }}>
+              {p.sym}
+            </div>
+            <div
+              className="font-mono"
+              style={{
+                fontSize: 9,
+                color: up ? "var(--up)" : "var(--down)",
+                marginTop: 1,
+              }}
+            >
+              {live.isLive ? fmt.pct(((live.value - p.stock.price) / p.stock.price) * 100, 2, true) : "—"}
+            </div>
+          </div>
+        </div>
+      </td>
+      <td style={{ padding: "12px 8px", textAlign: "right" }}>
+        <span className="font-mono tabular" style={{ fontSize: 12 }}>
+          {fmt.num(p.shares, p.shares < 1 ? 4 : 0)}
+        </span>
+      </td>
+      <td style={{ padding: "12px 8px", textAlign: "right" }}>
+        <div className="flex items-center justify-end gap-1.5">
+          <span
+            className={`font-mono tabular inline-block rounded-[2px] ${
+              live.dir > 0
+                ? "animate-tick-up"
+                : live.dir < 0
+                  ? "animate-tick-down"
+                  : ""
+            }`}
+            style={{
+              fontSize: 12,
+              padding: "1px 4px",
+            }}
+            title={live.isLive ? "Pyth · on-chain" : "Static reference price"}
+          >
+            {live.formatted}
+          </span>
+          {live.isLive && <SessionBadge symbol={p.sym} variant="dense" />}
+        </div>
+      </td>
+      <td style={{ padding: "12px 8px", textAlign: "right" }}>
+        <span
+          className="font-serif tabular font-medium"
+          style={{ fontSize: 14, letterSpacing: "-0.02em" }}
+        >
+          {fmt.usd(livePrice * p.shares, 0)}
+        </span>
+      </td>
+      <td style={{ padding: "12px 8px", textAlign: "right" }}>
+        <div className="font-mono tabular" style={{ fontSize: 11 }}>
+          {(p.weight * 100).toFixed(1)}%
+        </div>
+        <div
+          style={{
+            height: 2,
+            background: "var(--hairline-soft)",
+            marginTop: 3,
+          }}
+        >
+          <div
+            style={{
+              width: `${p.weight * 100}%`,
+              height: "100%",
+              background: "var(--ink)",
+            }}
+          />
+        </div>
+      </td>
+    </tr>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────
+   DEBT PANEL
+   ────────────────────────────────────────────────────────── */
+function DebtPanel({
+  borrowed,
+  borrowApr,
+  vaultApr,
+}: {
+  borrowed: number;
+  borrowApr: number | null;
+  vaultApr: number | null;
+}) {
+  const netApy = borrowApr != null && vaultApr != null ? vaultApr - borrowApr : null;
+  return (
+    <div style={{ padding: "20px 24px" }}>
+      <div className="flex justify-between items-baseline" style={{ marginBottom: 12 }}>
+        <div>
+          <div className="eyebrow mb-1">Debt · USDG</div>
+          <h3
+            className="font-serif font-medium m-0"
+            style={{ fontSize: 16, letterSpacing: "-0.02em" }}
+          >
+            Borrow & yield
+          </h3>
+        </div>
+        <span
+          className="font-mono tabular font-medium"
+          style={{ fontSize: 14 }}
+        >
+          {fmt.usd(borrowed, 0)}
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div
+          className="bg-paper-alt border border-hairline-soft"
+          style={{ padding: "12px 14px" }}
+        >
+          <div className="eyebrow" style={{ marginBottom: 6 }}>
+            Borrow rate
+          </div>
+          <div
+            className="font-serif font-medium tabular text-down"
+            style={{ fontSize: 22, letterSpacing: "-0.025em" }}
+          >
+            {borrowApr != null ? `−${borrowApr.toFixed(2)}%` : "—"}
+          </div>
+          <div
+            className="font-mono text-ink-mute"
+            style={{ fontSize: 10, marginTop: 4 }}
+          >
+            APR · on-chain
+          </div>
+        </div>
+        <div
+          className="bg-paper-alt border border-hairline-soft"
+          style={{ padding: "12px 14px" }}
+        >
+          <div className="eyebrow" style={{ marginBottom: 6 }}>
+            Supply rate
+          </div>
+          <div
+            className="font-serif font-medium tabular text-up"
+            style={{ fontSize: 22, letterSpacing: "-0.025em" }}
+          >
+            {vaultApr != null ? `+${vaultApr.toFixed(2)}%` : "—"}
+          </div>
+          <div
+            className="font-mono text-ink-mute"
+            style={{ fontSize: 10, marginTop: 4 }}
+          >
+            APR · vault LP
+          </div>
+        </div>
+      </div>
+      <div
+        className="bg-ink text-paper rounded-[2px]"
+        style={{ marginTop: 12, padding: "12px 14px" }}
+      >
+        <div className="flex justify-between items-baseline">
+          <div>
+            <div
+              className="font-mono"
+              style={{ fontSize: 10, opacity: 0.6, letterSpacing: "0.1em" }}
+            >
+              NET YOU KEEP
+            </div>
+            <div
+              className="font-serif font-medium tabular"
+              style={{
+                fontSize: 22,
+                letterSpacing: "-0.025em",
+                color: "var(--up-soft)",
+              }}
+            >
+              {netApy != null ? `+${netApy.toFixed(2)}% APY` : "—"}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────
+   PERFORMANCE CHART · 35 days
+   ────────────────────────────────────────────────────────── */
+function PerfChart({
+  healthFactor,
+  totalCollat,
+}: {
+  healthFactor: number;
+  totalCollat: number;
+}) {
+  const W = 1100,
+    H = 140;
+  const data = useMemo(() => {
+    const hfClamped = Math.min(99, healthFactor);
+    return [
+      { d: 0, hf: hfClamped, c: totalCollat },
+      { d: 1, hf: hfClamped, c: totalCollat },
+    ];
+  }, [healthFactor, totalCollat]);
+
+  const minHf = Math.min(1, Math.min(...data.map((d) => d.hf))) - 0.1;
+  const maxHf = Math.max(...data.map((d) => d.hf)) + 0.2;
+  const minC = Math.min(...data.map((d) => d.c)) * 0.97;
+  const maxC = Math.max(...data.map((d) => d.c)) * 1.03;
+
+  const yHf = (v: number) =>
+    H - ((v - minHf) / (maxHf - minHf)) * (H - 20) - 10;
+  const yC = (v: number) => H - ((v - minC) / (maxC - minC)) * (H - 20) - 10;
+  const xAt = (i: number) => (i / (data.length - 1)) * W;
+  const pathHf = data
+    .map((d, i) => `${i === 0 ? "M" : "L"} ${xAt(i)},${yHf(d.hf).toFixed(1)}`)
+    .join(" ");
+  const pathC = data
+    .map((d, i) => `${i === 0 ? "M" : "L"} ${xAt(i)},${yC(d.c).toFixed(1)}`)
+    .join(" ");
+
+  return (
+    <section
+      className="border-b border-hairline"
+      style={{ padding: "20px 28px 24px" }}
+    >
+      <div className="flex justify-between items-baseline" style={{ marginBottom: 14 }}>
+        <div>
+          <div className="eyebrow mb-1">Position snapshot</div>
+          <h3
+            className="font-serif font-medium m-0"
+            style={{ fontSize: 18, letterSpacing: "-0.02em" }}
+          >
+            Health factor + collateral value over time
+          </h3>
+        </div>
+        <div className="flex gap-5" style={{ fontSize: 11 }}>
+          <span className="inline-flex items-center gap-1.5">
+            <span
+              className="inline-block bg-ink"
+              style={{ width: 12, height: 2 }}
+            />
+            <span className="font-mono">Health factor</span>
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span
+              className="inline-block bg-up"
+              style={{ width: 12, height: 2 }}
+            />
+            <span className="font-mono">Collateral value</span>
+          </span>
+        </div>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" className="block">
+        <rect
+          x="0"
+          y={yHf(1.5)}
+          width={W}
+          height={H - yHf(1.5)}
+          fill="var(--down-soft)"
+          opacity="0.35"
+        />
+        <line
+          x1="0"
+          x2={W}
+          y1={yHf(1.5)}
+          y2={yHf(1.5)}
+          stroke="var(--down)"
+          strokeDasharray="3 4"
+          strokeWidth="1"
+          opacity="0.7"
+        />
+        <text
+          x="4"
+          y={yHf(1.5) - 4}
+          fontSize="9"
+          fontFamily="JetBrains Mono"
+          fill="var(--down)"
+          letterSpacing="0.04em"
+        >
+          WATCH ZONE
+        </text>
+
+        {[0.25, 0.5, 0.75].map((f) => (
+          <line
+            key={f}
+            x1="0"
+            x2={W}
+            y1={H * f}
+            y2={H * f}
+            stroke="var(--hairline-soft)"
+            strokeDasharray="2 4"
+          />
+        ))}
+
+        <path
+          d={pathHf}
+          stroke="var(--ink)"
+          strokeWidth="1.4"
+          fill="none"
+        />
+        <path
+          d={pathC}
+          stroke="var(--up)"
+          strokeWidth="1.2"
+          fill="none"
+          opacity="0.9"
+        />
+
+        <circle
+          cx={W}
+          cy={yHf(data[data.length - 1].hf)}
+          r="3.5"
+          fill="var(--ink)"
+        />
+        <circle
+          cx={W}
+          cy={yC(data[data.length - 1].c)}
+          r="3.5"
+          fill="var(--up)"
+        />
+
+        {[0, 7, 14, 21, 28, 34].map((i) => (
+          <text
+            key={i}
+            x={xAt(i)}
+            y={H - 1}
+            fontSize="9"
+            fontFamily="JetBrains Mono"
+            fill="var(--ink-mute)"
+            textAnchor={i === 0 ? "start" : i === 34 ? "end" : "middle"}
+          >
+            {i === 34 ? "now" : `−${34 - i}d`}
+          </text>
+        ))}
+      </svg>
+    </section>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────
+   POSITION ACTIONS · 4-button grid
+   ────────────────────────────────────────────────────────── */
+function PositionActions({
+  hasPosition,
+  borrowedUsd,
+  headroom,
+  lines,
+  collateralUsd,
+  ltvCap,
+  liqAt,
+}: {
+  hasPosition: boolean;
+  borrowedUsd: number;
+  headroom: number;
+  lines: LiveCollateralLine[];
+  collateralUsd: number;
+  ltvCap: number;
+  liqAt: number;
+}) {
+  const [borrowOpen, setBorrowOpen] = useState(false);
+  const [withdrawOpen, setWithdrawOpen] = useState(false);
+  const [repayOpen, setRepayOpen] = useState(false);
+
+  // Max withdrawable preview (LTV-safe) — for the action button sub-label
+  const minCollatRequired =
+    ltvCap > 0 ? borrowedUsd / (ltvCap / 100) : 0;
+  const maxWithdrawUsd = Math.max(0, collateralUsd - minCollatRequired);
+
+  return (
+    <>
+      <section
+        className="grid grid-cols-4 border-b border-hairline"
+        style={{ gap: 0 }}
+      >
+        <ActionBtn
+          primary
+          label="Repay debt"
+          sub={
+            borrowedUsd > 0
+              ? `Settle ${fmt.usd(borrowedUsd, 2)} USDG`
+              : "No outstanding debt"
+          }
+          icon="↓"
+          onClick={() => setRepayOpen(true)}
+          disabled={!hasPosition || borrowedUsd <= 0}
+        />
+        <ActionBtn
+          label="Add collateral"
+          sub="Improve health factor"
+          icon="+"
+          href="/pledge"
+        />
+        <ActionBtn
+          label="Borrow more"
+          sub={`Up to +${fmt.usd(headroom, 0)} available`}
+          icon="↑"
+          onClick={() => setBorrowOpen(true)}
+          disabled={!hasPosition || headroom <= 0}
+        />
+        <ActionBtn
+          label="Withdraw collateral"
+          sub={
+            maxWithdrawUsd > 0
+              ? `Up to ${fmt.usd(maxWithdrawUsd, 0)} LTV-safe`
+              : "Repay debt first"
+          }
+          icon="×"
+          last
+          onClick={() => setWithdrawOpen(true)}
+          disabled={!hasPosition || maxWithdrawUsd <= 0}
+        />
+      </section>
+
+      <BorrowMoreModal
+        open={borrowOpen}
+        onClose={() => setBorrowOpen(false)}
+        lines={lines}
+        collateralUsd={collateralUsd}
+        borrowedUsd={borrowedUsd}
+        ltvCap={ltvCap}
+        liqLtv={liqAt}
+      />
+      <WithdrawCollateralModal
+        open={withdrawOpen}
+        onClose={() => setWithdrawOpen(false)}
+        lines={lines}
+        collateralUsd={collateralUsd}
+        borrowedUsd={borrowedUsd}
+        ltvCap={ltvCap}
+        liqLtv={liqAt}
+      />
+      <RepayDebtModal
+        open={repayOpen}
+        onClose={() => setRepayOpen(false)}
+        borrowedUsd={borrowedUsd}
+        collateralUsd={collateralUsd}
+        ltvCap={ltvCap}
+        liqLtv={liqAt}
+      />
+    </>
+  );
+}
+
+function ActionBtn({
+  primary,
+  tone,
+  label,
+  sub,
+  icon,
+  last,
+  href,
+  onClick,
+  disabled,
+}: {
+  primary?: boolean;
+  tone?: "warn";
+  label: string;
+  sub: string;
+  icon: string;
+  last?: boolean;
+  href?: string;
+  onClick?: () => void;
+  disabled?: boolean;
+}) {
+  const bg = primary ? "var(--ink)" : "var(--paper)";
+  const fg = primary ? "var(--paper)" : "var(--ink)";
+  const subFg = primary ? "rgba(250,248,242,.6)" : "var(--ink-mute)";
+  const labelColor = tone === "warn" ? "var(--down)" : fg;
+  const iconColor =
+    tone === "warn"
+      ? "var(--down)"
+      : primary
+        ? "var(--paper)"
+        : "var(--ink)";
+  const content = (
+    <span className="flex items-center gap-3.5 w-full text-left">
+      <span
+        className="rounded-[2px] flex items-center justify-center"
+        style={{
+          width: 32,
+          height: 32,
+          background: primary
+            ? "rgba(250,248,242,.1)"
+            : "var(--paper-alt)",
+          border: `1px solid ${primary ? "rgba(250,248,242,.2)" : "var(--hairline)"}`,
+          fontSize: 15,
+          fontFamily: "JetBrains Mono",
+          color: iconColor,
+        }}
+      >
+        {icon}
+      </span>
+      <span>
+        <span
+          className="block font-medium"
+          style={{ fontSize: 14, color: labelColor }}
+        >
+          {label}
+        </span>
+        <span
+          className="block"
+          style={{ fontSize: 11, color: subFg, marginTop: 2 }}
+        >
+          {sub}
+        </span>
+      </span>
+    </span>
+  );
+
+  const baseStyle: React.CSSProperties = {
+    padding: "20px 24px",
+    background: bg,
+    color: fg,
+    border: "none",
+    borderRight: last ? "none" : "1px solid var(--hairline)",
+    borderRadius: 0,
+    opacity: disabled ? 0.45 : 1,
+    cursor: disabled ? "not-allowed" : "pointer",
+  };
+
+  if (href && !disabled) {
+    return (
+      <Link
+        href={href}
+        className="no-underline"
+        style={{ ...baseStyle, display: "block" }}
+      >
+        {content}
+      </Link>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      style={baseStyle}
+    >
+      {content}
+    </button>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────
+   ORACLE ACTIVITY LOG
+   ────────────────────────────────────────────────────────── */
+function OracleActivityLog({
+  stocks,
+  healthFactor,
+}: {
+  stocks: LiveCollateralLine[];
+  healthFactor: number;
+}) {
+  return (
+    <div
+      className="border-r border-hairline"
+      style={{ padding: "20px 24px" }}
+    >
+      <div className="flex justify-between items-baseline" style={{ marginBottom: 12 }}>
+        <div>
+          <div className="eyebrow mb-1">
+            Oracle activity
+          </div>
+          <h3
+            className="font-serif font-medium m-0"
+            style={{ fontSize: 16, letterSpacing: "-0.02em" }}
+          >
+            Pyth stream
+          </h3>
+        </div>
+        <OraclePing label={null} size={5} />
+      </div>
+      <div
+        className="bg-ink text-paper rounded-[2px] font-mono"
+        style={{ padding: "14px 16px", fontSize: 11, lineHeight: 1.7 }}
+      >
+        {stocks.length === 0 ? (
+          <div style={{ opacity: 0.5 }}>No collateral pledged</div>
+        ) : (
+          stocks.map((l) => {
+            const s = findStock(l.sym);
+            return (
+              <div key={l.sym} className="flex gap-3">
+                <span
+                  className="uppercase"
+                  style={{
+                    width: 42,
+                    flexShrink: 0,
+                    fontSize: 9,
+                    opacity: 0.6,
+                    letterSpacing: "0.08em",
+                  }}
+                >
+                  price
+                </span>
+                <span>{s.sym} · {fmt.usd(s.price, 2)}</span>
+              </div>
+            );
+          })
+        )}
+        <div className="flex gap-3 mt-1">
+          <span
+            className="uppercase"
+            style={{
+              width: 42,
+              flexShrink: 0,
+              fontSize: 9,
+              opacity: 0.6,
+              letterSpacing: "0.08em",
+            }}
+          >
+            sys
+          </span>
+          <span style={{ color: "var(--amber)" }}>
+            Health factor · {healthFactor >= 99 ? "∞" : healthFactor.toFixed(2)}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────
+   LP POOL PANEL · public, real-time vault stats
+   ────────────────────────────────────────────────────────── */
+function LpPoolPanel() {
+  const { address } = useActiveWallet();
+  // Read vault stats in parallel
+  const { data: tvlRaw } = useReadContract({
+    abi: EQUIFLOW_VAULT_ABI,
+    address: EQUIFLOW_VAULT_ADDRESS,
+    functionName: "totalAssetsUsd",
+    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
+    query: { enabled: !!EQUIFLOW_VAULT_ADDRESS, refetchInterval: 12_000 },
+  });
+  const { data: bookedRaw } = useReadContract({
+    abi: EQUIFLOW_VAULT_ABI,
+    address: EQUIFLOW_VAULT_ADDRESS,
+    functionName: "bookedUsdg",
+    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
+    query: { enabled: !!EQUIFLOW_VAULT_ADDRESS, refetchInterval: 12_000 },
+  });
+  const { data: totalSharesRaw } = useReadContract({
+    abi: EQUIFLOW_VAULT_ABI,
+    address: EQUIFLOW_VAULT_ADDRESS,
+    functionName: "totalShares",
+    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
+    query: { enabled: !!EQUIFLOW_VAULT_ADDRESS, refetchInterval: 12_000 },
+  });
+  const { data: apyRaw } = useReadContract({
+    abi: EQUIFLOW_VAULT_ABI,
+    address: EQUIFLOW_VAULT_ADDRESS,
+    functionName: "lpApyBps",
+    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
+    query: { enabled: !!EQUIFLOW_VAULT_ADDRESS, refetchInterval: 12_000 },
+  });
+  const { data: utilizationRaw } = useReadContract({
+    abi: EQUIFLOW_VAULT_ABI,
+    address: EQUIFLOW_VAULT_ADDRESS,
+    functionName: "utilizationBps",
+    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
+    query: { enabled: !!EQUIFLOW_VAULT_ADDRESS, refetchInterval: 12_000 },
+  });
+  const { data: borrowRateRaw } = useReadContract({
+    abi: EQUIFLOW_VAULT_ABI,
+    address: EQUIFLOW_VAULT_ADDRESS,
+    functionName: "borrowRateBps",
+    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
+    query: { enabled: !!EQUIFLOW_VAULT_ADDRESS, staleTime: 60_000 },
+  });
+  const { data: myLp } = useReadContract({
+    abi: EQUIFLOW_VAULT_ABI,
+    address: EQUIFLOW_VAULT_ADDRESS,
+    functionName: "lpPositionOf",
+    args: address ? [address] : undefined,
+    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
+    query: {
+      enabled: !!EQUIFLOW_VAULT_ADDRESS && !!address,
+      refetchInterval: 12_000,
+    },
+  });
+
+  // USDG decimals = 6 on RBN
+  const usdgDec = 6;
+
+  const tvl = tvlRaw !== undefined ? Number(tvlRaw as bigint) / 1e18 : 0;
+  const idle =
+    bookedRaw !== undefined ? Number(bookedRaw as bigint) / 10 ** usdgDec : 0;
+  const totalShares =
+    totalSharesRaw !== undefined ? Number(totalSharesRaw as bigint) / 1e18 : 0;
+  const apyPct = apyRaw !== undefined ? Number(apyRaw as bigint) / 100 : 0;
+  const utilPct =
+    utilizationRaw !== undefined ? Number(utilizationRaw as bigint) / 100 : 0;
+  const borrowPct =
+    borrowRateRaw !== undefined ? Number(borrowRateRaw as bigint) / 100 : 0;
+  const [myShares, myUsdValue] = (myLp as
+    | readonly [bigint, bigint, bigint]
+    | undefined) ?? [0n, 0n, 0n];
+  const myShareNum = Number(myShares) / 1e18;
+  const myUsdNum = Number(myUsdValue) / 1e18;
+
+  return (
+    <section
+      className="border-b border-hairline bg-paper-alt"
+      style={{ padding: "24px 28px" }}
+    >
+      <div
+        className="flex justify-between items-end"
+        style={{ marginBottom: 16 }}
+      >
+        <div>
+          <div className="eyebrow mb-1">Liquidity pool · open LP</div>
+          <h3
+            className="font-serif font-medium m-0"
+            style={{ fontSize: 20, letterSpacing: "-0.02em" }}
+          >
+            Deposit USDG, earn from borrow spread
+          </h3>
+          <p
+            className="text-ink-soft m-0"
+            style={{ fontSize: 12, marginTop: 4, maxWidth: 540, lineHeight: 1.5 }}
+          >
+            Borrowers pay {borrowPct.toFixed(2)}% APR. Interest accrues
+            on-chain into your share value. Withdraw anytime your share of vault
+            USDG is idle.
+          </p>
+        </div>
+      </div>
+      <div
+        className="grid grid-cols-5 bg-paper rounded-[2px] border border-hairline-soft"
+        style={{ overflow: "hidden" }}
+      >
+        <PoolStat label="Vault TVL" value={fmt.usd(tvl, 0)} />
+        <PoolStat
+          label="LP APY"
+          value={`+${apyPct.toFixed(2)}%`}
+          color="var(--up)"
+          sub={`= ${borrowPct.toFixed(1)}% × ${utilPct.toFixed(0)}% util`}
+        />
+        <PoolStat
+          label="Utilization"
+          value={`${utilPct.toFixed(1)}%`}
+          sub={`${fmt.usd(tvl - idle, 0)} lent out`}
+        />
+        <PoolStat label="Idle USDG" value={fmt.usd(idle, 0)} />
+        <PoolStat
+          label="Your shares"
+          value={
+            myShareNum > 0 ? myShareNum.toFixed(myShareNum < 1 ? 4 : 2) : "—"
+          }
+          sub={
+            myShareNum > 0
+              ? `${fmt.usd(myUsdNum, 2)} · ${
+                  totalShares > 0
+                    ? ((myShareNum / totalShares) * 100).toFixed(2)
+                    : "0"
+                }% of pool`
+              : "Not deposited yet"
+          }
+          last
+        />
+      </div>
+    </section>
+  );
+}
+
+function PoolStat({
+  label,
+  value,
+  sub,
+  color,
+  last,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  color?: string;
+  last?: boolean;
+}) {
+  return (
+    <div
+      style={{
+        padding: "16px 20px",
+        borderRight: last ? "none" : "1px solid var(--hairline-soft)",
+      }}
+    >
+      <div className="eyebrow" style={{ fontSize: 9, marginBottom: 6 }}>
+        {label}
+      </div>
+      <div
+        className="font-serif font-medium tabular"
+        style={{
+          fontSize: 22,
+          letterSpacing: "-0.025em",
+          lineHeight: 1,
+          color: color ?? "var(--ink)",
+        }}
+      >
+        {value}
+      </div>
+      {sub && (
+        <div
+          className="font-mono text-ink-mute tabular"
+          style={{ fontSize: 10, marginTop: 6 }}
+        >
+          {sub}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────
+   TRANSACTION HISTORY (real on-chain events for the active wallet)
+   ────────────────────────────────────────────────────────── */
+function TxHistory() {
+  const { address } = useActiveWallet();
+  const { events, isLoading, isError } = usePositionEvents(address);
+
+  /// Color lanes for the right-side value column.
+  /// - up/down/neutral: borrower flows (borrow = up, repay/liquidated = down,
+  ///   collateral pledge/withdraw = neutral).
+  /// - lp-deposit (brand blue): LP capital entering the yield position.
+  /// - lp-withdraw (amber): LP capital leaving the yield position.
+  /// Two distinct hues keep LP rows visually separated from debt rows even
+  /// though both involve USDG.
+  const COLOR_MAP: Record<
+    "up" | "down" | "neutral" | "lp-deposit" | "lp-withdraw",
+    string
+  > = {
+    up: "var(--up)",
+    down: "var(--down)",
+    neutral: "var(--ink-mute)",
+    "lp-deposit": "var(--brand)",
+    "lp-withdraw": "var(--amber)",
+  };
+
+  return (
+    <div style={{ padding: "20px 24px" }}>
+      <div className="flex justify-between items-baseline" style={{ marginBottom: 12 }}>
+        <div>
+          <div className="eyebrow mb-1">Position transactions</div>
+          <h3
+            className="font-serif font-medium m-0"
+            style={{ fontSize: 16, letterSpacing: "-0.02em" }}
+          >
+            Recent vault activity
+          </h3>
+        </div>
+        <span
+          className="font-mono text-ink-mute"
+          style={{ fontSize: 10 }}
+        >
+          {events.length} event{events.length === 1 ? "" : "s"} · 24h
+        </span>
+      </div>
+
+      {!address && (
+        <div
+          className="font-mono text-ink-mute"
+          style={{ fontSize: 11, padding: "12px 0" }}
+        >
+          Connect wallet to view transaction history.
+        </div>
+      )}
+
+      {address && isLoading && (
+        <div
+          className="font-mono text-ink-mute"
+          style={{ fontSize: 11, padding: "12px 0" }}
+        >
+          Scanning vault history…
+        </div>
+      )}
+
+      {address && isError && (
+        <div
+          className="font-mono"
+          style={{ fontSize: 11, padding: "12px 0", color: "var(--down)" }}
+        >
+          RPC error — couldn&apos;t fetch event history. Auto-retrying.
+        </div>
+      )}
+
+      {address && !isLoading && !isError && events.length === 0 && (
+        <div
+          className="font-mono text-ink-mute"
+          style={{ fontSize: 11, padding: "12px 0" }}
+        >
+          No vault activity in the last 24h for this wallet.
+        </div>
+      )}
+
+      <div>
+        {events.map((e, i) => (
+          <div
+            key={`${e.txHash}-${i}`}
+            className="grid items-center gap-3"
+            style={{
+              gridTemplateColumns: "90px 1fr auto",
+              padding: "10px 0",
+              borderBottom:
+                i < events.length - 1
+                  ? "1px dashed var(--hairline-soft)"
+                  : "none",
+            }}
+          >
+            <span
+              className="font-mono text-ink-mute"
+              style={{ fontSize: 10, letterSpacing: "0.04em" }}
+            >
+              {relativeTime(e.timestamp)}
+            </span>
+            <div>
+              <div className="text-ink" style={{ fontSize: 12, lineHeight: 1.3 }}>
+                {e.label}
+              </div>
+              <div
+                className="font-mono text-ink-mute flex gap-2"
+                style={{ fontSize: 10, marginTop: 2 }}
+              >
+                <a
+                  href={explorerTx(e.txHash)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="no-underline text-ink-mute hover:text-ink"
+                >
+                  {shortAddr(e.txHash, 6, 4)}
+                </a>
+                <span>·</span>
+                <span>blk {e.blockNumber.toString()}</span>
+              </div>
+            </div>
+            <span
+              className="font-mono tabular font-medium"
+              style={{ fontSize: 12, color: COLOR_MAP[e.valueColor] }}
+            >
+              {e.valueDisplay ?? "—"}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/// Compact "5m ago" / "2h ago" / "Yesterday" / "12 May" rendering for the tx
+/// row timestamp. Keeps newest events terse and degrades gracefully for old
+/// ones. Pure function so it doesn't trigger re-renders.
+function relativeTime(d: Date): string {
+  const diff = Date.now() - d.getTime();
+  const min = Math.floor(diff / 60_000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day === 1) return "yesterday";
+  if (day < 7) return `${day}d ago`;
+  return d.toLocaleDateString("en-US", { day: "2-digit", month: "short" });
+}
+
+/* ──────────────────────────────────────────────────────────────
+   HELPERS · Orbit · EmptyState · LegendItem · blended LTV
+   ────────────────────────────────────────────────────────── */
+function EmptyState() {
+  return (
+    <div
+      className="border-b border-hairline flex flex-col items-center text-center"
+      style={{ padding: "48px 32px" }}
+    >
+      <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+        <circle
+          cx="24"
+          cy="24"
+          r="14"
+          stroke="var(--hairline)"
+          strokeWidth="1.4"
+        />
+        <circle
+          cx="24"
+          cy="24"
+          r="22"
+          stroke="var(--hairline-soft)"
+          strokeWidth="1"
+          strokeDasharray="3 4"
+        />
+        <circle cx="24" cy="24" r="6" fill="var(--ink)" />
+      </svg>
+      <div
+        className="font-serif font-medium mt-4"
+        style={{ fontSize: 22, letterSpacing: "-0.02em" }}
+      >
+        No collateral pledged yet.
+      </div>
+      <div
+        className="text-ink-soft mt-2"
+        style={{ fontSize: 13, lineHeight: 1.5, maxWidth: 360 }}
+      >
+        Pledge tokenized stocks via the Pledge page to mint a position. It
+        will appear here as a live orbital constellation with health factor.
+      </div>
+      <Link
+        href="/pledge"
+        className="mt-5 px-4 py-2.5 bg-ink text-paper rounded-[2px] no-underline font-medium"
+        style={{ fontSize: 13 }}
+      >
+        Compose a pledge →
+      </Link>
+    </div>
+  );
+}
+
+function blendedLtv(lines: LiveCollateralLine[]): number {
+  let total = 0,
+    weighted = 0;
+  for (const l of lines) {
+    const stock = findStock(l.sym);
+    total += l.value;
+    weighted += l.value * stock.ltv * 10_000;
+  }
+  return total > 0 ? weighted / total : 7_500;
+}
+// TODO: read per-asset liqLtvBps from vault instead of assuming +800bps
+function blendedLiq(lines: LiveCollateralLine[]): number {
+  return blendedLtv(lines) + 800;
+}
+
+
+function LegendItem({
+  dot,
+  ring,
+  label,
+  desc,
+}: {
+  dot?: string;
+  ring?: boolean;
+  label: string;
+  desc: string;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <div
+        className="rounded-full"
+        style={{
+          width: 10,
+          height: 10,
+          background: ring ? "transparent" : dot,
+          border: ring ? "1.5px solid var(--ink)" : "none",
+        }}
+      />
+      <div>
+        <div className="font-medium" style={{ fontSize: 11 }}>
+          {label}
+        </div>
+        <div
+          className="font-mono text-ink-mute"
+          style={{ fontSize: 9, letterSpacing: "0.04em" }}
+        >
+          {desc}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Orbit({
+  positions,
+  tension,
+  borrowed,
+}: {
+  positions: LiveCollateralLine[];
+  tension: number;
+  borrowed: number;
+}) {
+  const livePrices = useStockPrices();
+  const W = 620,
+    H = 380;
+  const cx = W / 2,
+    cy = H / 2;
+  const sorted = [...positions].sort((a, b) => b.weight - a.weight);
+
+  const { data: block } = useBlockNumber({
+    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
+    watch: true,
+    query: { refetchInterval: 8_000 },
+  });
+
+  return (
+    <div className="mt-4 relative">
+      <svg viewBox={`0 0 ${W} ${H}`} width="100%" className="block">
+        <defs>
+          <radialGradient id="ef-core" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="var(--ink)" stopOpacity="1" />
+            <stop offset="80%" stopColor="var(--ink)" stopOpacity="0.95" />
+            <stop offset="100%" stopColor="var(--ink)" stopOpacity="0.6" />
+          </radialGradient>
+        </defs>
+
+        {[80, 130, 175].map((r, i) => (
+          <circle
+            key={r}
+            cx={cx}
+            cy={cy}
+            r={r}
+            fill="none"
+            stroke="var(--hairline)"
+            strokeWidth="1"
+            strokeDasharray={i === 2 ? "3 4" : "0"}
+          />
+        ))}
+
+        {tension > 0 && (
+          <circle
+            cx={cx}
+            cy={cy}
+            r={175 - tension * 50}
+            fill="none"
+            stroke="var(--down)"
+            strokeWidth="1.2"
+            strokeDasharray="6 4"
+            opacity={0.5 + tension * 0.4}
+          />
+        )}
+
+        {sorted.map((p, i) => {
+          const r = 80 + i * 50;
+          const angle =
+            -Math.PI / 2 + (i / sorted.length) * Math.PI * 1.6 - 0.3;
+          const x = cx + Math.cos(angle) * r;
+          const y = cy + Math.sin(angle) * r;
+          return (
+            <line
+              key={p.sym}
+              x1={cx}
+              y1={cy}
+              x2={x}
+              y2={y}
+              stroke="var(--ink)"
+              strokeWidth="1.4"
+              strokeOpacity={0.4}
+            />
+          );
+        })}
+
+        <g>
+          <circle cx={cx} cy={cy} r="46" fill="url(#ef-core)" />
+          <text
+            x={cx}
+            y={cy - 6}
+            textAnchor="middle"
+            fill="var(--paper)"
+            fontFamily="Source Serif 4"
+            fontSize="14"
+            fontWeight="500"
+            letterSpacing="-0.02em"
+          >
+            ${fmt.abbr(borrowed)}
+          </text>
+          <text
+            x={cx}
+            y={cy + 11}
+            textAnchor="middle"
+            fill="var(--paper)"
+            fontFamily="JetBrains Mono"
+            fontSize="9"
+            opacity="0.7"
+            letterSpacing="0.06em"
+          >
+            USDG
+          </text>
+          <text
+            x={cx}
+            y={cy + 24}
+            textAnchor="middle"
+            fill="var(--paper)"
+            fontFamily="JetBrains Mono"
+            fontSize="8"
+            opacity="0.5"
+            letterSpacing="0.06em"
+          >
+            BORROWED
+          </text>
+          <circle
+            cx={cx}
+            cy={cy}
+            r="46"
+            fill="none"
+            stroke="var(--ink)"
+            strokeWidth="1"
+            style={{
+              transformOrigin: `${cx}px ${cy}px`,
+              animation: "ef-pulse 3.2s ease-out infinite",
+            }}
+          />
+        </g>
+
+        {sorted.map((p, i) => {
+          const r = 80 + i * 50;
+          const angle =
+            -Math.PI / 2 + (i / sorted.length) * Math.PI * 1.6 - 0.3;
+          const x = cx + Math.cos(angle) * r;
+          const y = cy + Math.sin(angle) * r;
+          const bodyR = 22 + p.weight * 28;
+          const stock = STOCKS.find((s) => s.sym === p.sym);
+          const lp = livePrices[p.sym];
+          const up = lp?.isLive ? lp.price >= (stock?.price ?? 0) : true;
+          const period = stock
+            ? (3 + (1 - stock.volatility) * 5).toFixed(1)
+            : "4";
+
+          return (
+            <g key={p.sym}>
+              <g
+                style={{
+                  transformOrigin: `${x}px ${y}px`,
+                  animation: `ef-breathe ${period}s ease-in-out infinite`,
+                }}
+              >
+                <circle
+                  cx={x}
+                  cy={y}
+                  r={bodyR}
+                  fill="var(--paper)"
+                  stroke="var(--ink)"
+                  strokeWidth="1.4"
+                />
+                <circle
+                  cx={x}
+                  cy={y}
+                  r={bodyR - 5}
+                  fill="none"
+                  stroke={up ? "var(--up)" : "var(--down)"}
+                  strokeWidth="1"
+                  strokeDasharray="2 3"
+                  opacity="0.6"
+                />
+              </g>
+              <text
+                x={x}
+                y={y - 2}
+                textAnchor="middle"
+                fontFamily="JetBrains Mono"
+                fontSize="11"
+                fontWeight="600"
+                fill="var(--ink)"
+              >
+                {p.sym}
+              </text>
+              <text
+                x={x}
+                y={y + 11}
+                textAnchor="middle"
+                fontFamily="JetBrains Mono"
+                fontSize="9"
+                fill="var(--ink-mute)"
+              >
+                {fmt.num(p.shares, p.shares < 1 ? 4 : 0)}
+              </text>
+
+              <g>
+                <line
+                  x1={x + bodyR * Math.cos(angle)}
+                  y1={y + bodyR * Math.sin(angle)}
+                  x2={x + (bodyR + 18) * Math.cos(angle)}
+                  y2={y + (bodyR + 18) * Math.sin(angle)}
+                  stroke="var(--ink-mute)"
+                  strokeWidth="0.7"
+                />
+                <text
+                  x={x + (bodyR + 24) * Math.cos(angle)}
+                  y={y + (bodyR + 24) * Math.sin(angle)}
+                  fontFamily="Source Serif 4"
+                  fontSize="12"
+                  fontWeight="500"
+                  fill="var(--ink)"
+                  textAnchor={Math.cos(angle) >= 0 ? "start" : "end"}
+                  letterSpacing="-0.01em"
+                >
+                  ${fmt.abbr(p.value)}
+                </text>
+                {stock && (
+                  <text
+                    x={x + (bodyR + 24) * Math.cos(angle)}
+                    y={y + (bodyR + 24) * Math.sin(angle) + 11}
+                    fontFamily="JetBrains Mono"
+                    fontSize="9"
+                    fill={up ? "var(--up)" : "var(--down)"}
+                    textAnchor={Math.cos(angle) >= 0 ? "start" : "end"}
+                  >
+                    {"—"}
+                  </text>
+                )}
+              </g>
+            </g>
+          );
+        })}
+
+        <g>
+          <text
+            x="16"
+            y="20"
+            fontFamily="JetBrains Mono"
+            fontSize="9"
+            fill="var(--ink-mute)"
+            letterSpacing="0.1em"
+          >
+            EQUIFLOW · POSITION-017
+          </text>
+          <text
+            x={W - 16}
+            y="20"
+            fontFamily="JetBrains Mono"
+            fontSize="9"
+            fill="var(--ink-mute)"
+            letterSpacing="0.1em"
+            textAnchor="end"
+          >
+            ROBINHOOD CHAIN · L3
+          </text>
+          <text
+            x={W - 16}
+            y={H - 12}
+            fontFamily="JetBrains Mono"
+            fontSize="9"
+            fill="var(--ink-mute)"
+            letterSpacing="0.1em"
+            textAnchor="end"
+          >
+            BLOCK {block !== undefined ? block.toLocaleString("en-US") : "—"}
+          </text>
+        </g>
+      </svg>
+    </div>
+  );
+}
+
+/* ──────────────────────────────────────────────────────────────
+   AUTO-DEFENDER · session-key card
+   ────────────────────────────────────────────────────────── */
+function AutoDefenderCard({
+  lines,
+  healthFactor,
+}: {
+  lines: LiveCollateralLine[];
+  healthFactor: number;
+}) {
+  const { address, isSmartWallet } = useActiveWallet();
+  const { smartAccount } = useSmartWallet();
+  const { status, refresh } = useDefenderStatus(address);
+  const [open, setOpen] = useState(false);
+  const [revoking, setRevoking] = useState(false);
+
+  const tokens = useMemo<Address[]>(() => {
+    const out: Address[] = [];
+    for (const l of lines) {
+      const a = STOCK_TOKEN_ADDRESSES[l.sym];
+      if (a) out.push(a);
+    }
+    return out;
+  }, [lines]);
+
+  const active = !!status?.enabled;
+
+  async function handleRevoke() {
+    if (!address || revoking) return;
+    setRevoking(true);
+    try {
+      await revokeSessionKey({
+        smartAccount,
+        smartWalletAddress: address,
+      });
+      await refresh();
+    } finally {
+      setRevoking(false);
+    }
+  }
+
+  return (
+    <section
+      className="border-b border-hairline"
+      style={{ padding: "20px 28px" }}
+    >
+      <div
+        className="bg-paper-alt border border-hairline-soft rounded-[2px] grid items-center"
+        style={{
+          gridTemplateColumns: "auto 1fr auto",
+          padding: "18px 22px",
+          gap: 24,
+        }}
+      >
+        {/* Left: icon + label */}
+        <div className="flex items-center gap-3">
+          <div
+            className="border border-ink rounded-full flex items-center justify-center"
+            style={{
+              width: 38,
+              height: 38,
+              background: active ? "var(--ink)" : "var(--paper)",
+              color: active ? "var(--paper)" : "var(--ink)",
+              fontSize: 18,
+              fontFamily: "JetBrains Mono",
+            }}
+          >
+            ⏻
+          </div>
+          <div>
+            <div className="eyebrow" style={{ marginBottom: 3 }}>
+              Auto-Defender · session key
+            </div>
+            <div
+              className="font-serif font-medium"
+              style={{ fontSize: 17, letterSpacing: "-0.02em" }}
+            >
+              {active ? (
+                <>
+                  Active · keeper authorized to{" "}
+                  <em>repayDebt()</em>
+                </>
+              ) : (
+                <>
+                  Disabled · sleep through{" "}
+                  <em>liquidations</em>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Middle: status detail */}
+        <div className="font-mono" style={{ fontSize: 11, lineHeight: 1.7 }}>
+          {active && status ? (
+            <DefenderStatusLine status={status} healthFactor={healthFactor} />
+          ) : (
+            <span className="text-ink-mute">
+              Pre-authorize the EquiFlow keeper to top up your debt when health
+              drops — bounded by a weekly cap and an expiry date. No popups at
+              3am, no liquidation cascade.
+            </span>
+          )}
+        </div>
+
+        {/* Right: actions */}
+        <div className="flex gap-2">
+          {active ? (
+            <>
+              <button
+                type="button"
+                onClick={handleRevoke}
+                disabled={revoking}
+                className="bg-transparent text-ink border border-hairline rounded-[2px] font-medium disabled:opacity-50"
+                style={{ padding: "8px 14px", fontSize: 12 }}
+              >
+                {revoking ? "Revoking…" : "Revoke"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setOpen(true)}
+                className="bg-ink text-paper rounded-[2px] font-medium"
+                style={{ padding: "8px 14px", fontSize: 12 }}
+              >
+                Re-configure
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setOpen(true)}
+              disabled={!isSmartWallet}
+              className="bg-ink text-paper rounded-[2px] font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{ padding: "8px 14px", fontSize: 12 }}
+              title={
+                !isSmartWallet
+                  ? "Enable Smart wallet mode first"
+                  : "Enable session-key based auto-repay"
+              }
+            >
+              Enable Auto-Defender →
+            </button>
+          )}
+        </div>
+      </div>
+
+      <AutoDefenderModal
+        open={open}
+        onClose={() => setOpen(false)}
+        collateralTokens={tokens}
+        onSuccess={() => {
+          void refresh();
+        }}
+      />
+    </section>
+  );
+}
+
+function DefenderStatusLine({
+  status,
+  healthFactor,
+}: {
+  status: DefenderStatus;
+  healthFactor: number;
+}) {
+  const threshold = status.threshold
+    ? Number(BigInt(status.threshold)) / 1e18
+    : 0;
+  const weeklyLimit = status.weeklyLimit
+    ? Number(BigInt(status.weeklyLimit)) / 1e6
+    : 0;
+  const weekUsed = status.weekUsed
+    ? Number(BigInt(status.weekUsed)) / 1e6
+    : 0;
+  const expires = status.expiresAt
+    ? new Date(status.expiresAt * 1000).toISOString().slice(0, 10)
+    : "—";
+  const armed = healthFactor < threshold;
+  const pct = weeklyLimit > 0 ? Math.min(100, (weekUsed / weeklyLimit) * 100) : 0;
+
+  return (
+    <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
+      <span>
+        <span className="text-ink-mute">Trigger </span>
+        <span
+          className="font-semibold"
+          style={{
+            color: armed ? "var(--down)" : "var(--ink)",
+          }}
+        >
+          HF&lt;{threshold.toFixed(2)}
+        </span>
+        {armed && (
+          <span
+            className="text-down"
+            style={{ marginLeft: 6, letterSpacing: "0.04em", fontSize: 10 }}
+          >
+            · ARMED
+          </span>
+        )}
+      </span>
+      <span>
+        <span className="text-ink-mute">Used </span>
+        <span className="font-semibold tabular">
+          {fmt.usd(weekUsed, 0)} / {fmt.usd(weeklyLimit, 0)}
+        </span>
+        <span
+          className="inline-block align-middle"
+          style={{
+            width: 60,
+            height: 3,
+            background: "var(--hairline-soft)",
+            marginLeft: 8,
+            position: "relative",
+            verticalAlign: "middle",
+          }}
+        >
+          <span
+            style={{
+              position: "absolute",
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: `${pct}%`,
+              background: pct > 80 ? "var(--down)" : "var(--ink)",
+            }}
+          />
+        </span>
+      </span>
+      <span>
+        <span className="text-ink-mute">Expires </span>
+        <span className="font-semibold tabular">{expires}</span>
+      </span>
+      {status.installUserOpHash && (
+        <a
+          href={explorerTx(status.installUserOpHash)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-ink-soft hover:text-ink no-underline"
+          style={{ fontSize: 10 }}
+        >
+          install op {shortAddr(status.installUserOpHash, 8, 6)} ↗
+        </a>
+      )}
+    </div>
+  );
+}
