@@ -4,12 +4,14 @@ pragma solidity ^0.8.24;
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {IPyth} from "@pythnetwork/pyth-sdk-solidity/IPyth.sol";
 import {PythStructs} from "@pythnetwork/pyth-sdk-solidity/PythStructs.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 /// @title  PythPriceAdapter
 /// @notice Wraps a Pyth Network price feed behind the classic
 ///         `AggregatorV3Interface` that EquiFlowVault consumes. One adapter
 ///         per (asset, priceId).
 ///
+///         Only authorized keepers (or the owner) may push price updates.
 ///         Anyone may push a Pyth update via `updatePrice(bytes[] updateData)`.
 ///         The adapter:
 ///           1. Pays the Pyth update fee (`pyth.getUpdateFee` → msg.value).
@@ -22,7 +24,7 @@ import {PythStructs} from "@pythnetwork/pyth-sdk-solidity/PythStructs.sol";
 ///
 ///         Migration to real Pyth on Arbitrum Sepolia is a one-line address
 ///         change at deploy time (`0x4374e5a8b9C22271E9EB878A2AA31DE97DF15DAF`).
-contract PythPriceAdapter is AggregatorV3Interface {
+contract PythPriceAdapter is AggregatorV3Interface, Ownable {
     // ─── Immutables ──────────────────────────────────────────────────────
     IPyth public immutable pyth;
     bytes32 public immutable priceId;
@@ -39,10 +41,32 @@ contract PythPriceAdapter is AggregatorV3Interface {
     int32 private _lastExpo;
     uint64 private _lastConf;
 
+    /// @notice Max allowed price change per update in BPS. 0 = uncapped.
+    uint256 public maxDeviationBps;
+
+    // ─── Keeper whitelist (C-02 fix) ─────────────────────────────────────
+    mapping(address => bool) public authorizedKeepers;
+
+    // ─── Pending refunds (L-06 fix: pull-over-push) ──────────────────────
+    mapping(address => uint256) public pendingRefunds;
+    uint256 public totalPendingRefunds;
+
     event PriceUpdated(int256 priceE8, uint64 publishTime, int32 expo, uint80 round);
+    event KeeperAuthorized(address indexed keeper, bool authorized);
+    event RefundClaimed(address indexed keeper, uint256 amount);
+    event MaxDeviationSet(uint256 oldBps, uint256 newBps);
 
     error PriceIdMismatch(bytes32 expected, bytes32 got);
     error InvalidPrice(int64 raw);
+    error NotAuthorizedKeeper();
+    error ExponentOutOfRange(int32 expo);
+    error PublishTimeTooOld(uint256 publishTime, uint256 blockTimestamp);
+
+    modifier onlyKeeper() {
+        if (msg.sender != owner() && !authorizedKeepers[msg.sender])
+            revert NotAuthorizedKeeper();
+        _;
+    }
 
     /// @param _pyth          Pyth contract (`IPyth`). On RBN this is MockPyth;
     ///                       on Arbitrum Sepolia this is the real Pyth deployment.
@@ -56,8 +80,9 @@ contract PythPriceAdapter is AggregatorV3Interface {
         bytes32 _priceId,
         string memory description_,
         int256 initialPriceE8,
-        uint64 _maxAge
-    ) {
+        uint64 _maxAge,
+        address _owner
+    ) Ownable(_owner) {
         pyth = _pyth;
         priceId = _priceId;
         _description = description_;
@@ -68,16 +93,40 @@ contract PythPriceAdapter is AggregatorV3Interface {
         maxAge = _maxAge;
     }
 
+    // ─── Keeper management ───────────────────────────────────────────────
+    function setKeeper(address keeper, bool authorized) external onlyOwner {
+        authorizedKeepers[keeper] = authorized;
+        emit KeeperAuthorized(keeper, authorized);
+    }
+
+    function setMaxDeviation(uint256 bps) external onlyOwner {
+        maxDeviationBps = bps;
+    }
+
     /// @notice Submit one or more Pyth update payloads and cache the resulting
     ///         price. Pass `[bytes]` from Hermes `/v2/updates/price/latest`.
-    function updatePrice(bytes[] calldata updateData) external payable {
+    function updatePrice(bytes[] calldata updateData) external payable onlyKeeper {
         uint256 fee = pyth.getUpdateFee(updateData);
         pyth.updatePriceFeeds{value: fee}(updateData);
 
         PythStructs.Price memory p = pyth.getPriceNoOlderThan(priceId, maxAge);
         if (p.price <= 0) revert InvalidPrice(p.price);
 
+        // H-01 fix: reject data where publishTime is too old relative to block.timestamp
+        if (block.timestamp > p.publishTime && block.timestamp - p.publishTime > maxAge) {
+            revert PublishTimeTooOld(p.publishTime, block.timestamp);
+        }
+
+        // M-01 fix: bounds check on exponent
+        if (p.expo < -18 || p.expo > 18) revert ExponentOutOfRange(p.expo);
+
         int256 priceE8 = _toE8(p.price, p.expo);
+        if (maxDeviationBps > 0 && _price > 0) {
+            uint256 oldP = uint256(_price);
+            uint256 newP = uint256(priceE8);
+            uint256 deviation = newP > oldP ? newP - oldP : oldP - newP;
+            require(deviation * 10_000 / oldP <= maxDeviationBps, "price deviation too large");
+        }
         _price = priceE8;
         _updatedAt = p.publishTime;
         _lastExpo = p.expo;
@@ -86,15 +135,25 @@ contract PythPriceAdapter is AggregatorV3Interface {
             _round += 1;
         }
 
-        // Refund any unspent native — Pyth `getUpdateFee` returns the exact
-        // fee but callers commonly over-pay to be safe.
+        // L-06 fix: pull-over-push refund pattern
         uint256 remainder = msg.value - fee;
         if (remainder > 0) {
-            (bool ok, ) = msg.sender.call{value: remainder}("");
-            require(ok, "refund failed");
+            pendingRefunds[msg.sender] += remainder;
+            totalPendingRefunds += remainder;
         }
 
         emit PriceUpdated(priceE8, uint64(p.publishTime), p.expo, _round);
+    }
+
+    /// @notice Claim accumulated refunds from overpaid updatePrice calls.
+    function claimRefund() external {
+        uint256 amount = pendingRefunds[msg.sender];
+        if (amount == 0) return;
+        pendingRefunds[msg.sender] = 0;
+        totalPendingRefunds -= amount;
+        (bool ok, ) = msg.sender.call{value: amount}("");
+        require(ok, "refund failed");
+        emit RefundClaimed(msg.sender, amount);
     }
 
     /// @dev Convert Pyth `(price, expo)` to a fixed 1e8 scale.
@@ -104,11 +163,9 @@ contract PythPriceAdapter is AggregatorV3Interface {
     function _toE8(int64 price, int32 expo) internal pure returns (int256) {
         if (expo == -8) return int256(price);
         if (expo < -8) {
-            // expo = -10 → divide by 1e2 to drop two decimal places.
             uint256 div = 10 ** uint32(-expo - 8);
             return int256(price) / int256(div);
         }
-        // expo > -8 (e.g. -5 or even positive): multiply to add scale.
         uint256 mul = 10 ** uint32(expo + 8);
         return int256(price) * int256(mul);
     }
@@ -150,4 +207,14 @@ contract PythPriceAdapter is AggregatorV3Interface {
     function exponent() external view returns (int32) {
         return _lastExpo;
     }
+
+    /// @notice Recover stranded ETH sent directly to the adapter.
+    function recoverEth(address payable to) external onlyOwner {
+        uint256 recoverable = address(this).balance - totalPendingRefunds;
+        require(recoverable > 0, "no recoverable ETH");
+        (bool ok, ) = to.call{value: recoverable}("");
+        require(ok, "transfer failed");
+    }
+
+    receive() external payable {}
 }

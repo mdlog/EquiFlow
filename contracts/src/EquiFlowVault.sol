@@ -5,6 +5,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 
 interface IConfidenceOracle {
@@ -24,7 +25,7 @@ interface IConfidenceOracle {
 ///         (PYUSD-grade regulated stablecoin) gates transferFrom on a registry
 ///         the vault isn't whitelisted in. LP transfers USDG to vault via
 ///         their wallet first, then calls register(amount) to mint shares.
-contract EquiFlowVault is Ownable, ReentrancyGuard {
+contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
     // ─── Constants ───────────────────────────────────────────────────────
@@ -33,8 +34,9 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
     uint256 public constant USD_DECIMALS = 18; // internal USD accounting
     uint256 public constant HEALTH_DECIMALS = 1e18;
     uint256 public constant INDEX_DECIMALS = 1e18;
-    /// @notice Bonus paid to liquidator on liquidation, in BPS of debt repaid.
-    uint256 public constant LIQUIDATION_BONUS_BPS = 500; // 5%
+    uint256 public constant MIN_BORROW_USD = 10e18; // $10 minimum borrow
+    uint256 public constant DEAD_SHARES = 1_000_000; // virtual shares burned on first deposit
+    uint256 public constant MIN_POKE_INTERVAL = 15; // seconds between pokeInterest calls
     uint256 public constant SECONDS_PER_YEAR = 365 days;
     /// @notice Hard ceiling so misconfig can't insta-balloon debt.
     uint256 public constant MAX_BORROW_RATE_BPS = 5_000; // 50% APR
@@ -94,6 +96,23 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
     /// @notice Recipient of protocol reserves on claim.
     address public treasury;
 
+    // ── Liquidation bonus ──
+    uint256 public liquidationBonusBps = 500; // 5%, configurable
+
+    uint256 public closeFactorBps = 5_000; // 50% — only repay up to half the debt per liquidation
+    uint256 public constant CRITICAL_HF = 5e17; // HF < 0.5 allows full liquidation
+
+    // ── Interest poke limiter ──
+    uint256 public lastPokedAt;
+
+    // ── LP deposit intent (anti front-run) ──
+    struct DepositIntent {
+        uint256 amount;
+        uint256 deadline;
+    }
+    mapping(address => DepositIntent) public depositIntents;
+    uint256 public constant DEPOSIT_INTENT_TTL = 10 minutes;
+
     // ── Oracle confidence circuit-breaker ──
     /// @notice Per-asset max confidence-interval width as fraction of price (BPS).
     ///         0 = uncapped (no check). E.g. 150 = conf must be < 1.5% of price.
@@ -105,6 +124,9 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
     mapping(address token => uint256) public borrowCapUsd;
     /// @notice Running total of borrows attributed to each token. 1e18 USD.
     mapping(address token => uint256) public totalBorrowedByAsset;
+
+    /// @notice Cached token decimals, set during listAsset.
+    mapping(address token => uint8) public tokenDecimals;
 
     // ─── Events ──────────────────────────────────────────────────────────
     event AssetListed(
@@ -143,6 +165,11 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
     event ReservesClaimed(address indexed to, uint256 usdgAmount, uint256 usdValue);
     event MaxConfidenceWidthSet(address indexed token, uint64 oldBps, uint64 newBps);
     event BorrowCapSet(address indexed token, uint256 oldCap, uint256 newCap);
+    event BorrowCapReleased(address indexed token, uint256 released, uint256 remaining);
+    event LiquidationBonusSet(uint256 oldBps, uint256 newBps);
+    event CloseFactorSet(uint256 oldBps, uint256 newBps);
+    event DepositIntentCreated(address indexed lp, uint256 amount, uint256 deadline);
+    event DepositIntentCancelled(address indexed lp);
     /// @notice ERC4626 standard deposit event (mirrors LpDeposited; emitted alongside).
     event Deposit(
         address indexed sender,
@@ -177,6 +204,11 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
     error ZeroAddress();
     error OracleConfidenceTooWide(uint64 actualBps, uint64 maxBps);
     error BorrowCapExceeded(address token, uint256 wouldTotal, uint256 cap);
+    error BorrowTooSmall(uint256 amount, uint256 minimum);
+    error PokeTooFrequent();
+    error NoDepositIntent();
+    error DepositIntentExpired();
+    error DepositIntentAmountMismatch(uint256 intended, uint256 requested);
 
     // ─── Constructor ─────────────────────────────────────────────────────
     constructor(
@@ -224,6 +256,7 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
             enabled: true
         });
         if (isNew) assetList.push(token);
+        tokenDecimals[token] = _queryDecimals(token);
         emit AssetListed(token, priceFeed, ltvBps, liqThresholdBps, staleAfter);
     }
 
@@ -275,6 +308,28 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
         emit BorrowCapSet(token, old, capUsd);
     }
 
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+    }
+
+    function setLiquidationBonus(uint256 newBps) external onlyOwner {
+        require(newBps <= 2_000, "bonus>20%");
+        uint256 old = liquidationBonusBps;
+        liquidationBonusBps = newBps;
+        emit LiquidationBonusSet(old, newBps);
+    }
+
+    function setCloseFactor(uint256 newBps) external onlyOwner {
+        require(newBps > 0 && newBps <= BPS, "bad close factor");
+        uint256 old = closeFactorBps;
+        closeFactorBps = newBps;
+        emit CloseFactorSet(old, newBps);
+    }
+
     /// @notice Treasury claims accumulated protocol reserves. Pays out in USDG
     ///         from the vault's idle balance. Cannot drain LP share-backed
     ///         liquidity below outstanding borrows.
@@ -293,6 +348,18 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
         emit ReservesClaimed(treasury, amountUsdg, amountUsd);
     }
 
+    /// @notice Zero out totalBorrowedUsd when no individual debts remain.
+    ///         Cleans up rounding dust from compound index divergence.
+    function sweepBorrowDust() external onlyOwner {
+        _accrueInterest();
+        require(totalBorrowedUsd < 1e18, "debt > $1 dust");
+        totalBorrowedUsd = 0;
+        uint256 n = assetList.length;
+        for (uint256 i; i < n; ++i) {
+            totalBorrowedByAsset[assetList[i]] = 0;
+        }
+    }
+
     /// @notice Emergency owner withdraw — bypasses LP shares. Use only to
     ///         migrate liquidity or recover stranded USDG. Cannot drop the
     ///         vault below outstanding borrows.
@@ -301,22 +368,49 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
         uint256 reserves = usdc.balanceOf(address(this));
         uint256 borrowedUsdc = _usdToUsdc(totalBorrowedUsd);
         require(reserves >= borrowedUsdc + amount, "would deplete");
-        // bookedUsdg tracks LP capital; reduce it proportionally if we touch it
-        if (amount > bookedUsdg) bookedUsdg = 0;
-        else bookedUsdg -= amount;
+        require(amount <= bookedUsdg, "exceeds booked");
+        bookedUsdg -= amount;
         usdc.safeTransfer(to, amount);
     }
 
     // ─── LP actions ──────────────────────────────────────────────────────
-    /// @notice Step 2 of LP deposit. LP must have already transferred at least
-    ///         `amount` USDG to this vault via usdc.transfer() in a separate
-    ///         tx. This function verifies the delta and mints shares.
+
+    /// @notice Step 1 of LP deposit: announce intent to deposit. Creates a
+    ///         time-limited commitment that must be fulfilled via register().
+    ///         This makes front-running observable — competing intents for the
+    ///         same amount are visible on-chain before any USDG is transferred.
+    function announceDeposit(uint256 amount) external whenNotPaused {
+        if (amount == 0) revert AmountZero();
+        uint256 deadline = block.timestamp + DEPOSIT_INTENT_TTL;
+        depositIntents[msg.sender] = DepositIntent({amount: amount, deadline: deadline});
+        emit DepositIntentCreated(msg.sender, amount, deadline);
+    }
+
+    /// @notice Cancel a pending deposit intent.
+    function cancelDeposit() external {
+        delete depositIntents[msg.sender];
+        emit DepositIntentCancelled(msg.sender);
+    }
+
+    /// @notice Step 3 of LP deposit (after announceDeposit + USDG transfer).
+    ///         Verifies the caller's intent, checks the vault balance delta,
+    ///         and mints LP shares. Intent must not be expired.
     ///
-    ///         Why two-step: USDG transferFrom is gated on a registry the
+    ///         Flow: announceDeposit(amount) → usdc.transfer(vault, amount)
+    ///               → register(amount)
+    ///
+    ///         Why three-step: USDG transferFrom is gated on a registry the
     ///         vault isn't whitelisted in. transfer() from EOAs is allowed.
-    function register(uint256 amount) external nonReentrant {
+    ///         The announce step makes front-running detectable.
+    function register(uint256 amount) external nonReentrant whenNotPaused {
         _accrueInterest();
         if (amount == 0) revert AmountZero();
+
+        DepositIntent memory intent = depositIntents[msg.sender];
+        if (intent.amount == 0) revert NoDepositIntent();
+        if (block.timestamp > intent.deadline) revert DepositIntentExpired();
+        if (intent.amount < amount) revert DepositIntentAmountMismatch(intent.amount, amount);
+        delete depositIntents[msg.sender];
 
         uint256 actualBalance = usdc.balanceOf(address(this));
         uint256 delta = actualBalance > bookedUsdg ? actualBalance - bookedUsdg : 0;
@@ -325,12 +419,18 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
         uint256 totalUsd = totalAssetsUsd();
         uint256 amountUsd = _usdcToUsd(amount);
 
-        // First depositor sets the 1:1 share/USD ratio. Subsequent deposits get
-        // shares proportional to their share of total assets (which includes
-        // accrued interest on outstanding borrows).
-        uint256 shares = totalShares == 0
-            ? amountUsd
-            : (amountUsd * totalShares) / totalUsd;
+        uint256 shares;
+        if (totalShares == 0) {
+            shares = amountUsd;
+            // Burn dead shares to address(1) to prevent share inflation attack.
+            // This makes the cost of the attack proportional to DEAD_SHARES.
+            sharesOf[address(1)] += DEAD_SHARES;
+            totalShares += DEAD_SHARES;
+        } else {
+            require(totalUsd > 0, "vault empty");
+            shares = (amountUsd * totalShares) / totalUsd;
+        }
+        require(shares > 0, "deposit too small");
 
         sharesOf[msg.sender] += shares;
         totalShares += shares;
@@ -343,7 +443,7 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
     /// @notice Burn `shares` LP tokens and receive proportional USDG out.
     ///         Reverts if vault doesn't have enough idle USDG (i.e. too much
     ///         lent out). Borrowers must repay to free up withdrawals.
-    function withdrawLp(uint256 shares) external nonReentrant {
+    function withdrawLp(uint256 shares) external nonReentrant whenNotPaused {
         _accrueInterest();
         if (shares == 0) revert AmountZero();
         if (sharesOf[msg.sender] < shares) revert InsufficientShares();
@@ -366,6 +466,8 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
     /// @notice Anyone can ping accrual to refresh totalBorrowedUsd / borrowIndex.
     ///         Useful for view-only displays before mutations.
     function pokeInterest() external {
+        if (block.timestamp - lastPokedAt < MIN_POKE_INTERVAL) revert PokeTooFrequent();
+        lastPokedAt = block.timestamp;
         _accrueInterest();
     }
 
@@ -376,7 +478,7 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
         address token,
         uint256 amount,
         uint256 borrowUsd
-    ) external nonReentrant {
+    ) external nonReentrant whenNotPaused {
         _accrueInterest();
         Asset memory a = assets[token];
         if (!a.enabled) revert AssetNotEnabled();
@@ -386,11 +488,12 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
         _snapshotUserDebt(msg.sender);
 
         if (amount > 0) {
-            collateral[msg.sender][token] += amount;
             IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+            collateral[msg.sender][token] += amount;
         }
 
         if (borrowUsd > 0) {
+            if (borrowUsd < MIN_BORROW_USD) revert BorrowTooSmall(borrowUsd, MIN_BORROW_USD);
             _enforceConfidence(token);
 
             positions[msg.sender].borrowed += borrowUsd;
@@ -419,7 +522,7 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
         Position storage p = positions[msg.sender];
         if (p.borrowed == 0) revert NotBorrower();
         if (amountUsd > p.borrowed) amountUsd = p.borrowed;
-        uint256 usdcIn = _usdToUsdc(amountUsd);
+        uint256 usdcIn = _usdToUsdcCeil(amountUsd);
         p.borrowed -= amountUsd;
         totalBorrowedUsd -= amountUsd;
         _releaseAssetBorrows(msg.sender, amountUsd);
@@ -434,7 +537,7 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
 
         uint256 d = positions[msg.sender].borrowed;
         if (d == 0) revert NotBorrower();
-        uint256 usdcIn = _usdToUsdc(d);
+        uint256 usdcIn = _usdToUsdcCeil(d);
         positions[msg.sender].borrowed = 0;
         totalBorrowedUsd -= d;
         _releaseAssetBorrows(msg.sender, d);
@@ -470,12 +573,19 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
         if (debtUsdToRepay == 0) revert AmountZero();
         if (isHealthy(user)) revert PositionHealthy();
         if (collateral[user][token] == 0) revert InsufficientCollateral();
+        require(msg.sender != user, "no self-liquidation");
 
         Position storage p = positions[user];
         if (debtUsdToRepay > p.borrowed) debtUsdToRepay = p.borrowed;
 
-        // Compute collateral to seize: debt × (1 + bonus) / price
-        uint256 seizeUsd = (debtUsdToRepay * (BPS + LIQUIDATION_BONUS_BPS)) / BPS;
+        // Close factor: limit repayment to closeFactorBps of debt unless critically underwater
+        uint256 hf = healthFactor(user);
+        if (hf >= CRITICAL_HF) {
+            uint256 maxRepay = (p.borrowed * closeFactorBps) / BPS;
+            if (debtUsdToRepay > maxRepay) debtUsdToRepay = maxRepay;
+        }
+
+        uint256 seizeUsd = (debtUsdToRepay * (BPS + liquidationBonusBps)) / BPS;
         uint256 price = _price(token); // 1e8
         uint8 tokenDec = _tokenDecimals(token);
         uint256 tokenAmount = (seizeUsd * (10 ** tokenDec)) / (price * 1e10);
@@ -483,7 +593,7 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
         if (tokenAmount > collateral[user][token]) {
             tokenAmount = collateral[user][token];
             uint256 maxSeizeUsd = (tokenAmount * price * 1e10) / (10 ** tokenDec);
-            debtUsdToRepay = (maxSeizeUsd * BPS) / (BPS + LIQUIDATION_BONUS_BPS);
+            debtUsdToRepay = (maxSeizeUsd * BPS) / (BPS + liquidationBonusBps);
         }
 
         p.borrowed -= debtUsdToRepay;
@@ -605,7 +715,7 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
         if (p.borrowed == 0) return 0;
         uint256 snap = borrowSnapshotIndex[user];
         uint256 idx = _projectedBorrowIndex();
-        if (snap == 0) return p.borrowed;
+        if (snap == 0) return (p.borrowed * idx) / INDEX_DECIMALS;
         return (p.borrowed * idx) / snap;
     }
 
@@ -768,17 +878,23 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
     ///      repays or is liquidated. Attributes repayment across collateral
     ///      tokens weighted by their USD share of the user's total collateral.
     function _releaseAssetBorrows(address user, uint256 repaidUsd) internal {
-        uint256 totalColl = collateralValueUsd(user);
         uint256 n = assetList.length;
+        if (n == 0) return;
+
+        uint256 totalColl = _safeCollateralValueUsd(user);
         if (totalColl == 0) {
-            // User has no collateral left — distribute evenly across tokens
-            // that still have tracked borrows.
+            uint256 activeCount;
+            for (uint256 i; i < n; ++i) {
+                if (totalBorrowedByAsset[assetList[i]] > 0) activeCount++;
+            }
+            if (activeCount == 0) return;
             for (uint256 i; i < n; ++i) {
                 address t = assetList[i];
                 if (totalBorrowedByAsset[t] == 0) continue;
-                uint256 release = repaidUsd / n;
+                uint256 release = repaidUsd / activeCount;
                 if (release > totalBorrowedByAsset[t]) release = totalBorrowedByAsset[t];
                 totalBorrowedByAsset[t] -= release;
+                emit BorrowCapReleased(t, release, totalBorrowedByAsset[t]);
             }
             return;
         }
@@ -786,12 +902,43 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
             address t = assetList[i];
             uint256 amt = collateral[user][t];
             if (amt == 0) continue;
-            uint256 price = _price(t);
+            uint256 price = _safePriceOrZero(t);
+            if (price == 0) continue;
             uint8 dec = _tokenDecimals(t);
             uint256 valUsd = (amt * price * 1e10) / (10 ** dec);
             uint256 release = (repaidUsd * valUsd) / totalColl;
             if (release > totalBorrowedByAsset[t]) release = totalBorrowedByAsset[t];
             totalBorrowedByAsset[t] -= release;
+            emit BorrowCapReleased(t, release, totalBorrowedByAsset[t]);
+        }
+    }
+
+    /// @dev Same as collateralValueUsd but skips assets with stale/invalid prices
+    ///      instead of reverting. Used only in _releaseAssetBorrows.
+    function _safeCollateralValueUsd(address user) internal view returns (uint256 total) {
+        uint256 n = assetList.length;
+        for (uint256 i; i < n; ++i) {
+            address t = assetList[i];
+            uint256 amt = collateral[user][t];
+            if (amt == 0) continue;
+            uint256 price = _safePriceOrZero(t);
+            if (price == 0) continue;
+            uint8 dec = _tokenDecimals(t);
+            total += (amt * price * 1e10) / (10 ** dec);
+        }
+    }
+
+    /// @dev Returns price or 0 if feed is stale/invalid. Never reverts.
+    function _safePriceOrZero(address token) internal view returns (uint256) {
+        Asset memory a = assets[token];
+        try a.priceFeed.latestRoundData() returns (
+            uint80, int256 answer, uint256, uint256 updatedAt, uint80
+        ) {
+            if (answer <= 0) return 0;
+            if (block.timestamp - updatedAt > a.staleAfter) return 0;
+            return uint256(answer);
+        } catch {
+            return 0;
         }
     }
 
@@ -805,7 +952,7 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
         if (ltv > cap) revert ExceedsLtv(ltv, cap);
     }
 
-    /// @dev Linear simple-interest accrual. dt × rate / year. Bumps both the
+    /// @dev Discrete compound interest accrual via multiplicative index. Bumps both the
     ///      global index and `totalBorrowedUsd`. A configurable `reserveFactor`
     ///      slice routes to protocol reserves; the rest accretes to LP share
     ///      value (implicit via `totalAssetsUsd() = base - protocolReserves`).
@@ -867,13 +1014,23 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
 
     function _price(address token) internal view returns (uint256) {
         Asset memory a = assets[token];
-        (, int256 answer, , uint256 updatedAt, ) = a.priceFeed.latestRoundData();
+        (uint80 roundId, int256 answer, , uint256 updatedAt, uint80 answeredInRound) =
+            a.priceFeed.latestRoundData();
+        if (roundId == 0) revert InvalidPrice();
         if (answer <= 0) revert InvalidPrice();
+        if (updatedAt == 0) revert StalePrice();
+        if (answeredInRound < roundId) revert StalePrice();
         if (block.timestamp - updatedAt > a.staleAfter) revert StalePrice();
         return uint256(answer);
     }
 
     function _tokenDecimals(address token) internal view returns (uint8) {
+        uint8 cached = tokenDecimals[token];
+        if (cached > 0) return cached;
+        return _queryDecimals(token);
+    }
+
+    function _queryDecimals(address token) internal view returns (uint8) {
         (bool ok, bytes memory ret) = token.staticcall(
             abi.encodeWithSignature("decimals()")
         );
@@ -885,6 +1042,12 @@ contract EquiFlowVault is Ownable, ReentrancyGuard {
         // amountUsd is 1e18; output in usdcDecimals
         if (usdcDecimals >= 18) return amountUsd * (10 ** (usdcDecimals - 18));
         return amountUsd / (10 ** (18 - usdcDecimals));
+    }
+
+    function _usdToUsdcCeil(uint256 amountUsd) internal view returns (uint256) {
+        if (usdcDecimals >= 18) return amountUsd * (10 ** (usdcDecimals - 18));
+        uint256 divisor = 10 ** (18 - usdcDecimals);
+        return (amountUsd + divisor - 1) / divisor;
     }
 
     function _usdcToUsd(uint256 amountUsdc) internal view returns (uint256) {

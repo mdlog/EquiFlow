@@ -184,8 +184,10 @@ contract DeployScript is Script {
                 priceId,
                 string.concat(s.symbol, "/USD"),
                 s.initialPriceE8,
-                1 hours
+                1 hours,
+                deployer
             );
+            adapter.setKeeper(deployer, true);
             console2.log(string.concat("PythAdapter ", s.symbol, ":"), address(adapter));
 
             vault.listAsset(
@@ -213,6 +215,7 @@ contract DeployScript is Script {
             // For mock USDC: transfer then register (no transferFrom gating).
             uint256 raw = initLiq * 10 ** usdcDec;
             MockUSDC(usdcAddr).mint(deployer, raw);
+            vault.announceDeposit(raw);
             IERC20(usdcAddr).transfer(address(vault), raw);
             vault.register(raw);
             console2.log("Seeded liquidity (MockUSDC, registered):", initLiq);

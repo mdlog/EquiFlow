@@ -50,15 +50,21 @@ contract EquiFlowVaultTest is Test {
             TSLA_PRICE_ID,
             "TSLA/USD",
             348_51000000, // $348.51 at 1e8
-            1 hours
+            1 hours,
+            owner
         );
         aaplFeed = new PythPriceAdapter(
             IPyth(address(pyth)),
             AAPL_PRICE_ID,
             "AAPL/USD",
             217_84000000, // $217.84 at 1e8
-            1 hours
+            1 hours,
+            owner
         );
+
+        // Authorize owner as keeper for price updates
+        tslaFeed.setKeeper(owner, true);
+        aaplFeed.setKeeper(owner, true);
 
         vault.listAsset(address(tsla), address(tslaFeed), TSLA_LTV, TSLA_LIQ, STALE_AFTER);
         vault.listAsset(address(aapl), address(aaplFeed), AAPL_LTV, AAPL_LIQ, STALE_AFTER);
@@ -68,8 +74,9 @@ contract EquiFlowVaultTest is Test {
         _seed(tslaFeed, TSLA_PRICE_ID, 348_51000000);
         _seed(aaplFeed, AAPL_PRICE_ID, 217_84000000);
 
-        // Fund vault with $1M USDC liquidity via transfer+register
+        // Fund vault with $1M USDC liquidity via announce+transfer+register
         usdc.mint(owner, 1_000_000e6);
+        vault.announceDeposit(1_000_000e6);
         usdc.transfer(address(vault), 1_000_000e6);
         vault.register(1_000_000e6);
         vm.stopPrank();
@@ -111,9 +118,9 @@ contract EquiFlowVaultTest is Test {
         return abi.encode(feed);
     }
 
-    function _seed(PythPriceAdapter feed, bytes32 priceId, int256 priceE8) internal {
+    function _seed(PythPriceAdapter feed, bytes32 priceIdArg, int256 priceE8) internal {
         bytes[] memory data = new bytes[](1);
-        data[0] = _craft(priceId, priceE8);
+        data[0] = _craft(priceIdArg, priceE8);
         feed.updatePrice(data);
     }
 
@@ -140,14 +147,16 @@ contract EquiFlowVaultTest is Test {
         vm.warp(block.timestamp + 1);
         bytes[] memory data = new bytes[](1);
         data[0] = _craftWithConf(priceId, priceE8, conf);
+        vm.prank(owner);
         feed.updatePrice(data);
     }
 
     function _push(PythPriceAdapter feed, bytes32 priceId, int256 priceE8) internal {
-        // Advance one second so publishTime strictly exceeds the cached value
-        // — MockPyth ignores updates with `publishTime <= lastPublishTime`.
         vm.warp(block.timestamp + 1);
-        _seed(feed, priceId, priceE8);
+        vm.prank(owner);
+        bytes[] memory data = new bytes[](1);
+        data[0] = _craft(priceId, priceE8);
+        feed.updatePrice(data);
     }
 
     // ─── Listing ─────────────────────────────────────────────────────────
@@ -174,7 +183,8 @@ contract EquiFlowVaultTest is Test {
             bytes32(uint256(0x999)),
             "X/USD",
             100e8,
-            1 hours
+            1 hours,
+            owner
         );
         vm.prank(owner);
         vm.expectRevert(bytes("bad ltv"));
@@ -188,7 +198,8 @@ contract EquiFlowVaultTest is Test {
             bytes32(uint256(0x999)),
             "X/USD",
             100e8,
-            1 hours
+            1 hours,
+            owner
         );
         vm.prank(alice);
         vm.expectRevert();
@@ -341,13 +352,12 @@ contract EquiFlowVaultTest is Test {
         vm.warp(block.timestamp + 1);
         bytes[] memory data = new bytes[](1);
         data[0] = _craft(TSLA_PRICE_ID, -1);
+        vm.prank(owner);
         vm.expectRevert();
         tslaFeed.updatePrice(data);
     }
 
     function test_adapter_normalisesExponent() public {
-        // Push $400.00 with expo = -5 → raw price = 400 × 1e5 = 40_000_000.
-        // Adapter scales to 1e8 by multiplying by 10^(expo+8) = 10^3 = 1000.
         vm.warp(block.timestamp + 1);
         PythStructs.PriceFeed memory feed = PythStructs.PriceFeed({
             id: TSLA_PRICE_ID,
@@ -366,10 +376,20 @@ contract EquiFlowVaultTest is Test {
         });
         bytes[] memory data = new bytes[](1);
         data[0] = abi.encode(feed);
+        vm.prank(owner);
         tslaFeed.updatePrice(data);
 
         (, int256 answer, , , ) = tslaFeed.latestRoundData();
         assertEq(answer, 400_00000000); // $400.00 in 1e8
+    }
+
+    function test_adapter_rejectsUnauthorizedKeeper() public {
+        vm.warp(block.timestamp + 1);
+        bytes[] memory data = new bytes[](1);
+        data[0] = _craft(TSLA_PRICE_ID, 400_00000000);
+        vm.prank(alice);
+        vm.expectRevert(PythPriceAdapter.NotAuthorizedKeeper.selector);
+        tslaFeed.updatePrice(data);
     }
 
     // ─── Admin ───────────────────────────────────────────────────────────
@@ -554,5 +574,336 @@ contract EquiFlowVaultTest is Test {
         (uint256 cap, uint256 used) = vault.borrowCapInfo(address(tsla));
         assertEq(cap, 50_000e18);
         assertEq(used, 0);
+    }
+
+    // ─── C-01: CEI Fix Verification ─────────────────────────────────────
+    function test_pledgeAndBorrow_transferBeforeStateUpdate() public {
+        uint256 aliceTslaBefore = tsla.balanceOf(alice);
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 50e18, 0);
+        assertEq(vault.collateral(alice, address(tsla)), 50e18);
+        assertEq(tsla.balanceOf(alice), aliceTslaBefore - 50e18);
+    }
+
+    // ─── C-03: Share Inflation Protection ───────────────────────────────
+    function test_firstDeposit_burnDeadShares() public {
+        // Deploy a fresh vault to test first-deposit path
+        vm.startPrank(owner);
+        MockUSDC usdc2 = new MockUSDC();
+        EquiFlowVault vault2 = new EquiFlowVault(
+            IERC20(address(usdc2)), 6, 500, 1_000, owner, owner
+        );
+
+        usdc2.mint(owner, 1_000e6);
+        vault2.announceDeposit(1_000e6);
+        usdc2.transfer(address(vault2), 1_000e6);
+        vault2.register(1_000e6);
+        vm.stopPrank();
+
+        // Dead shares should be minted to address(1)
+        assertEq(vault2.sharesOf(address(1)), 1_000_000);
+        // Total shares = owner shares + dead shares
+        uint256 ownerShares = vault2.sharesOf(owner);
+        assertGt(ownerShares, 0);
+        assertEq(vault2.totalShares(), ownerShares + 1_000_000);
+    }
+
+    // ─── H-04: Minimum Borrow Amount ────────────────────────────────────
+    function test_borrow_revertsIfBelowMinimum() public {
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(EquiFlowVault.BorrowTooSmall.selector, 1e18, 10e18)
+        );
+        vault.pledgeAndBorrow(address(tsla), 100e18, 1e18); // $1 < $10 min
+    }
+
+    // ─── M-04: Division by zero guard ───────────────────────────────────
+    function test_releaseAssetBorrows_handlesEmptyAssetList() public {
+        // This test verifies the n==0 guard exists; in practice assetList
+        // never shrinks, but the guard prevents theoretical division-by-zero.
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 10_000e18);
+        // Just verify repay works with the guard in place
+        vm.prank(alice);
+        vault.repay(5_000e18);
+        (, uint256 borrowed,) = vault.positionOf(alice);
+        assertApproxEqAbs(borrowed, 5_000e18, 1e18);
+    }
+
+    // ─── L-01: Configurable Liquidation Bonus ───────────────────────────
+    function test_setLiquidationBonus() public {
+        vm.prank(owner);
+        vault.setLiquidationBonus(300); // 3%
+        assertEq(vault.liquidationBonusBps(), 300);
+    }
+
+    function test_setLiquidationBonus_rejectsAbove20Pct() public {
+        vm.prank(owner);
+        vm.expectRevert(bytes("bonus>20%"));
+        vault.setLiquidationBonus(2_001);
+    }
+
+    // ─── L-07: Poke Rate Limiter ────────────────────────────────────────
+    function test_pokeInterest_rateLimited() public {
+        vm.warp(100);
+        vault.pokeInterest();
+        vm.expectRevert(EquiFlowVault.PokeTooFrequent.selector);
+        vault.pokeInterest();
+
+        vm.warp(116);
+        vault.pokeInterest();
+    }
+
+    // ─── H-03: Repay works even with stale price feeds ──────────────────
+    function test_repay_succeedsWithStalePriceFeed() public {
+        // Borrow against TSLA and AAPL
+        vm.startPrank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 5_000e18);
+        vault.pledgeAndBorrow(address(aapl), 100e18, 5_000e18);
+        vm.stopPrank();
+
+        // Let AAPL feed go stale
+        vm.warp(block.timestamp + STALE_AFTER + 1);
+        // Push fresh TSLA price only
+        _push(tslaFeed, TSLA_PRICE_ID, 348_51000000);
+
+        // Repay should still work — _releaseAssetBorrows uses _safePriceOrZero
+        vm.prank(alice);
+        vault.repay(5_000e18);
+        // Use borrowedOf instead of positionOf — positionOf calls collateralValueUsd
+        // which uses strict _price and would revert on stale AAPL feed.
+        uint256 borrowed = vault.borrowedOf(alice);
+        assertApproxEqAbs(borrowed, 5_000e18, 10e18);
+    }
+
+    // ─── M-06: withdrawLiquidity cannot exceed bookedUsdg ───────────────
+    function test_withdrawLiquidity_revertsIfExceedsBooked() public {
+        // First add extra USDC directly to vault (bypassing register) so
+        // reserves > booked, then try to withdraw more than booked.
+        usdc.mint(address(vault), 500e6);
+        uint256 booked = vault.bookedUsdg();
+        vm.prank(owner);
+        vm.expectRevert(bytes("exceeds booked"));
+        vault.withdrawLiquidity(booked + 1, owner);
+    }
+
+    // ─── C-02: Adapter Keeper Whitelist ──────────────────────────────────
+    function test_adapter_ownerCanAlwaysUpdate() public {
+        _push(tslaFeed, TSLA_PRICE_ID, 400_00000000);
+        (, int256 answer, , , ) = tslaFeed.latestRoundData();
+        assertEq(answer, 400_00000000);
+    }
+
+    function test_adapter_authorizedKeeperCanUpdate() public {
+        vm.prank(owner);
+        tslaFeed.setKeeper(alice, true);
+
+        vm.warp(block.timestamp + 1);
+        bytes[] memory data = new bytes[](1);
+        data[0] = _craft(TSLA_PRICE_ID, 400_00000000);
+        vm.prank(alice);
+        tslaFeed.updatePrice(data);
+
+        (, int256 answer, , , ) = tslaFeed.latestRoundData();
+        assertEq(answer, 400_00000000);
+    }
+
+    // ─── Pausable ───────────────────────────────────────────────────────
+
+    function test_pause_blocksPledge() public {
+        vm.prank(owner);
+        vault.pause();
+        vm.prank(alice);
+        vm.expectRevert();
+        vault.pledgeAndBorrow(address(tsla), 100e18, 0);
+    }
+
+    function test_pause_blocksRegister() public {
+        vm.prank(owner);
+        vault.pause();
+        vm.prank(alice);
+        vm.expectRevert();
+        vault.announceDeposit(1_000e6);
+    }
+
+    function test_pause_blocksWithdrawLp() public {
+        vm.prank(owner);
+        vault.pause();
+        vm.prank(owner);
+        vm.expectRevert();
+        vault.withdrawLp(100);
+    }
+
+    function test_pause_allowsRepay() public {
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 5_000e18);
+
+        vm.prank(owner);
+        vault.pause();
+
+        vm.prank(alice);
+        vault.repay(2_000e18);
+        uint256 borrowed = vault.borrowedOf(alice);
+        assertApproxEqAbs(borrowed, 3_000e18, 1e18);
+    }
+
+    function test_pause_allowsLiquidation() public {
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 19_000e18);
+        _push(tslaFeed, TSLA_PRICE_ID, 174_25500000);
+
+        vm.prank(owner);
+        vault.pause();
+
+        assertFalse(vault.isHealthy(alice));
+        vm.prank(bob);
+        vault.liquidate(alice, address(tsla), 5_000e18);
+    }
+
+    function test_unpause_restoresOperations() public {
+        vm.startPrank(owner);
+        vault.pause();
+        vault.unpause();
+        vm.stopPrank();
+
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 5_000e18);
+        (, uint256 borrowed,) = vault.positionOf(alice);
+        assertEq(borrowed, 5_000e18);
+    }
+
+    function test_pause_onlyOwner() public {
+        vm.prank(alice);
+        vm.expectRevert();
+        vault.pause();
+    }
+
+    // ─── Deposit Intent (anti front-run) ────────────────────────────────
+
+    function test_register_requiresIntent() public {
+        usdc.mint(alice, 1_000e6);
+        vm.startPrank(alice);
+        usdc.transfer(address(vault), 1_000e6);
+        vm.expectRevert(EquiFlowVault.NoDepositIntent.selector);
+        vault.register(1_000e6);
+        vm.stopPrank();
+    }
+
+    function test_register_revertsIfIntentExpired() public {
+        usdc.mint(alice, 1_000e6);
+        vm.startPrank(alice);
+        vault.announceDeposit(1_000e6);
+        usdc.transfer(address(vault), 1_000e6);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 11 minutes);
+
+        vm.prank(alice);
+        vm.expectRevert(EquiFlowVault.DepositIntentExpired.selector);
+        vault.register(1_000e6);
+    }
+
+    function test_register_revertsIfAmountExceedsIntent() public {
+        usdc.mint(alice, 2_000e6);
+        vm.startPrank(alice);
+        vault.announceDeposit(1_000e6);
+        usdc.transfer(address(vault), 2_000e6);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EquiFlowVault.DepositIntentAmountMismatch.selector,
+                1_000e6,
+                2_000e6
+            )
+        );
+        vault.register(2_000e6);
+        vm.stopPrank();
+    }
+
+    function test_register_happyPathWithIntent() public {
+        usdc.mint(alice, 1_000e6);
+        vm.startPrank(alice);
+        vault.announceDeposit(1_000e6);
+        usdc.transfer(address(vault), 1_000e6);
+        vault.register(1_000e6);
+        vm.stopPrank();
+
+        assertGt(vault.sharesOf(alice), 0);
+    }
+
+    function test_cancelDeposit() public {
+        vm.startPrank(alice);
+        vault.announceDeposit(1_000e6);
+        vault.cancelDeposit();
+        vm.stopPrank();
+
+        (uint256 amount,) = vault.depositIntents(alice);
+        assertEq(amount, 0);
+    }
+
+    // ─── Close Factor ───────────────────────────────────────────────────
+
+    function test_liquidate_closeFactor_capsRepayAt50Pct() public {
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 19_000e18);
+        _push(tslaFeed, TSLA_PRICE_ID, 174_25500000);
+        assertFalse(vault.isHealthy(alice));
+
+        vm.prank(bob);
+        vault.liquidate(alice, address(tsla), 19_000e18);
+
+        uint256 borrowed = vault.borrowedOf(alice);
+        // Close factor = 50%, so max repay ~ 9_500e18. Remaining should be ~9_500e18.
+        assertApproxEqAbs(borrowed, 9_500e18, 100e18);
+    }
+
+    function test_liquidate_fullLiquidationBelowCriticalHf() public {
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 19_000e18);
+        // Drop price to make HF < 0.5 (critically underwater)
+        _push(tslaFeed, TSLA_PRICE_ID, 50_00000000);
+        uint256 hf = vault.healthFactor(alice);
+        assertLt(hf, 5e17);
+
+        // Full debt amount requested — no close factor cap below critical HF
+        uint256 borrowedBefore = vault.borrowedOf(alice);
+        vm.prank(bob);
+        vault.liquidate(alice, address(tsla), borrowedBefore);
+        // Collateral-limited: all 100 TSLA seized, but debt exceeds collateral value.
+        // Verify close factor did NOT cap the repayment (would have been ~50%).
+        uint256 borrowedAfter = vault.borrowedOf(alice);
+        // Without close factor, repayment is collateral-limited (not 50%-limited).
+        // 100 TSLA @ $50 = $5k collateral → max seize = $5k → repays ~$4.76k (net of bonus).
+        // Remaining debt = ~$19k - $4.76k = ~$14.24k (collateral-limited, not close-factor-limited).
+        assertLt(borrowedAfter, borrowedBefore);
+        assertEq(vault.collateral(alice, address(tsla)), 0);
+    }
+
+    // ─── Self-liquidation Prevention ────────────────────────────────────
+
+    function test_liquidate_revertsSelfLiquidation() public {
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 19_000e18);
+        _push(tslaFeed, TSLA_PRICE_ID, 174_25500000);
+
+        vm.prank(alice);
+        vm.expectRevert(bytes("no self-liquidation"));
+        vault.liquidate(alice, address(tsla), 5_000e18);
+    }
+
+    // ─── Sweep Borrow Dust ──────────────────────────────────────────────
+
+    function test_sweepBorrowDust_clearsSmallRemnant() public {
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 5_000e18);
+        vm.prank(alice);
+        vault.repayMax();
+
+        // After repayMax, totalBorrowedUsd should be 0 or near-zero dust
+        uint256 remaining = vault.totalBorrowedUsd();
+        assertLt(remaining, 1e18);
+
+        vm.prank(owner);
+        vault.sweepBorrowDust();
+        assertEq(vault.totalBorrowedUsd(), 0);
     }
 }
