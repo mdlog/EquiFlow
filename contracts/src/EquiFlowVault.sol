@@ -124,6 +124,8 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
     mapping(address token => uint256) public borrowCapUsd;
     /// @notice Running total of borrows attributed to each token. 1e18 USD.
     mapping(address token => uint256) public totalBorrowedByAsset;
+    /// @notice Per-user per-token borrow attribution (principal only, used as weights).
+    mapping(address user => mapping(address token => uint256)) public userBorrowByAsset;
 
     /// @notice Cached token decimals, set during listAsset.
     mapping(address token => uint8) public tokenDecimals;
@@ -500,6 +502,7 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
             totalBorrowedUsd += borrowUsd;
 
             totalBorrowedByAsset[token] += borrowUsd;
+            userBorrowByAsset[msg.sender][token] += borrowUsd;
             uint256 cap = borrowCapUsd[token];
             if (cap > 0 && totalBorrowedByAsset[token] > cap) {
                 revert BorrowCapExceeded(token, totalBorrowedByAsset[token], cap);
@@ -874,71 +877,29 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
         if (actualBps > maxWidth) revert OracleConfidenceTooWide(actualBps, maxWidth);
     }
 
-    /// @dev Release per-asset borrow cap counters proportionally when a user
-    ///      repays or is liquidated. Attributes repayment across collateral
-    ///      tokens weighted by their USD share of the user's total collateral.
+    /// @dev Release per-asset borrow cap counters when a user repays or is
+    ///      liquidated. Uses the user's own per-token borrow attribution as
+    ///      weights so cap release matches where the borrow originated.
     function _releaseAssetBorrows(address user, uint256 repaidUsd) internal {
         uint256 n = assetList.length;
         if (n == 0) return;
 
-        uint256 totalColl = _safeCollateralValueUsd(user);
-        if (totalColl == 0) {
-            uint256 activeCount;
-            for (uint256 i; i < n; ++i) {
-                if (totalBorrowedByAsset[assetList[i]] > 0) activeCount++;
-            }
-            if (activeCount == 0) return;
-            for (uint256 i; i < n; ++i) {
-                address t = assetList[i];
-                if (totalBorrowedByAsset[t] == 0) continue;
-                uint256 release = repaidUsd / activeCount;
-                if (release > totalBorrowedByAsset[t]) release = totalBorrowedByAsset[t];
-                totalBorrowedByAsset[t] -= release;
-                emit BorrowCapReleased(t, release, totalBorrowedByAsset[t]);
-            }
-            return;
+        uint256 userTotal;
+        for (uint256 i; i < n; ++i) {
+            userTotal += userBorrowByAsset[user][assetList[i]];
         }
+        if (userTotal == 0) return;
+
         for (uint256 i; i < n; ++i) {
             address t = assetList[i];
-            uint256 amt = collateral[user][t];
-            if (amt == 0) continue;
-            uint256 price = _safePriceOrZero(t);
-            if (price == 0) continue;
-            uint8 dec = _tokenDecimals(t);
-            uint256 valUsd = (amt * price * 1e10) / (10 ** dec);
-            uint256 release = (repaidUsd * valUsd) / totalColl;
+            uint256 userAmt = userBorrowByAsset[user][t];
+            if (userAmt == 0) continue;
+            uint256 release = (repaidUsd * userAmt) / userTotal;
+            if (release > userAmt) release = userAmt;
             if (release > totalBorrowedByAsset[t]) release = totalBorrowedByAsset[t];
+            userBorrowByAsset[user][t] -= release;
             totalBorrowedByAsset[t] -= release;
             emit BorrowCapReleased(t, release, totalBorrowedByAsset[t]);
-        }
-    }
-
-    /// @dev Same as collateralValueUsd but skips assets with stale/invalid prices
-    ///      instead of reverting. Used only in _releaseAssetBorrows.
-    function _safeCollateralValueUsd(address user) internal view returns (uint256 total) {
-        uint256 n = assetList.length;
-        for (uint256 i; i < n; ++i) {
-            address t = assetList[i];
-            uint256 amt = collateral[user][t];
-            if (amt == 0) continue;
-            uint256 price = _safePriceOrZero(t);
-            if (price == 0) continue;
-            uint8 dec = _tokenDecimals(t);
-            total += (amt * price * 1e10) / (10 ** dec);
-        }
-    }
-
-    /// @dev Returns price or 0 if feed is stale/invalid. Never reverts.
-    function _safePriceOrZero(address token) internal view returns (uint256) {
-        Asset memory a = assets[token];
-        try a.priceFeed.latestRoundData() returns (
-            uint80, int256 answer, uint256, uint256 updatedAt, uint80
-        ) {
-            if (answer <= 0) return 0;
-            if (block.timestamp - updatedAt > a.staleAfter) return 0;
-            return uint256(answer);
-        } catch {
-            return 0;
         }
     }
 

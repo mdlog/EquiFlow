@@ -906,4 +906,69 @@ contract EquiFlowVaultTest is Test {
         vault.sweepBorrowDust();
         assertEq(vault.totalBorrowedUsd(), 0);
     }
+
+    // ─── Borrow Cap Accounting (per-user per-token fix) ─────────────────
+
+    function test_borrowCapRelease_noLeakWithMultiCollateral() public {
+        vm.prank(owner);
+        vault.setBorrowCap(address(tsla), 10_000e18);
+
+        // Alice borrows $5k via TSLA, then adds AAPL collateral (no borrow)
+        vm.startPrank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 5_000e18);
+        vault.pledgeAndBorrow(address(aapl), 100e18, 0);
+        vm.stopPrank();
+
+        (, uint256 usedBefore) = vault.borrowCapInfo(address(tsla));
+        assertEq(usedBefore, 5_000e18);
+
+        // Repay full — cap must be FULLY released for TSLA, not split to AAPL
+        vm.prank(alice);
+        vault.repayMax();
+
+        (, uint256 usedAfter) = vault.borrowCapInfo(address(tsla));
+        assertEq(usedAfter, 0);
+    }
+
+    function test_borrowCapRelease_multiTokenBorrow() public {
+        vm.prank(owner);
+        vault.setBorrowCap(address(tsla), 10_000e18);
+        vm.prank(owner);
+        vault.setBorrowCap(address(aapl), 10_000e18);
+
+        // Alice borrows $3k via TSLA, $2k via AAPL
+        vm.startPrank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 3_000e18);
+        vault.pledgeAndBorrow(address(aapl), 100e18, 2_000e18);
+        vm.stopPrank();
+
+        // Repay $5k total — should release proportionally by borrow origin (60/40)
+        vm.prank(alice);
+        vault.repayMax();
+
+        (, uint256 tslaUsed) = vault.borrowCapInfo(address(tsla));
+        (, uint256 aaplUsed) = vault.borrowCapInfo(address(aapl));
+        assertEq(tslaUsed, 0);
+        assertEq(aaplUsed, 0);
+    }
+
+    function test_borrowCapRelease_repeatedCycleNoLeak() public {
+        vm.prank(owner);
+        vault.setBorrowCap(address(tsla), 5_000e18);
+
+        // Cycle 5 times: borrow TSLA → add AAPL → repay → withdraw
+        for (uint256 i; i < 5; i++) {
+            vm.startPrank(alice);
+            vault.pledgeAndBorrow(address(tsla), 10e18, 1_000e18);
+            vault.pledgeAndBorrow(address(aapl), 10e18, 0);
+            vault.repayMax();
+            vault.withdraw(address(tsla), 10e18);
+            vault.withdraw(address(aapl), 10e18);
+            vm.stopPrank();
+        }
+
+        (, uint256 tslaUsed) = vault.borrowCapInfo(address(tsla));
+        // Must be 0 after full repay — no accumulated leak
+        assertEq(tslaUsed, 0);
+    }
 }
