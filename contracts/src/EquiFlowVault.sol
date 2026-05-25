@@ -109,6 +109,7 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
     struct DepositIntent {
         uint256 amount;
         uint256 deadline;
+        uint256 snapshotBalance;
     }
     mapping(address => DepositIntent) public depositIntents;
     uint256 public constant DEPOSIT_INTENT_TTL = 10 minutes;
@@ -384,7 +385,11 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
     function announceDeposit(uint256 amount) external whenNotPaused {
         if (amount == 0) revert AmountZero();
         uint256 deadline = block.timestamp + DEPOSIT_INTENT_TTL;
-        depositIntents[msg.sender] = DepositIntent({amount: amount, deadline: deadline});
+        depositIntents[msg.sender] = DepositIntent({
+            amount: amount,
+            deadline: deadline,
+            snapshotBalance: usdc.balanceOf(address(this))
+        });
         emit DepositIntentCreated(msg.sender, amount, deadline);
     }
 
@@ -415,8 +420,12 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
         delete depositIntents[msg.sender];
 
         uint256 actualBalance = usdc.balanceOf(address(this));
-        uint256 delta = actualBalance > bookedUsdg ? actualBalance - bookedUsdg : 0;
-        if (delta < amount) revert InsufficientTransfer(amount, delta);
+        uint256 deltaSinceAnnounce = actualBalance > intent.snapshotBalance
+            ? actualBalance - intent.snapshotBalance
+            : 0;
+        if (deltaSinceAnnounce < amount) revert InsufficientTransfer(amount, deltaSinceAnnounce);
+        uint256 globalDelta = actualBalance > bookedUsdg ? actualBalance - bookedUsdg : 0;
+        if (globalDelta < amount) revert InsufficientTransfer(amount, globalDelta);
 
         uint256 totalUsd = totalAssetsUsd();
         uint256 amountUsd = _usdcToUsd(amount);

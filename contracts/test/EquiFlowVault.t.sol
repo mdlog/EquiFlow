@@ -836,8 +836,38 @@ contract EquiFlowVaultTest is Test {
         vault.cancelDeposit();
         vm.stopPrank();
 
-        (uint256 amount,) = vault.depositIntents(alice);
+        (uint256 amount,,) = vault.depositIntents(alice);
         assertEq(amount, 0);
+    }
+
+    function test_register_blocksFrontRunAttack() public {
+        // Alice announces and transfers 1000 USDC
+        usdc.mint(alice, 1_000e6);
+        vm.startPrank(alice);
+        vault.announceDeposit(1_000e6);
+        usdc.transfer(address(vault), 1_000e6);
+        vm.stopPrank();
+
+        // Attacker (bob) sees the transfer and tries to claim it
+        vm.startPrank(bob);
+        vault.announceDeposit(1_000e6);
+        // Bob's snapshot captured the vault balance AFTER Alice's transfer,
+        // so deltaSinceAnnounce = 0 → revert
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EquiFlowVault.InsufficientTransfer.selector,
+                1_000e6,
+                uint256(0)
+            )
+        );
+        vault.register(1_000e6);
+        vm.stopPrank();
+
+        // Alice can still register her own deposit
+        vm.prank(alice);
+        vault.register(1_000e6);
+        assertGt(vault.sharesOf(alice), 0);
+        assertEq(vault.sharesOf(bob), 0);
     }
 
     // ─── Close Factor ───────────────────────────────────────────────────
