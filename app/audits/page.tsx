@@ -183,7 +183,7 @@ export default function AuditsPage() {
 
       {/* ── Hero ──────────────────────────────────────────────── */}
       <section className="border-b border-ink">
-        <div className="max-w-[1320px] mx-auto px-8 pt-7 pb-6">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 pt-7 pb-6">
           <div className="flex items-end justify-between gap-6 flex-wrap">
             <div>
               <div className="eyebrow mb-2 inline-flex items-center gap-2">
@@ -239,7 +239,7 @@ export default function AuditsPage() {
 
       {/* ── KPI strip ─────────────────────────────────────────── */}
       <section className="bg-paper-alt border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto grid grid-cols-5">
+        <div className="max-w-[1320px] mx-auto grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
           {[
             ["Critical", String(totals.critical), "all resolved · 0 open", "var(--down)"],
             ["High", String(totals.high), "all resolved · 0 open", "var(--down)"],
@@ -279,7 +279,7 @@ export default function AuditsPage() {
 
       {/* ── Audit cards ───────────────────────────────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-9">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-9">
           <div className="mb-6">
             <div className="eyebrow mb-1.5">External audits</div>
             <h2
@@ -308,7 +308,7 @@ export default function AuditsPage() {
 
       {/* ── Security posture ──────────────────────────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-10">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-10">
           <div className="flex items-end justify-between mb-6 flex-wrap gap-4">
             <div>
               <div className="eyebrow mb-1.5">Security posture</div>
@@ -344,7 +344,7 @@ export default function AuditsPage() {
           </div>
 
           <div
-            className="grid grid-cols-4"
+            className="grid grid-cols-2 sm:grid-cols-4"
             style={{ border: "1px solid var(--hairline)" }}
           >
             {POSTURE.map((p, i) => (
@@ -402,7 +402,7 @@ export default function AuditsPage() {
 
       {/* ── Audit history timeline ────────────────────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-10">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-10">
           <div className="mb-5">
             <div className="eyebrow mb-1.5">Audit history</div>
             <h2
@@ -417,7 +417,7 @@ export default function AuditsPage() {
             style={{ padding: "26px 28px", border: "1px solid var(--hairline)" }}
           >
             <Timeline />
-            <div className="grid grid-cols-5 mt-6">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 mt-6">
               {HISTORY.map((h, i) => (
                 <div
                   key={h.ver}
@@ -453,7 +453,7 @@ export default function AuditsPage() {
 
       {/* ── Footer disclosure CTA ─────────────────────────────── */}
       <section className="border-t border-ink bg-paper-alt">
-        <div className="max-w-[1320px] mx-auto px-8 py-10">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-10">
           <div className="grid grid-cols-[1.4fr_1fr] gap-6 items-center">
             <div>
               <div className="eyebrow mb-2">Responsible disclosure</div>

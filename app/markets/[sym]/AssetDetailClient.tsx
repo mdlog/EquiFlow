@@ -52,7 +52,7 @@ export function AssetDetailClient({ sym }: Props) {
 
   /// 24h change + sparkline — same backends the /markets table uses.
   const history24h = useMarkets24h([sym]);
-  const sparkline = useMarketsSparkline([sym], 24);
+  const sparkline = useMarketsSparkline([sym], 48);
   const dataChange = history24h.data?.[sym]?.changePct ?? null;
   const sparkData = sparkline.data?.series?.[sym];
   const sparkEnabled = sparkline.data?.enabled ?? false;
@@ -73,7 +73,7 @@ export function AssetDetailClient({ sym }: Props) {
 
   /// Pledge calculator — uses the LIVE rates (derived) for the yield estimate,
   /// so the math reflects what the user will actually earn at current util.
-  const [calcShares, setCalcShares] = useState(100);
+  const [calcShares, setCalcShares] = useState(0);
   const effectiveLtv = liveLtv ?? stock.ltv;
   const calcUsd = live.value * calcShares;
   const maxBorrow = calcUsd * effectiveLtv;
@@ -90,10 +90,10 @@ export function AssetDetailClient({ sym }: Props) {
         ? (stats.liquidationBonusBps / 100).toFixed(2) + "%" : "5.00%"],
 
       ["Borrow APR (protocol)", derivedBorrowApr.toFixed(2) + "%"],
-      ["Vault APR (protocol)", "+" + derivedVaultApr.toFixed(2) + "%"],
+      ["Vault APR (protocol)", fmt.signedPct(derivedVaultApr, 2)],
       [
         "Spread (you keep)",
-        "+" + (derivedVaultApr - derivedBorrowApr).toFixed(2) + "%",
+        fmt.signedPct(derivedVaultApr - derivedBorrowApr, 2),
       ],
       [
         "Utilization (USDG pool)",
@@ -131,7 +131,7 @@ export function AssetDetailClient({ sym }: Props) {
       {/* Breadcrumb */}
       <div className="border-b border-hairline-soft bg-paper-alt/40">
         <div
-          className="max-w-[1320px] mx-auto px-8 flex items-center justify-between gap-2 py-2"
+          className="max-w-[1320px] mx-auto px-4 sm:px-8 flex items-center justify-between gap-2 py-2"
           style={{ fontSize: 11 }}
         >
           <div className="flex items-center gap-2">
@@ -159,7 +159,7 @@ export function AssetDetailClient({ sym }: Props) {
 
       {/* Hero */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-8 grid grid-cols-12 gap-8 items-end">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-6 sm:py-8 grid grid-cols-12 gap-4 sm:gap-8 items-end">
           <div className="col-span-12 md:col-span-7 flex items-center gap-5">
             <div
               className="inline-flex items-center justify-center border border-ink bg-paper rounded-[2px]"
@@ -173,7 +173,7 @@ export function AssetDetailClient({ sym }: Props) {
               </div>
               <div
                 className="font-serif font-medium"
-                style={{ fontSize: 56, letterSpacing: "-0.035em", lineHeight: 1 }}
+                style={{ fontSize: "clamp(36px, 5vw, 56px)", letterSpacing: "-0.035em", lineHeight: 1 }}
               >
                 {stock.sym}
               </div>
@@ -270,7 +270,7 @@ export function AssetDetailClient({ sym }: Props) {
 
       {/* KPI strip */}
       <section className="border-b border-hairline bg-paper-alt">
-        <div className="max-w-[1320px] mx-auto px-8 grid grid-cols-5">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
           {(
             [
               ["Max LTV", (effectiveLtv * 100).toFixed(0) + "%", ltvIsLive ? "on-chain" : "reference"],
@@ -281,7 +281,7 @@ export function AssetDetailClient({ sym }: Props) {
               ],
               [
                 "Vault APR",
-                "+" + derivedVaultApr.toFixed(2) + "%",
+                fmt.signedPct(derivedVaultApr, 2),
                 "LP yield · protocol",
               ],
               [
@@ -335,7 +335,7 @@ export function AssetDetailClient({ sym }: Props) {
 
       {/* Risk + pledge calculator */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-8 grid grid-cols-12 gap-8">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-6 sm:py-8 grid grid-cols-12 gap-4 sm:gap-8">
           {/* Risk parameters */}
           <div className="col-span-12 md:col-span-6">
             <div className="eyebrow mb-3">Risk parameters</div>
@@ -396,7 +396,7 @@ export function AssetDetailClient({ sym }: Props) {
                   ["Max borrow (USDG)", fmt.usd(maxBorrow, 0)],
                   [
                     "Net yield · vaulted",
-                    "+" + fmt.usd(yearlySpread, 0) + " / yr",
+                    (yearlySpread >= 0 ? "+" : "−") + fmt.usd(Math.abs(yearlySpread), 0) + " / yr",
                     "up",
                   ],
                 ] as [string, string, "up" | undefined][]

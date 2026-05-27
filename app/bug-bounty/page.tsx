@@ -269,7 +269,7 @@ export default function BugBountyPage() {
 
       {/* ── Hero ───────────────────────────────────────────── */}
       <section className="border-b border-ink">
-        <div className="max-w-[1320px] mx-auto px-8 pt-6 pb-5">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 pt-6 pb-5">
           <div className="flex items-end justify-between gap-6">
             <div>
               <div className="eyebrow mb-2">
@@ -325,7 +325,7 @@ export default function BugBountyPage() {
 
       {/* ── KPI strip ─────────────────────────────────────── */}
       <section className="bg-paper-alt border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto grid grid-cols-5">
+        <div className="max-w-[1320px] mx-auto grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
           <KpiCell label="Bounty pool" value={fmtUsdShort(POOL_TOTAL)} sub="USDG · fully funded" color="var(--up)" />
           <KpiCell label="Highest single payout" value={fmtUsdShort(HIGHEST_PAID)} sub="Critical · in-scope" />
           <KpiCell label="Paid · YTD" value={fmtUsdShort(PAID_YTD)} sub="19 valid reports · 2026" />
@@ -336,7 +336,7 @@ export default function BugBountyPage() {
 
       {/* ── Severity tiers ────────────────────────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-6">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-6">
           <div className="flex justify-between items-baseline mb-3.5">
             <div>
               <div className="eyebrow mb-1">Rewards · USDG · paid within 14 days</div>
@@ -468,7 +468,7 @@ export default function BugBountyPage() {
 
       {/* ── In-scope assets ───────────────────────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-6">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-6">
           <div className="flex justify-between items-baseline mb-3.5">
             <div>
               <div
@@ -609,8 +609,8 @@ export default function BugBountyPage() {
 
       {/* ── Out of scope ──────────────────────────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-6">
-          <div className="grid grid-cols-[1fr_2fr] gap-8">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-6">
+          <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-8">
             <div>
               <div
                 className="eyebrow mb-1 inline-flex items-center gap-1.5"
@@ -679,7 +679,7 @@ export default function BugBountyPage() {
 
       {/* ── Hall of fame ──────────────────────────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-6">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-6">
           <div className="flex justify-between items-baseline mb-3.5">
             <div>
               <div className="eyebrow mb-1">Hall of fame · paid researchers</div>
@@ -780,8 +780,8 @@ export default function BugBountyPage() {
 
       {/* ── Vulnerability disclosure policy ───────────────── */}
       <section className="border-b border-hairline bg-paper-alt">
-        <div className="max-w-[1320px] mx-auto px-8 py-8">
-          <div className="grid grid-cols-[1fr_2fr] gap-8 items-start">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-8">
+          <div className="grid grid-cols-1 md:grid-cols-[1fr_2fr] gap-8 items-start">
             <div>
               <div className="eyebrow mb-1">Disclosure policy · v2.1</div>
               <h2
@@ -843,7 +843,7 @@ export default function BugBountyPage() {
 
       {/* ── Recent reports ────────────────────────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-6">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-6">
           <div className="flex justify-between items-baseline mb-3.5">
             <div>
               <div className="eyebrow mb-1">Recent reports · 90-day window</div>
@@ -1009,7 +1009,7 @@ function SubmissionProcess({
   ];
   return (
     <section className="border-t border-ink bg-paper-alt">
-      <div className="max-w-[1320px] mx-auto px-8 py-8">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-8">
         <div className="mb-5">
           <div className="eyebrow mb-1.5">How to submit · four steps</div>
           <h2
@@ -1019,7 +1019,7 @@ function SubmissionProcess({
             From a broken invariant to a <span className="italic">paid reward</span>.
           </h2>
         </div>
-        <div className="grid grid-cols-4 bg-paper" style={{ border: "1px solid var(--hairline)" }}>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 bg-paper" style={{ border: "1px solid var(--hairline)" }}>
           {steps.map((s, i) => (
             <div
               key={s.n}

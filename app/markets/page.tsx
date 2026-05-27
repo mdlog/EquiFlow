@@ -1,7 +1,6 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { PageNav } from "@/components/PageNav";
 import { SectionHead } from "@/components/SectionHead";
@@ -10,7 +9,6 @@ import { OraclePing } from "@/components/OraclePing";
 import { Sparkline } from "@/components/Sparkline";
 import { useAccount } from "wagmi";
 import { STOCKS, type Stock, stockAddress } from "@/lib/config/stocks";
-import { formatUnits } from "viem";
 import { fmt } from "@/lib/format";
 import { useLiveTick } from "@/lib/hooks/use-live-tick";
 import { useLiveAdapterTick, useStockPrice } from "@/lib/hooks/use-adapter-price";
@@ -26,12 +24,43 @@ import { shortAddr, explorerAddr } from "@/lib/contracts";
 import { StockBalanceCell } from "@/components/StockBalanceCell";
 import { SessionBadge } from "@/components/SessionBadge";
 import { AssetLogo } from "@/components/AssetLogo";
+import { PledgeSidebar } from "@/components/PledgeSidebar";
 
-type Filter = "all" | "gainers" | "losers";
+type Sector = "all" | "live" | "semis" | "tech" | "etf";
+type SortKey = "sym" | "price" | "change" | "ltv" | "volatility";
+
+const SECTORS: { id: Sector; label: string }[] = [
+  { id: "all", label: "All" },
+  { id: "live", label: "Live on-chain" },
+  { id: "semis", label: "Semis" },
+  { id: "tech", label: "Tech" },
+  { id: "etf", label: "ETF" },
+];
+
+function matchSector(s: Stock, sector: Sector): boolean {
+  if (sector === "all") return true;
+  if (sector === "live") return s.liveOnRBN && !!stockAddress(s.sym);
+  if (sector === "semis") return s.sector.toLowerCase().includes("semi");
+  if (sector === "tech")
+    return (
+      s.sector.toLowerCase().includes("tech") ||
+      s.sector.toLowerCase().includes("cloud") ||
+      s.sector.toLowerCase().includes("data") ||
+      s.sector.toLowerCase().includes("ai") ||
+      s.sector.toLowerCase().includes("streaming") ||
+      s.sector.toLowerCase().includes("commerce")
+    );
+  if (sector === "etf") return s.sector.toLowerCase().includes("etf");
+  return true;
+}
 
 export default function MarketsPage() {
-  const [filter, setFilter] = useState<Filter>("all");
+  const [sector, setSector] = useState<Sector>("all");
+  const [search, setSearch] = useState("");
+  const [sortKey, setSortKey] = useState<SortKey>("sym");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [hoverSym, setHoverSym] = useState<string | null>(null);
+  const [pledgeSym, setPledgeSym] = useState<string | null>(null);
   const { isConnected } = useAccount();
 
   const listed = useListedAssets();
@@ -42,19 +71,50 @@ export default function MarketsPage() {
   // STOCKS catalogue doesn't change between renders.
   const allSyms = useMemo(() => STOCKS.map((s) => s.sym), []);
   const history24h = useMarkets24h(allSyms);
-  const sparkline = useMarketsSparkline(allSyms, 24);
+  const sparkline = useMarketsSparkline(allSyms, 48);
+
+  const pickChange = (sym: string): number =>
+    history24h.data?.[sym]?.changePct ?? 0;
+
+  const topGainers = useMemo(() => {
+    return [...STOCKS]
+      .filter((s) => pickChange(s.sym) > 0)
+      .sort((a, b) => pickChange(b.sym) - pickChange(a.sym))
+      .slice(0, 3);
+  }, [history24h.data]);
+
+  const topLosers = useMemo(() => {
+    return [...STOCKS]
+      .filter((s) => pickChange(s.sym) < 0)
+      .sort((a, b) => pickChange(a.sym) - pickChange(b.sym))
+      .slice(0, 3);
+  }, [history24h.data]);
 
   const stocks = useMemo(() => {
-    // When real 24h data is available it should drive the gainers / losers
-    // filter — otherwise the filter would silently use the static seed values.
-    const pickChange = (sym: string, fallback: number): number =>
-      history24h.data?.[sym]?.changePct ?? fallback;
-    if (filter === "gainers")
-      return STOCKS.filter((s) => pickChange(s.sym, 0) > 0);
-    if (filter === "losers")
-      return STOCKS.filter((s) => pickChange(s.sym, 0) < 0);
-    return STOCKS;
-  }, [filter, history24h.data]);
+    let list = STOCKS.filter((s) => matchSector(s, sector));
+
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      list = list.filter(
+        (s) =>
+          s.sym.toLowerCase().includes(q) ||
+          s.name.toLowerCase().includes(q) ||
+          s.sector.toLowerCase().includes(q),
+      );
+    }
+
+    const dir = sortDir === "asc" ? 1 : -1;
+    list = [...list].sort((a, b) => {
+      if (sortKey === "sym") return a.sym.localeCompare(b.sym) * dir;
+      if (sortKey === "price") return (a.price - b.price) * dir;
+      if (sortKey === "change") return (pickChange(a.sym) - pickChange(b.sym)) * dir;
+      if (sortKey === "ltv") return (a.ltv - b.ltv) * dir;
+      if (sortKey === "volatility") return (a.volatility - b.volatility) * dir;
+      return 0;
+    });
+
+    return list;
+  }, [sector, search, sortKey, sortDir, history24h.data]);
 
   // Format 1e18 USD bigint into abbreviated USD string ("$1.24M").
   const fmtUsd1e18 = (v: bigint | null): string =>
@@ -97,37 +157,37 @@ export default function MarketsPage() {
     <div className="flex flex-col min-h-screen">
       <PageNav current="markets" />
 
-      <div className="max-w-[1320px] w-full mx-auto px-8 pt-7 pb-4">
+      <div className="max-w-[1320px] w-full mx-auto px-4 sm:px-8 pt-5 sm:pt-7 pb-4">
         <SectionHead
           kicker={`Markets · ${stats.assetCount ?? STOCKS.length} listed assets · Pyth Network oracles`}
           title="Pledge any holding. Borrow against it. Or let it earn."
-          right={
-            <div className="flex gap-1 p-[3px] border border-hairline rounded-[2px]">
-              {(["all", "gainers", "losers"] as Filter[]).map((k) => (
-                <button
-                  key={k}
-                  onClick={() => setFilter(k)}
-                  className="border-0 px-3 py-1.5 capitalize rounded-[2px] transition-colors"
-                  style={{
-                    fontSize: 12,
-                    background: filter === k ? "var(--ink)" : "transparent",
-                    color: filter === k ? "var(--paper)" : "var(--ink-soft)",
-                  }}
-                >
-                  {k}
-                </button>
-              ))}
-            </div>
-          }
         />
       </div>
 
-      <section className="border-y border-hairline bg-paper-alt">
-        <div className="max-w-[1320px] w-full mx-auto px-8 grid grid-cols-5">
+      {/* ── Top Gainers / Top Losers ───────────────────────────── */}
+      <div className="max-w-[1320px] w-full mx-auto px-4 sm:px-8 pb-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <MoverColumn
+            title="Top Gainers"
+            badge="24H"
+            items={topGainers}
+            pickChange={pickChange}
+          />
+          <MoverColumn
+            title="Top Losers"
+            badge="24H"
+            items={topLosers}
+            pickChange={pickChange}
+          />
+        </div>
+      </div>
+
+      <section className="border-y border-hairline bg-paper-alt overflow-x-auto">
+        <div className="max-w-[1320px] w-full mx-auto px-4 sm:px-8 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
           {kpis.map(([label, val, sub], i) => (
             <div
               key={label}
-              className={`px-5 py-3.5 ${i < 4 ? "border-r border-hairline" : ""}`}
+              className={`px-4 sm:px-5 py-3.5 ${i < 4 ? "lg:border-r border-hairline" : ""} ${i % 2 === 0 && i < 4 ? "sm:border-r" : ""}`}
             >
               <div className="eyebrow mb-1.5">{label}</div>
               <div
@@ -144,55 +204,299 @@ export default function MarketsPage() {
         </div>
       </section>
 
-      <div className="max-w-[1320px] w-full mx-auto px-8 pt-5 flex-1 flex flex-col">
+      {/* ── Filter bar ─────────────────────────────────────────── */}
+      <div className="max-w-[1320px] w-full mx-auto px-4 sm:px-8 pt-5 pb-3">
+        <div className="flex flex-col sm:flex-row gap-3 sm:items-center justify-between">
+          {/* Search */}
+          <div
+            className="flex items-center gap-2 border border-hairline rounded-[2px] bg-paper px-3 py-2 flex-1 sm:max-w-[280px]"
+          >
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 14 14"
+              fill="none"
+              stroke="var(--ink-mute)"
+              strokeWidth="1.4"
+              strokeLinecap="round"
+              className="shrink-0"
+            >
+              <circle cx="6" cy="6" r="4.5" />
+              <path d="M9.5 9.5 13 13" />
+            </svg>
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search ticker or name…"
+              className="bg-transparent outline-none border-0 flex-1 font-mono text-ink min-w-0"
+              style={{ fontSize: 12 }}
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch("")}
+                className="text-ink-mute hover:text-ink bg-transparent border-0"
+                style={{ fontSize: 14, lineHeight: 1, padding: 0 }}
+              >
+                ×
+              </button>
+            )}
+          </div>
+
+          {/* Sector tabs + sort */}
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex gap-0.5 bg-paper-alt border border-hairline-soft rounded-[2px] p-[3px]">
+              {SECTORS.map((s) => (
+                <button
+                  key={s.id}
+                  onClick={() => setSector(s.id)}
+                  className="border-0 rounded-[2px] transition-colors font-mono"
+                  style={{
+                    padding: "5px 10px",
+                    fontSize: 11,
+                    background: sector === s.id ? "var(--ink)" : "transparent",
+                    color: sector === s.id ? "var(--paper)" : "var(--ink-soft)",
+                    fontWeight: sector === s.id ? 500 : 400,
+                  }}
+                >
+                  {s.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="h-4 w-px bg-hairline hidden sm:block" />
+
+            <select
+              value={`${sortKey}-${sortDir}`}
+              onChange={(e) => {
+                const [k, d] = e.target.value.split("-") as [SortKey, "asc" | "desc"];
+                setSortKey(k);
+                setSortDir(d);
+              }}
+              className="font-mono bg-paper border border-hairline rounded-[2px] text-ink-soft cursor-pointer outline-none"
+              style={{ fontSize: 11, padding: "5px 8px" }}
+            >
+              <option value="sym-asc">A → Z</option>
+              <option value="sym-desc">Z → A</option>
+              <option value="price-desc">Price ↓</option>
+              <option value="price-asc">Price ↑</option>
+              <option value="change-desc">24h ↓</option>
+              <option value="change-asc">24h ↑</option>
+              <option value="ltv-desc">LTV ↓</option>
+              <option value="volatility-desc">Volatility ↓</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Result count */}
+        <div
+          className="mt-2.5 font-mono text-ink-mute flex items-center gap-2"
+          style={{ fontSize: 10, letterSpacing: "0.06em" }}
+        >
+          <span>{stocks.length} asset{stocks.length !== 1 ? "s" : ""}</span>
+          {sector !== "all" && (
+            <>
+              <span>·</span>
+              <span>{SECTORS.find((s) => s.id === sector)?.label}</span>
+            </>
+          )}
+          {search.trim() && (
+            <>
+              <span>·</span>
+              <span>"{search.trim()}"</span>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="max-w-[1320px] w-full mx-auto px-4 sm:px-8 flex-1 flex flex-col overflow-x-auto">
+        <div style={{ minWidth: 900 }}>
         {/* Column headers */}
         <div
           className="grid gap-4 py-2.5 border-b border-hairline text-ink-mute uppercase font-medium"
           style={{
-            gridTemplateColumns: "1.8fr 1fr 0.85fr 0.8fr 0.9fr 1fr 1fr 100px",
+            gridTemplateColumns: "1.8fr 1fr 0.8fr 0.9fr 1fr 1fr 0.85fr 100px",
             fontSize: 10,
             letterSpacing: "0.12em",
           }}
         >
           <div>Asset</div>
           <div className="text-right">Last · Oracle</div>
-          <div className="text-right">24h</div>
           <div className="text-right">Max LTV</div>
           <div className="text-right">Borrow APR</div>
           <div className="text-right">Vault APR</div>
           <div className="text-right">
-            {isConnected ? "Your balance" : "Liquidity"}
+            {isConnected ? "Your balance" : "Volume"}
           </div>
+          <div className="text-right">24h</div>
           <div />
         </div>
 
         <div className="flex-1">
-          {stocks.map((s, i) => (
-            <LedgerRow
-              key={s.sym}
-              stock={s}
-              index={i}
-              hovered={hoverSym === s.sym}
-              walletConnected={isConnected}
-              onHover={() => setHoverSym(s.sym)}
-              onLeave={() => setHoverSym(null)}
-              live24hPct={history24h.data?.[s.sym]?.changePct ?? null}
-              sparkData={sparkline.data?.series?.[s.sym]}
-              sparkEnabled={sparkline.data?.enabled ?? false}
-              derivedBorrowApr={
-                stats.derived ? stats.derived.borrowAprBps / 100 : null
-              }
-              derivedVaultApr={
-                stats.derived ? stats.derived.supplyAprBps / 100 : null
-              }
-              vaultLiquidityUsd={stats.liquidityUsd}
-              vaultUtilizationPct={stats.utilizationPct}
-            />
-          ))}
+          {stocks.length === 0 ? (
+            <div
+              className="flex flex-col items-center justify-center text-center py-14"
+            >
+              <div
+                className="font-serif font-medium text-ink-mute"
+                style={{ fontSize: 18, letterSpacing: "-0.02em" }}
+              >
+                No assets match your filters.
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSearch("");
+                  setSector("all");
+                }}
+                className="mt-3 font-mono text-ink-soft border border-hairline rounded-[2px] bg-transparent hover:border-ink hover:text-ink transition-colors"
+                style={{ fontSize: 11, padding: "6px 14px" }}
+              >
+                Clear all filters
+              </button>
+            </div>
+          ) : (
+            stocks.map((s, i) => (
+              <LedgerRow
+                key={s.sym}
+                stock={s}
+                index={i}
+                hovered={hoverSym === s.sym}
+                walletConnected={isConnected}
+                onHover={() => setHoverSym(s.sym)}
+                onLeave={() => setHoverSym(null)}
+                live24hPct={history24h.data?.[s.sym]?.changePct ?? null}
+                sparkData={sparkline.data?.series?.[s.sym]}
+                sparkEnabled={sparkline.data?.enabled ?? false}
+                derivedBorrowApr={
+                  stats.derived ? stats.derived.borrowAprBps / 100 : null
+                }
+                derivedVaultApr={
+                  stats.derived ? stats.derived.supplyAprBps / 100 : null
+                }
+                collateralVolumeUsd={
+                  stockAddress(s.sym)
+                    ? stats.collateralByToken[stockAddress(s.sym)!.toLowerCase()] ?? null
+                    : null
+                }
+                onPledge={() => setPledgeSym(s.sym)}
+              />
+            ))
+          )}
+        </div>
         </div>
       </div>
 
+      <PledgeSidebar
+        sym={pledgeSym ?? "TSLA"}
+        open={pledgeSym != null}
+        onClose={() => setPledgeSym(null)}
+      />
+
       <SiteFooter />
+    </div>
+  );
+}
+
+function MoverColumn({
+  title,
+  badge,
+  items,
+  pickChange,
+}: {
+  title: string;
+  badge: string;
+  items: Stock[];
+  pickChange: (sym: string) => number;
+}) {
+  const router = useRouter();
+  return (
+    <div className="border border-hairline rounded-[2px] bg-paper">
+      <div
+        className="flex items-center gap-2 border-b border-hairline-soft"
+        style={{ padding: "12px 16px" }}
+      >
+        <span className="font-medium" style={{ fontSize: 14 }}>
+          {title}
+        </span>
+        <span
+          className="font-mono rounded-[2px] bg-paper-alt border border-hairline-soft"
+          style={{ fontSize: 9, padding: "2px 6px", letterSpacing: "0.06em" }}
+        >
+          {badge}
+        </span>
+      </div>
+      {items.length === 0 ? (
+        <div
+          className="text-ink-mute font-mono text-center"
+          style={{ padding: "20px 16px", fontSize: 11 }}
+        >
+          No data yet
+        </div>
+      ) : (
+        items.map((s, i) => (
+          <MoverRow
+            key={s.sym}
+            stock={s}
+            pct={pickChange(s.sym)}
+            isLast={i === items.length - 1}
+          />
+        ))
+      )}
+    </div>
+  );
+}
+
+function MoverRow({ stock: s, pct, isLast }: { stock: Stock; pct: number; isLast: boolean }) {
+  const router = useRouter();
+  const adapterTick = useLiveAdapterTick(s.sym, (v) => fmt.usd(v));
+  const simTick = useLiveTick(s.price, s.volatility, (v) => fmt.usd(v));
+  const live = adapterTick.isLive ? adapterTick : simTick;
+  const up = pct >= 0;
+
+  return (
+    <div
+      onClick={() => router.push(`/markets/${s.sym}`)}
+      className="flex items-center justify-between cursor-pointer hover:bg-paper-alt transition-colors"
+      style={{
+        padding: "10px 16px",
+        borderBottom: isLast ? "none" : "1px solid var(--hairline-soft)",
+      }}
+    >
+      <div className="flex items-center gap-3">
+        <div
+          className="border border-ink rounded-[2px] flex items-center justify-center bg-paper"
+          style={{ width: 32, height: 32 }}
+        >
+          <AssetLogo sym={s.sym} size={20} />
+        </div>
+        <div>
+          <div className="font-mono font-semibold" style={{ fontSize: 12 }}>
+            {s.sym}
+          </div>
+          <div className="text-ink-mute" style={{ fontSize: 10 }}>
+            {s.name}
+          </div>
+        </div>
+      </div>
+      <div className="text-right">
+        <div
+          className="font-serif tabular font-medium"
+          style={{ fontSize: 14, letterSpacing: "-0.02em" }}
+        >
+          {live.formatted}
+        </div>
+        <div
+          className="font-mono tabular font-medium"
+          style={{
+            fontSize: 11,
+            color: up ? "var(--up)" : "var(--down)",
+          }}
+        >
+          {fmt.pct(pct, 2, true)}
+        </div>
+      </div>
     </div>
   );
 }
@@ -209,8 +513,8 @@ function LedgerRow({
   sparkEnabled,
   derivedBorrowApr,
   derivedVaultApr,
-  vaultLiquidityUsd,
-  vaultUtilizationPct,
+  collateralVolumeUsd,
+  onPledge,
 }: {
   stock: Stock;
   index: number;
@@ -218,23 +522,13 @@ function LedgerRow({
   walletConnected: boolean;
   onHover: () => void;
   onLeave: () => void;
-  /// Real change% from Hermes 24h-ago anchor (null while loading / on weekend
-  /// gaps when no historical print exists). Falls back to stock.changePct.
   live24hPct: number | null;
-  /// Real sparkline points (last 24h, downsampled). Empty when Upstash is off
-  /// or no keeper ticks have been recorded yet.
   sparkData?: number[];
-  /// Whether the sparkline backend is wired (Upstash configured server-side).
-  /// When false, we don't even hint at "real" data — the seeded curve renders.
   sparkEnabled: boolean;
-  /// Borrow/supply APR read from vault.borrowApyBps() / vault.lpApyBps().
-  /// Null while the first RPC round-trip hasn't resolved.
   derivedBorrowApr: number | null;
   derivedVaultApr: number | null;
-  /// Vault-wide USDG liquidity in 1e18 USD units.
-  vaultLiquidityUsd: bigint | null;
-  /// Vault-wide utilization percentage.
-  vaultUtilizationPct: number | null;
+  collateralVolumeUsd: bigint | null;
+  onPledge: () => void;
 }) {
   const effectiveChangePct = live24hPct ?? 0;
   const up = effectiveChangePct >= 0;
@@ -269,7 +563,7 @@ function LedgerRow({
       }}
       className="grid gap-4 py-[18px] border-b border-hairline-soft items-center cursor-pointer relative transition-colors duration-150"
       style={{
-        gridTemplateColumns: "1.8fr 1fr 0.85fr 0.8fr 0.9fr 1fr 1fr 100px",
+        gridTemplateColumns: "1.8fr 1fr 0.8fr 0.9fr 1fr 1fr 0.85fr 100px",
         background: hovered ? "var(--paper-alt)" : "transparent",
       }}
     >
@@ -366,46 +660,6 @@ function LedgerRow({
         </div>
       </div>
 
-      {/* 24h change + sparkline */}
-      <div className="text-right">
-        <div
-          className="font-mono tabular font-medium"
-          style={{
-            fontSize: 13,
-            color: up ? "var(--up)" : "var(--down)",
-          }}
-          title={
-            isReal24h
-              ? "24h change from Pyth historical anchor (now vs t-86400s)"
-              : "Reference change — Pyth has no historical print for this anchor"
-          }
-        >
-          {fmt.pct(effectiveChangePct, 2, true)}
-        </div>
-        <div className="flex justify-end mt-0.5">
-          <Sparkline
-            data={hasRealSpark ? sparkData : undefined}
-            w={70}
-            h={18}
-            color={up ? "var(--up)" : "var(--down)"}
-            fill
-          />
-        </div>
-        {(isReal24h || hasRealSpark) && (
-          <div
-            className="text-ink-mute mt-0.5"
-            style={{ fontSize: 9, letterSpacing: "0.06em" }}
-            title={
-              hasRealSpark
-                ? "Sparkline rendered from on-chain keeper ticks (last 24h)"
-                : "24h change is real; sparkline is illustrative"
-            }
-          >
-            {hasRealSpark ? "live · 24h" : sparkEnabled ? "live · 24h" : "24h"}
-          </div>
-        )}
-      </div>
-
       {/* LTV bar */}
       <div className="text-right">
         <div
@@ -456,54 +710,105 @@ function LedgerRow({
               : "Reference vault APR — utilization not yet loaded"
           }
         >
-          +{(derivedVaultApr ?? 0).toFixed(2)}%
+          {fmt.signedPct(derivedVaultApr ?? 0, 2)}
         </div>
         <div className="text-ink-mute mt-0.5" style={{ fontSize: 10 }}>
           LP yield · protocol
         </div>
       </div>
 
-      {/* Liquidity / Wallet balance */}
+      {/* Volume / Wallet balance */}
       <div className="text-right">
         {walletConnected && onChain ? (
           <StockBalanceCell sym={stock.sym} price={live.value} />
         ) : (
           <>
             <div className="font-mono tabular font-medium" style={{ fontSize: 13 }}>
-              ${fmt.abbr(Number(formatUnits(vaultLiquidityUsd ?? 0n, 18)))}
+              {collateralVolumeUsd != null && collateralVolumeUsd > 0n
+                ? "$" + fmt.abbr(Number(collateralVolumeUsd / 10n ** 12n) / 1e6)
+                : "—"}
             </div>
             <div className="text-ink-mute mt-0.5" style={{ fontSize: 10 }}>
-              {vaultUtilizationPct != null ? vaultUtilizationPct.toFixed(0) + "%" : "—"} utilized
+              collateral locked
             </div>
           </>
         )}
       </div>
 
+      {/* 24h change + sparkline */}
+      <div className="text-right">
+        <div
+          className="font-mono tabular font-medium"
+          style={{
+            fontSize: 13,
+            color: up ? "var(--up)" : "var(--down)",
+          }}
+          title={
+            isReal24h
+              ? "24h change from Pyth historical anchor (now vs t-86400s)"
+              : "Reference change — Pyth has no historical print for this anchor"
+          }
+        >
+          {fmt.pct(effectiveChangePct, 2, true)}
+        </div>
+        <div className="flex justify-end mt-0.5">
+          <Sparkline
+            data={hasRealSpark ? sparkData : undefined}
+            w={70}
+            h={18}
+            color={up ? "var(--up)" : "var(--down)"}
+            fill
+          />
+        </div>
+        {(isReal24h || hasRealSpark) && (
+          <div
+            className="text-ink-mute mt-0.5"
+            style={{ fontSize: 9, letterSpacing: "0.06em" }}
+            title={
+              hasRealSpark
+                ? "Sparkline rendered from on-chain keeper ticks (last 24h)"
+                : "24h change is real; sparkline is illustrative"
+            }
+          >
+            {hasRealSpark ? "live · 24h" : sparkEnabled ? "live · 24h" : "24h"}
+          </div>
+        )}
+      </div>
+
       {/* Pledge action */}
       <div className="text-right">
-        <Link
-          href={`/pledge?sym=${stock.sym}`}
-          onClick={(e) => e.stopPropagation()}
-          className="inline-flex items-center gap-1.5 px-3.5 py-2 border border-ink rounded-[2px] no-underline transition-all duration-150 font-medium"
-          style={{
-            fontSize: 12,
-            background: hovered ? "var(--ink)" : "transparent",
-            color: hovered ? "var(--paper)" : "var(--ink)",
-          }}
-        >
-          Pledge
-          <svg
-            width="10"
-            height="10"
-            viewBox="0 0 10 10"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
-            strokeLinecap="round"
+        {onChain ? (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onPledge(); }}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 border border-ink rounded-[2px] transition-all duration-150 font-medium"
+            style={{
+              fontSize: 12,
+              background: hovered ? "var(--ink)" : "transparent",
+              color: hovered ? "var(--paper)" : "var(--ink)",
+            }}
           >
-            <path d="M2 5h6M5 2l3 3-3 3" />
-          </svg>
-        </Link>
+            Pledge
+            <svg
+              width="10"
+              height="10"
+              viewBox="0 0 10 10"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+            >
+              <path d="M2 5h6M5 2l3 3-3 3" />
+            </svg>
+          </button>
+        ) : (
+          <span
+            className="inline-flex items-center px-3.5 py-2 border border-hairline rounded-[2px] font-medium text-ink-mute"
+            style={{ fontSize: 12, cursor: "not-allowed" }}
+          >
+            Soon
+          </span>
+        )}
       </div>
     </div>
   );

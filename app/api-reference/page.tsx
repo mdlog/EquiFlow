@@ -622,7 +622,7 @@ function Hero() {
   const [copied, setCopied] = useState(false);
   return (
     <section className="border-b border-ink">
-      <div className="max-w-[1320px] mx-auto px-8 pt-7 pb-7">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 pt-7 pb-7">
         <div
           className="grid"
           style={{ gridTemplateColumns: "1.35fr 1fr", gap: 36 }}
@@ -802,7 +802,7 @@ function KpiStrip() {
 function AuthSection() {
   return (
     <section className="border-b border-hairline">
-      <div className="max-w-[1320px] mx-auto px-8 py-8">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-8">
         <div
           className="grid"
           style={{ gridTemplateColumns: "1fr 1.3fr", gap: 36 }}
@@ -918,7 +918,7 @@ function EndpointCatalogue() {
 
   return (
     <section className="border-b border-hairline bg-paper-alt">
-      <div className="max-w-[1320px] mx-auto px-8 py-8">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-8">
         <div className="flex justify-between items-baseline mb-4 flex-wrap gap-3">
           <div>
             <div className="eyebrow mb-1">
@@ -1204,7 +1204,7 @@ function MethodBadge({ method }: { method: Method }) {
 function RateLimitPanel() {
   return (
     <section className="border-b border-hairline">
-      <div className="max-w-[1320px] mx-auto px-8 py-8">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-8">
         <div className="flex justify-between items-baseline mb-4 flex-wrap gap-3">
           <div>
             <div className="eyebrow mb-1">
@@ -1407,7 +1407,7 @@ function Row({ label, value }: { label: string; value: string }) {
 function WebhooksSection() {
   return (
     <section className="border-b border-hairline bg-paper-alt">
-      <div className="max-w-[1320px] mx-auto px-8 py-8">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-8">
         <div className="flex justify-between items-baseline mb-4 flex-wrap gap-3">
           <div>
             <div className="eyebrow mb-1">
@@ -1607,7 +1607,7 @@ function StatusPanel() {
 
   return (
     <section className="border-b border-hairline">
-      <div className="max-w-[1320px] mx-auto px-8 py-8">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-8">
         <div className="flex justify-between items-baseline mb-4">
           <div>
             <div className="eyebrow mb-1">Status · 30 day window</div>
@@ -1881,7 +1881,7 @@ function StatusPanel() {
 function CtaStrip() {
   return (
     <section className="border-t border-ink bg-paper-alt">
-      <div className="max-w-[1320px] mx-auto px-8 py-8">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-8">
         <div
           className="flex items-center justify-between gap-4 flex-wrap"
           style={{

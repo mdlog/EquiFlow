@@ -29,11 +29,14 @@ import {
   explorerTx,
   shortAddr,
 } from "@/lib/contracts";
+import { VaultSelector } from "@/components/VaultSelector";
+import { useVaultContext } from "@/lib/hooks/use-vault-context";
 import { ROBINHOOD_CHAIN_TESTNET_ID, FAUCET_URL } from "@/lib/config/chain";
 import { AssetLogo } from "@/components/AssetLogo";
 import { useSmartWallet } from "@/lib/aa/use-smart-wallet";
 import { sendUserOp, type GasMode } from "@/lib/aa/send-userop";
 import { AA_CONFIGURED, GAS_POLICY_ID_USDG } from "@/lib/web3/alchemy";
+import { useEthPrice } from "@/lib/hooks/use-eth-price";
 
 /// Stage values:
 ///   idle → user composing
@@ -54,6 +57,7 @@ type Operation = {
 export function PledgeClient() {
   const search = useSearchParams();
   const initSym = search.get("sym");
+  const { vault } = useVaultContext();
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const { connectors, connect } = useConnect();
@@ -82,8 +86,7 @@ export function PledgeClient() {
   const { price: livePrice, isLive: priceIsLive, liqThreshold } = useStockPrice(stock);
 
   const spender =
-    EQUIFLOW_VAULT_ADDRESS ??
-    // fallback to a documented "vault stub" — uses dead address only when env unset
+    vault.address ?? EQUIFLOW_VAULT_ADDRESS ??
     ("0x000000000000000000000000000000000000dEaD" as Address);
 
   // ── on-chain reads ────────────────────────────────────────────────
@@ -139,8 +142,8 @@ export function PledgeClient() {
   const borrowUsd = maxBorrow * (borrowPct / 100);
   const ltvActual = collateralUsd > 0 ? (borrowUsd / collateralUsd) * 100 : 0;
   const ltvCap = s.ltv * 100;
-  const listedAddrs = useListedAssets();
-  const pledgeStats = useProtocolStats(listedAddrs);
+  const listedAddrs = useListedAssets(vault.address);
+  const pledgeStats = useProtocolStats(listedAddrs, vault.address, vault.tokenAddress);
   const pledgeBorrowApr = pledgeStats.derived ? pledgeStats.derived.borrowAprBps / 100 : 0;
   const pledgeVaultApr = pledgeStats.derived ? pledgeStats.derived.supplyAprBps / 100 : 0;
   const liqAt = liqThreshold * 100;
@@ -148,6 +151,11 @@ export function PledgeClient() {
   const liqPrice = ltvActual > 0 ? livePrice * (ltvActual / liqAt) : 0;
   const netApy = autoVault ? pledgeVaultApr - pledgeBorrowApr : -pledgeBorrowApr;
   const yearlyNet = borrowUsd * (netApy / 100);
+
+  const { price: ethPrice } = useEthPrice();
+  const isWethVault = vault.id === "weth";
+  const borrowTokenAmount =
+    isWethVault && ethPrice && ethPrice > 0 ? borrowUsd / ethPrice : null;
 
   const shareAmountRaw = useMemo(() => {
     try {
@@ -162,6 +170,18 @@ export function PledgeClient() {
 
   const insufficient =
     live && balance !== undefined && shareAmountRaw > (balance as bigint);
+
+  const MIN_BORROW_USD = 10;
+  const borrowBelowMinimum = borrowUsd > 0 && borrowUsd < MIN_BORROW_USD;
+
+  const vaultLiquidityUsd =
+    pledgeStats.liquidityUsd != null
+      ? Number(pledgeStats.liquidityUsd) / 1e18
+      : null;
+  const borrowExceedsLiquidity =
+    borrowUsd > 0 &&
+    vaultLiquidityUsd != null &&
+    borrowUsd > vaultLiquidityUsd;
 
   // ── tx flow ────────────────────────────────────────────────────────
   const {
@@ -182,13 +202,13 @@ export function PledgeClient() {
   useEffect(() => {
     if (!receiptSuccess) return;
     if (stage === "approving") {
-      setStage("lock");
-      refetchAllowance();
+      resetWrite();
+      refetchAllowance().then(() => setStage("lock"));
     } else if (stage === "locking") {
       setStage("sealed");
       refetchBalance();
     }
-  }, [receiptSuccess, stage, refetchAllowance, refetchBalance]);
+  }, [receiptSuccess, stage, resetWrite, refetchAllowance, refetchBalance]);
 
   const operations: Operation[] = useMemo(
     () => [
@@ -210,7 +230,7 @@ export function PledgeClient() {
         id: 3,
         op: "borrow",
         contract: "EquiFlowVault",
-        fn: `borrow(USDG, ${fmt.abbr(borrowUsd)})`,
+        fn: `borrow(${vault.borrowSymbol}, ${fmt.abbr(borrowUsd)})`,
         gas: 0.00105,
       },
       /// Aave V3 routing op intentionally omitted — the contract integration is
@@ -240,16 +260,14 @@ export function PledgeClient() {
   };
 
   const handleLock = () => {
-    if (!tokenAddr || !EQUIFLOW_VAULT_ADDRESS) return;
+    if (!tokenAddr || !spender) return;
+    resetWrite();
     setStage("locking");
-    // Pledge collateral AND draw the borrow in a single tx — this is what the
-    // "1-click bundle" pitch resolves to once the user has approved the vault.
-    // borrowUsd is denominated in 1e18 internal USD units (matches the contract).
     const borrowUsdScaled =
       borrowUsd > 0 ? parseUnits(borrowUsd.toFixed(18), 18) : 0n;
     writeContract({
       abi: EQUIFLOW_VAULT_ABI,
-      address: EQUIFLOW_VAULT_ADDRESS,
+      address: spender,
       functionName: "pledgeAndBorrow",
       args: [tokenAddr, shareAmountRaw, borrowUsdScaled],
       chainId: ROBINHOOD_CHAIN_TESTNET_ID,
@@ -267,7 +285,7 @@ export function PledgeClient() {
   const usdgGasAvailable = GAS_POLICY_ID_USDG.length > 0;
 
   const handleBundle = async () => {
-    if (!tokenAddr || !EQUIFLOW_VAULT_ADDRESS || !smartAccount) return;
+    if (!tokenAddr || !spender || !smartAccount) return;
     setAaError(null);
     setStage("bundling");
     try {
@@ -294,7 +312,7 @@ export function PledgeClient() {
         });
       }
       calls.push({
-        to: EQUIFLOW_VAULT_ADDRESS as Address,
+        to: spender as Address,
         data: encodeFunctionData({
           abi: EQUIFLOW_VAULT_ABI,
           functionName: "pledgeAndBorrow",
@@ -369,6 +387,14 @@ export function PledgeClient() {
       ctaLabel = "Sign once · execute bundle (demo)";
       ctaAction = () => setStage("approving");
     }
+  } else if (borrowBelowMinimum) {
+    ctaLabel = `Minimum borrow is $${MIN_BORROW_USD} — increase collateral or set borrow to 0`;
+    ctaAction = null;
+    ctaDisabled = true;
+  } else if (borrowExceedsLiquidity) {
+    ctaLabel = `Insufficient vault liquidity — only ${fmt.usd(vaultLiquidityUsd ?? 0, 0)} ${vault.borrowSymbol} available`;
+    ctaAction = null;
+    ctaDisabled = true;
   } else if (insufficient) {
     ctaLabel =
       aaActive && aaMode === "factory"
@@ -406,6 +432,9 @@ export function PledgeClient() {
       ctaLabel = "Sign once · bundle approve + pledge";
       ctaAction = handleBundle;
     }
+  } else if (stage === "lock") {
+    ctaLabel = "Lock collateral · sign in wallet";
+    ctaAction = handleLock;
   } else if (needsApproval || stage === "approve") {
     ctaLabel = "Approve & lock · sign in wallet";
     ctaAction = handleApprove;
@@ -436,15 +465,77 @@ export function PledgeClient() {
       />
 
       <div
-        className="max-w-[1320px] w-full mx-auto grid"
-        style={{ gridTemplateColumns: "1fr 420px" }}
+        className="max-w-[1320px] w-full mx-auto grid grid-cols-1 lg:[grid-template-columns:1fr_420px]"
       >
-        {/* RIGHT: composer */}
+        {/* LEFT: tx summary + bundle stage + detail panels */}
         <div
-          className="px-8 py-7 border-l border-hairline overflow-auto bg-paper"
-          style={{ gridColumn: 2, gridRow: 1 }}
+          className="overflow-auto flex flex-col bg-paper"
         >
-          <div className="eyebrow mb-2">Compose a pledge</div>
+          <TxSummary
+            stock={s}
+            livePrice={livePrice}
+            shares={shares}
+            collateralUsd={collateralUsd}
+            borrowUsd={borrowUsd}
+            ltvActual={ltvActual}
+            netApy={netApy}
+            yearlyNet={yearlyNet}
+            healthFactor={healthFactor}
+            autoVault={autoVault}
+            stage={stage}
+          />
+          <BundleStage
+            operations={activeOps}
+            stage={stage}
+            totalGas={totalGas}
+            stockSym={s.sym}
+            borrowUsd={borrowUsd}
+            txHash={txHash}
+            live={live}
+          />
+          <div
+            className="grid grid-cols-1 sm:grid-cols-2"
+            style={{
+              borderTop: "1px solid var(--hairline)",
+            }}
+          >
+            <LiqRiskPanel
+              stock={s}
+              livePrice={livePrice}
+              liqPrice={liqPrice}
+              liqAt={liqAt}
+              ltvActual={ltvActual}
+              ltvCap={ltvCap}
+            />
+            <OracleAttestationsPanel
+              stock={s}
+              livePrice={livePrice}
+              priceIsLive={priceIsLive}
+            />
+            <FeeBreakdownPanel
+              stock={s}
+              borrowUsd={borrowUsd}
+              autoVault={autoVault}
+              netApy={netApy}
+              yearlyNet={yearlyNet}
+              totalGas={totalGas}
+            />
+            <RecentActivityPanel
+              stage={stage}
+              stock={s}
+              borrowUsd={borrowUsd}
+            />
+          </div>
+        </div>
+
+        {/* RIGHT: composer (shows first on mobile via order) */}
+        <div
+          className="px-4 sm:px-8 py-7 lg:border-l border-hairline overflow-auto bg-paper order-first lg:order-none"
+        >
+          <div className="eyebrow mb-2 flex items-center gap-3">
+            <span>Compose a pledge</span>
+            <VaultSelector compact />
+          </div>
           <h1
             className="font-serif font-medium m-0"
             style={{
@@ -619,22 +710,79 @@ export function PledgeClient() {
               onChange={(e) => setBorrowPct(+e.target.value)}
               className="w-full cursor-pointer"
             />
-            <div className="flex justify-between mt-2">
+            {borrowBelowMinimum && (
+              <div
+                className="font-mono mt-2 rounded-[2px]"
+                style={{
+                  fontSize: 11,
+                  padding: "6px 10px",
+                  background: "var(--down-soft)",
+                  color: "var(--down)",
+                  border: "1px solid var(--down)",
+                }}
+              >
+                Minimum borrow is ${MIN_BORROW_USD}. Increase collateral or set
+                borrow slider to 0% to pledge without borrowing.
+              </div>
+            )}
+            {borrowExceedsLiquidity && (
+              <div
+                className="font-mono mt-2 rounded-[2px]"
+                style={{
+                  fontSize: 11,
+                  padding: "6px 10px",
+                  background: "var(--down-soft)",
+                  color: "var(--down)",
+                  border: "1px solid var(--down)",
+                }}
+              >
+                Vault only has {fmt.usd(vaultLiquidityUsd ?? 0, 2)} {vault.borrowSymbol} available.
+                Reduce borrow amount or deposit LP first.
+              </div>
+            )}
+            <div className="flex justify-between items-end mt-2">
               <span className="font-mono tabular" style={{ fontSize: 12 }}>
                 You receive
               </span>
-              <span
-                className="font-serif tabular font-medium"
-                style={{ fontSize: 22, letterSpacing: "-0.02em" }}
-              >
-                {fmt.usd(borrowUsd, 2)}{" "}
-                <span
-                  className="font-mono text-ink-mute ml-1"
-                  style={{ fontSize: 11 }}
-                >
-                  USDG
-                </span>
-              </span>
+              <div className="text-right">
+                {isWethVault && borrowTokenAmount != null ? (
+                  <>
+                    <div
+                      className="font-serif tabular font-medium"
+                      style={{ fontSize: 22, letterSpacing: "-0.02em" }}
+                    >
+                      {borrowTokenAmount < 0.001 && borrowTokenAmount > 0
+                        ? borrowTokenAmount.toFixed(6)
+                        : borrowTokenAmount.toFixed(4)}{" "}
+                      <span
+                        className="font-mono text-ink-mute ml-1"
+                        style={{ fontSize: 11 }}
+                      >
+                        WETH
+                      </span>
+                    </div>
+                    <div
+                      className="font-mono tabular text-ink-mute"
+                      style={{ fontSize: 11, marginTop: 2 }}
+                    >
+                      ≈ {fmt.usd(borrowUsd, 2)} · ETH @ {fmt.usd(ethPrice ?? 0, 0)}
+                    </div>
+                  </>
+                ) : (
+                  <div
+                    className="font-serif tabular font-medium"
+                    style={{ fontSize: 22, letterSpacing: "-0.02em" }}
+                  >
+                    {fmt.usd(borrowUsd, 2)}{" "}
+                    <span
+                      className="font-mono text-ink-mute ml-1"
+                      style={{ fontSize: 11 }}
+                    >
+                      {vault.borrowSymbol}
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -675,8 +823,8 @@ export function PledgeClient() {
                 className="text-ink-mute mt-0.5"
                 style={{ fontSize: 11 }}
               >
-                Auto-deposit borrowed USDG into Aave V3 in the same bundle.
-                Vault integration not yet live on Robinhood Chain testnet.
+                Auto-deposit borrowed {vault.borrowSymbol} into Aave V3 in the same
+                bundle. Vault integration not yet live on Robinhood Chain testnet.
               </div>
             </div>
             <div
@@ -867,69 +1015,6 @@ export function PledgeClient() {
             )}
           </div>
         </div>
-
-        {/* LEFT: tx summary + bundle stage + detail panels */}
-        <div
-          className="overflow-auto flex flex-col bg-paper"
-          style={{ gridColumn: 1, gridRow: 1 }}
-        >
-          <TxSummary
-            stock={s}
-            livePrice={livePrice}
-            shares={shares}
-            collateralUsd={collateralUsd}
-            borrowUsd={borrowUsd}
-            ltvActual={ltvActual}
-            netApy={netApy}
-            yearlyNet={yearlyNet}
-            healthFactor={healthFactor}
-            autoVault={autoVault}
-            stage={stage}
-          />
-          <BundleStage
-            operations={activeOps}
-            stage={stage}
-            totalGas={totalGas}
-            stockSym={s.sym}
-            borrowUsd={borrowUsd}
-            txHash={txHash}
-            live={live}
-          />
-          <div
-            className="grid"
-            style={{
-              gridTemplateColumns: "1fr 1fr",
-              borderTop: "1px solid var(--hairline)",
-            }}
-          >
-            <LiqRiskPanel
-              stock={s}
-              livePrice={livePrice}
-              liqPrice={liqPrice}
-              liqAt={liqAt}
-              ltvActual={ltvActual}
-              ltvCap={ltvCap}
-            />
-            <OracleAttestationsPanel
-              stock={s}
-              livePrice={livePrice}
-              priceIsLive={priceIsLive}
-            />
-            <FeeBreakdownPanel
-              stock={s}
-              borrowUsd={borrowUsd}
-              autoVault={autoVault}
-              netApy={netApy}
-              yearlyNet={yearlyNet}
-              totalGas={totalGas}
-            />
-            <RecentActivityPanel
-              stage={stage}
-              stock={s}
-              borrowUsd={borrowUsd}
-            />
-          </div>
-        </div>
       </div>
 
       <SiteFooter />
@@ -954,6 +1039,7 @@ function BundleStage({
   txHash?: `0x${string}`;
   live: boolean;
 }) {
+  const { vault } = useVaultContext();
   const started =
     stage === "approving" ||
     stage === "lock" ||
@@ -1022,7 +1108,7 @@ function BundleStage({
         {live ? (
           <>
             Two signatures. <em>Tx 1</em> approves the vault · <em>Tx 2</em>{" "}
-            locks collateral and mints USDG atomically.
+            locks collateral and borrows {vault.borrowSymbol} atomically.
           </>
         ) : (
           "EntryPoint 0xEntr·yPoiNt7 · Bundler · Paymaster (Gas Manager)"
@@ -1049,7 +1135,7 @@ function BundleStage({
               n={2}
               of={2}
               title="Pledge + borrow"
-              blurb={`Lock collateral and mint ${fmt.usd(borrowUsd, 2)} USDG — one atomic call.`}
+              blurb={`Lock collateral and borrow ${fmt.usd(borrowUsd, 2)} ${vault.borrowSymbol} — one atomic call.`}
               ops={tx2Ops}
               state={step2State}
               txHash={
@@ -1057,7 +1143,7 @@ function BundleStage({
               }
               footer={
                 routeOp
-                  ? `After settle · auto-route USDG to Aave V3 (+${routeOp.gas.toFixed(5)} ETH, keeper-paid)`
+                  ? `After settle · auto-route ${vault.borrowSymbol} to Aave V3 (+${routeOp.gas.toFixed(5)} ETH, keeper-paid)`
                   : undefined
               }
             />
@@ -1101,7 +1187,7 @@ function BundleStage({
               className="font-serif font-medium mt-1.5"
               style={{ fontSize: 17, letterSpacing: "-0.02em" }}
             >
-              Pledge {stockSym} · borrow {fmt.usd(borrowUsd, 2)}
+              Pledge {stockSym} · borrow {fmt.usd(borrowUsd, 2)} {vault.borrowSymbol}
             </div>
             <div
               className="font-mono opacity-70 mt-1.5 flex gap-3"
@@ -1208,9 +1294,9 @@ function BundleStage({
 
       {/* Comparison panel — what bundling buys you */}
       <div
-        className={`${live ? "mt-6" : "mt-14"} px-5 py-4 border border-amber bg-amber-soft grid grid-cols-3`}
+        className={`${live ? "mt-6" : "mt-14"} px-5 py-4 border border-amber bg-amber-soft grid grid-cols-1 sm:grid-cols-3`}
       >
-        <div className="border-r border-dashed border-amber pr-4">
+        <div className="sm:border-r border-b sm:border-b-0 border-dashed border-amber pr-0 sm:pr-4 pb-3 sm:pb-0">
           <div className="eyebrow text-ink mb-1.5">Without bundling</div>
           <div
             className="font-serif tabular font-medium"
@@ -1225,7 +1311,7 @@ function BundleStage({
             ~{totalGas.toFixed(5)} ETH · {operations.length} wallet popups
           </div>
         </div>
-        <div className="border-r border-dashed border-amber px-4">
+        <div className="sm:border-r border-b sm:border-b-0 border-dashed border-amber px-0 sm:px-4 py-3 sm:py-0">
           <div className="eyebrow text-ink mb-1.5">With EquiFlow</div>
           <div
             className="font-serif tabular font-medium"
@@ -1242,7 +1328,7 @@ function BundleStage({
               : "0 ETH from your wallet — paid by Gas Manager"}
           </div>
         </div>
-        <div className="pl-4">
+        <div className="pl-0 sm:pl-4 pt-3 sm:pt-0">
           <div className="eyebrow text-ink mb-1.5">You save</div>
           <div
             className="font-serif tabular font-medium text-up"
@@ -1299,7 +1385,7 @@ function BundleStage({
               />
             )}
             <LogLine
-              line={`[t+1.8s] sealed · ${stockSym} locked · ${fmt.usd(borrowUsd, 2)} USDG minted`}
+              line={`[t+1.8s] sealed · ${stockSym} locked · ${fmt.usd(borrowUsd, 2)} ${vault.borrowSymbol} borrowed`}
               show={sealed}
               highlight
             />
@@ -1316,7 +1402,7 @@ function BundleStage({
               show={bundled}
             />
             <LogLine
-              line={`[t+1.6s] sealed · pledge complete · +${fmt.usd(borrowUsd, 2)} USDG routed`}
+              line={`[t+1.6s] sealed · pledge complete · +${fmt.usd(borrowUsd, 2)} ${vault.borrowSymbol} routed`}
               show={sealed}
               highlight
             />
@@ -1581,6 +1667,7 @@ function TxSummary({
   autoVault: boolean;
   stage: Stage;
 }) {
+  const { vault } = useVaultContext();
   const sealed = stage === "sealed";
   const statusLabel =
     stage === "idle"
@@ -1658,13 +1745,13 @@ function TxSummary({
           sub={`${shares} ${s.sym} · ${fmt.usd(livePrice, 2)}/share`}
         />
         <SumCell
-          label="Borrow · USDG"
+          label={`Borrow · ${vault.borrowSymbol}`}
           value={fmt.usd(borrowUsd, 2)}
           sub={`@ ${ltvActual.toFixed(1)}% LTV`}
         />
         <SumCell
           label="Net APY (you keep)"
-          value={(netApy > 0 ? "+" : "") + netApy.toFixed(2) + "%"}
+          value={fmt.signedPct(netApy, 2)}
           valueColor={netApy > 0 ? "var(--up)" : "var(--down)"}
           sub={
             autoVault
@@ -1847,7 +1934,7 @@ function LiqRiskPanel({
   /// Real 24h price series from /api/markets/sparkline (Upstash-backed Pyth
   /// keeper ticks). Falls back to a deterministic seed-walk only when the
   /// backend has no data yet (fresh keeper, RBN testnet warmup, etc).
-  const spark = useMarketsSparkline([s.sym], 24);
+  const spark = useMarketsSparkline([s.sym], 48);
   const data = useMemo(() => {
     const real = spark.data?.series?.[s.sym];
     if (real && real.length >= 2) {
@@ -2127,15 +2214,17 @@ function OracleAttestationsPanel({
 /// freshness budget the price adapter enforces. Returns seconds or null while
 /// loading / when the asset is not listed.
 function useAdapterStaleWindow(sym: string): number | null {
+  const { vault } = useVaultContext();
+  const vaultAddr = vault.address ?? EQUIFLOW_VAULT_ADDRESS;
   const tokenAddr = STOCK_TOKEN_ADDRESSES[sym];
   const { data } = useReadContract({
     abi: EQUIFLOW_VAULT_ABI,
-    address: EQUIFLOW_VAULT_ADDRESS,
+    address: vaultAddr,
     functionName: "assets",
     args: tokenAddr ? [tokenAddr] : undefined,
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
     query: {
-      enabled: !!EQUIFLOW_VAULT_ADDRESS && !!tokenAddr,
+      enabled: !!vaultAddr && !!tokenAddr,
       staleTime: 60_000,
     },
   });

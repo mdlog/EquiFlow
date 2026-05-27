@@ -17,7 +17,7 @@ import {
 } from "@/lib/contracts";
 import { ROBINHOOD_CHAIN_TESTNET_ID } from "@/lib/config/chain";
 import { PYTH_ADAPTER_ABI } from "@/lib/web3/pyth";
-import { aprBpsToApyBps, type DerivedRates } from "@/lib/web3/irm";
+import { deriveRates, type DerivedRates } from "@/lib/web3/irm";
 import { getLogsChunked } from "@/lib/web3/get-logs-chunked";
 
 export interface ProtocolStats {
@@ -40,6 +40,8 @@ export interface ProtocolStats {
   /** Borrow + supply rates read directly from vault.borrowApyBps() and
    *  vault.lpApyBps(). Null while the initial RPC round-trip hasn't resolved. */
   derived: DerivedRates | null;
+  /** Per-token collateral volume locked in vault, keyed by lowercase token address. 1e18 USD units. */
+  collateralByToken: Record<string, bigint>;
 }
 
 const POLL_MS = 12_000;
@@ -48,63 +50,69 @@ const POLL_MS = 12_000;
 // window still cheap enough for a single getLogs request.
 const LIQ_WINDOW_BLOCKS = 345_600n;
 
-export function useProtocolStats(listedAddrs: readonly Address[]): ProtocolStats {
+export function useProtocolStats(
+  listedAddrs: readonly Address[],
+  overrideVaultAddress?: Address,
+  overrideTokenAddress?: Address,
+): ProtocolStats {
   // ── Vault-level singletons ────────────────────────────────────────────
-  const enabled = !!EQUIFLOW_VAULT_ADDRESS;
+  const vaultAddr = overrideVaultAddress ?? EQUIFLOW_VAULT_ADDRESS;
+  const tokenAddr = overrideTokenAddress ?? USDC_ADDRESS;
+  const enabled = !!vaultAddr;
   const { data: scalar } = useReadContracts({
     allowFailure: true,
     contracts: [
       {
         abi: EQUIFLOW_VAULT_ABI,
-        address: EQUIFLOW_VAULT_ADDRESS,
+        address: vaultAddr,
         functionName: "totalBorrowedUsd",
         chainId: ROBINHOOD_CHAIN_TESTNET_ID,
       },
       {
         abi: ERC20_ABI,
-        address: USDC_ADDRESS,
+        address: tokenAddr,
         functionName: "balanceOf",
-        args: EQUIFLOW_VAULT_ADDRESS ? [EQUIFLOW_VAULT_ADDRESS] : undefined,
+        args: vaultAddr ? [vaultAddr] : undefined,
         chainId: ROBINHOOD_CHAIN_TESTNET_ID,
       },
       {
         abi: ERC20_ABI,
-        address: USDC_ADDRESS,
+        address: tokenAddr,
         functionName: "decimals",
         chainId: ROBINHOOD_CHAIN_TESTNET_ID,
       },
       {
         abi: EQUIFLOW_VAULT_ABI,
-        address: EQUIFLOW_VAULT_ADDRESS,
+        address: vaultAddr,
         functionName: "reserveFactorBps",
         chainId: ROBINHOOD_CHAIN_TESTNET_ID,
       },
       {
         abi: EQUIFLOW_VAULT_ABI,
-        address: EQUIFLOW_VAULT_ADDRESS,
+        address: vaultAddr,
         functionName: "LIQUIDATION_BONUS_BPS",
         chainId: ROBINHOOD_CHAIN_TESTNET_ID,
       },
       {
         abi: EQUIFLOW_VAULT_ABI,
-        address: EQUIFLOW_VAULT_ADDRESS,
+        address: vaultAddr,
         functionName: "borrowApyBps",
         chainId: ROBINHOOD_CHAIN_TESTNET_ID,
       },
       {
         abi: EQUIFLOW_VAULT_ABI,
-        address: EQUIFLOW_VAULT_ADDRESS,
+        address: vaultAddr,
         functionName: "lpApyBps",
         chainId: ROBINHOOD_CHAIN_TESTNET_ID,
       },
       {
         abi: EQUIFLOW_VAULT_ABI,
-        address: EQUIFLOW_VAULT_ADDRESS,
+        address: vaultAddr,
         functionName: "utilizationBps",
         chainId: ROBINHOOD_CHAIN_TESTNET_ID,
       },
     ],
-    query: { enabled: enabled && !!USDC_ADDRESS, refetchInterval: POLL_MS },
+    query: { enabled: enabled && !!tokenAddr, refetchInterval: POLL_MS },
   });
 
   const borrowedUsd =
@@ -141,10 +149,10 @@ export function useProtocolStats(listedAddrs: readonly Address[]): ProtocolStats
         abi: ERC20_ABI,
         address: addr,
         functionName: "balanceOf" as const,
-        args: EQUIFLOW_VAULT_ADDRESS ? ([EQUIFLOW_VAULT_ADDRESS] as const) : undefined,
+        args: vaultAddr ? ([vaultAddr] as const) : undefined,
         chainId: ROBINHOOD_CHAIN_TESTNET_ID,
       })),
-    [listedAddrs],
+    [listedAddrs, vaultAddr],
   );
   const decimalsContracts = useMemo(
     () =>
@@ -160,12 +168,12 @@ export function useProtocolStats(listedAddrs: readonly Address[]): ProtocolStats
     () =>
       listedAddrs.map((addr) => ({
         abi: EQUIFLOW_VAULT_ABI,
-        address: EQUIFLOW_VAULT_ADDRESS,
+        address: vaultAddr,
         functionName: "assets" as const,
         args: [addr] as const,
         chainId: ROBINHOOD_CHAIN_TESTNET_ID,
       })),
-    [listedAddrs],
+    [listedAddrs, vaultAddr],
   );
 
   const { data: perAsset } = useReadContracts({
@@ -212,8 +220,9 @@ export function useProtocolStats(listedAddrs: readonly Address[]): ProtocolStats
   });
 
   // ── Combine: TVL = USDG balance (normalized to 1e18) + Σ token × price ──
-  const collateralUsd = useMemo(() => {
-    if (!rounds || rounds.length === 0) return 0n;
+  const { collateralUsd, collateralByToken } = useMemo(() => {
+    const byToken: Record<string, bigint> = {};
+    if (!rounds || rounds.length === 0) return { collateralUsd: 0n, collateralByToken: byToken };
     let total = 0n;
     let cursor = 0;
     for (let i = 0; i < n; i++) {
@@ -234,12 +243,13 @@ export function useProtocolStats(listedAddrs: readonly Address[]): ProtocolStats
       const priceTuple = round.result as readonly [bigint, bigint, bigint, bigint, bigint];
       const price1e8 = priceTuple[1];
       if (price1e8 <= 0n) continue;
-      // bal × price (1e8) → normalize token dec → 1e18 result:
-      //   amountUsd1e18 = bal × price × 1e10 / 10^dec
-      total += (bal * price1e8 * 10n ** 10n) / 10n ** BigInt(dec);
+      const amountUsd = (bal * price1e8 * 10n ** 10n) / 10n ** BigInt(dec);
+      total += amountUsd;
+      const tokenAddr = listedAddrs[i];
+      if (tokenAddr) byToken[tokenAddr.toLowerCase()] = amountUsd;
     }
-    return total;
-  }, [rounds, assetTuples, balances, decimals, n]);
+    return { collateralUsd: total, collateralByToken: byToken };
+  }, [rounds, assetTuples, balances, decimals, n, listedAddrs]);
 
   // Normalize USDG balance to 1e18 USD units.
   const liquidityUsd = useMemo(() => {
@@ -266,24 +276,17 @@ export function useProtocolStats(listedAddrs: readonly Address[]): ProtocolStats
     utilizationBps != null ? utilizationBps / 100 : null;
 
   const derived = useMemo<DerivedRates | null>(() => {
-    if (onChainBorrowAprBps == null || onChainLpAprBps == null) return null;
-    const util = onChainUtilBps ?? (utilizationBps ?? 0);
-    return {
-      utilizationBps: util,
-      borrowAprBps: onChainBorrowAprBps,
-      borrowApyBps: aprBpsToApyBps(onChainBorrowAprBps),
-      supplyAprBps: onChainLpAprBps,
-      supplyApyBps: aprBpsToApyBps(onChainLpAprBps),
-      reserveFactorBps,
-    };
-  }, [onChainBorrowAprBps, onChainLpAprBps, onChainUtilBps, utilizationBps, reserveFactorBps]);
+    const util = onChainUtilBps ?? utilizationBps;
+    if (util == null) return null;
+    return deriveRates(util, reserveFactorBps);
+  }, [onChainUtilBps, utilizationBps, reserveFactorBps]);
 
   // ── Liquidations (~24h window) ─────────────────────────────────────────
   const { data: head } = useBlockNumber({
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
     query: { refetchInterval: 30_000 },
   });
-  const liquidations7d = useLiquidations(head, LIQ_WINDOW_BLOCKS);
+  const liquidations7d = useLiquidations(head, LIQ_WINDOW_BLOCKS, vaultAddr);
 
   return {
     tvlUsd,
@@ -295,6 +298,7 @@ export function useProtocolStats(listedAddrs: readonly Address[]): ProtocolStats
     liquidations7d,
     isLoading: !scalar || !perAsset,
     derived,
+    collateralByToken,
   };
 }
 
@@ -306,7 +310,9 @@ const LIQUIDATED_EVENT = parseAbiItem(
 function useLiquidations(
   head: bigint | undefined,
   windowBlocks: bigint,
+  vaultAddress?: Address,
 ): { count: number; totalDebtUsd: bigint } | null {
+  const addr = vaultAddress ?? EQUIFLOW_VAULT_ADDRESS;
   const client = usePublicClient({ chainId: ROBINHOOD_CHAIN_TESTNET_ID });
   const fromBlock = head && head > windowBlocks ? head - windowBlocks : 0n;
 
@@ -314,18 +320,16 @@ function useLiquidations(
     queryKey: [
       "equiflow",
       "liquidations",
-      EQUIFLOW_VAULT_ADDRESS,
-      // Bucket the head so the query key stabilizes for ~5 min — without this
-      // every new block invalidates the cache and refires getLogs.
+      addr,
       head ? (head / 1200n).toString() : "0",
     ],
     queryFn: async () => {
-      if (!client || !EQUIFLOW_VAULT_ADDRESS || !head) {
+      if (!client || !addr || !head) {
         return { count: 0, totalDebtUsd: 0n };
       }
       const logs = await getLogsChunked({
         client,
-        address: EQUIFLOW_VAULT_ADDRESS,
+        address: addr,
         event: LIQUIDATED_EVENT,
         fromBlock,
         toBlock: head,
@@ -336,7 +340,7 @@ function useLiquidations(
       }
       return { count: logs.length, totalDebtUsd: total };
     },
-    enabled: !!client && !!EQUIFLOW_VAULT_ADDRESS && !!head,
+    enabled: !!client && !!addr && !!head,
     staleTime: 5 * 60_000,
     refetchInterval: 5 * 60_000,
     retry: 3,
@@ -347,13 +351,14 @@ function useLiquidations(
 }
 
 /** Convenience selector for the listedAssets() RPC: returns the array or [] */
-export function useListedAssets(): readonly Address[] {
+export function useListedAssets(overrideVaultAddress?: Address): readonly Address[] {
+  const vaultAddr = overrideVaultAddress ?? EQUIFLOW_VAULT_ADDRESS;
   const { data } = useReadContract({
     abi: EQUIFLOW_VAULT_ABI,
-    address: EQUIFLOW_VAULT_ADDRESS,
+    address: vaultAddr,
     functionName: "listedAssets",
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!EQUIFLOW_VAULT_ADDRESS, staleTime: 60_000 },
+    query: { enabled: !!vaultAddr, staleTime: 60_000 },
   });
   return (data as readonly Address[] | undefined) ?? [];
 }

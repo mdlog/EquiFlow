@@ -376,6 +376,18 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
         usdc.safeTransfer(to, amount);
     }
 
+    /// @notice Recover USDG that was transferred to the vault without going
+    ///         through the announce→register flow (i.e. not booked as LP capital).
+    ///         Can only withdraw the surplus above bookedUsdg + outstanding borrows.
+    function rescueUnbooked(address to) external onlyOwner {
+        uint256 balance = usdc.balanceOf(address(this));
+        uint256 borrowedUsdc = _usdToUsdc(totalBorrowedUsd);
+        uint256 committed = bookedUsdg + borrowedUsdc;
+        require(balance > committed, "nothing to rescue");
+        uint256 surplus = balance - committed;
+        usdc.safeTransfer(to, surplus);
+    }
+
     // ─── LP actions ──────────────────────────────────────────────────────
 
     /// @notice Step 1 of LP deposit: announce intent to deposit. Creates a

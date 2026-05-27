@@ -17,8 +17,8 @@ const cells = [
     ),
   },
   {
-    name: "Aave V3",
-    role: "Yield Vaults",
+    name: "EquiFlow Vault",
+    role: "LP Yield · Borrow Spread",
     icon: (
       <svg
         viewBox="0 0 24 24"
@@ -28,7 +28,8 @@ const cells = [
         stroke="currentColor"
         strokeWidth="1.5"
       >
-        <path d="M12 3 4 21h4l1.5-4h5L16 21h4L12 3Zm-1.5 11.5L12 10l1.5 4.5h-3Z" />
+        <rect x="3" y="6" width="18" height="14" rx="2" />
+        <path d="M3 10h18M8 14h2M14 14h2" />
       </svg>
     ),
   },
@@ -79,8 +80,8 @@ const cells = [
 
 export function Integrations() {
   return (
-    <section className="border-b border-hairline" style={{ padding: "56px 0" }}>
-      <div className="max-w-[1320px] mx-auto px-8">
+    <section className="border-b border-hairline py-10 sm:py-14">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8">
         <div className="text-center" style={{ marginBottom: 32 }}>
           <span className="eyebrow inline-block">Powered by</span>
           <h3

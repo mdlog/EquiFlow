@@ -135,7 +135,7 @@ export default function TokenomicsPage() {
 
       {/* ── Hero ──────────────────────────────────────────────── */}
       <section className="border-b border-ink">
-        <div className="max-w-[1320px] mx-auto px-8 pt-7 pb-6">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 pt-7 pb-6">
           <div className="flex items-end justify-between gap-6 flex-wrap">
             <div>
               <div className="eyebrow mb-2">
@@ -189,7 +189,7 @@ export default function TokenomicsPage() {
 
       {/* ── EQUI section header ──────────────────────────────── */}
       <section className="bg-paper-alt border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-6 flex items-center justify-between flex-wrap gap-4">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-6 flex items-center justify-between flex-wrap gap-4">
           <div className="flex items-center gap-5">
             <div
               className="font-mono font-medium"
@@ -238,7 +238,7 @@ export default function TokenomicsPage() {
 
       {/* ── Distribution donut + breakdown ────────────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto grid grid-cols-[1fr_1.2fr]">
+        <div className="max-w-[1320px] mx-auto grid grid-cols-1 md:grid-cols-[1fr_1.2fr]">
           <div
             style={{
               padding: "26px 28px",
@@ -385,7 +385,7 @@ export default function TokenomicsPage() {
 
       {/* ── Vesting timeline (stacked area) ────────────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-9">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-9">
           <div className="flex justify-between items-end mb-5 flex-wrap gap-4">
             <div>
               <div className="eyebrow mb-1.5">Vesting timeline</div>
@@ -431,7 +431,7 @@ export default function TokenomicsPage() {
 
       {/* ── Utility cards ─────────────────────────────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-9">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-9">
           <div className="mb-5">
             <div className="eyebrow mb-1.5">Utility</div>
             <h3
@@ -442,7 +442,7 @@ export default function TokenomicsPage() {
             </h3>
           </div>
           <div
-            className="grid grid-cols-4 bg-paper"
+            className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 bg-paper"
             style={{ border: "1px solid var(--hairline)" }}
           >
             {UTILITIES.map((u, i) => (
@@ -497,7 +497,7 @@ export default function TokenomicsPage() {
 
       {/* ── Emissions schedule chart ──────────────────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-9">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-9">
           <div className="flex justify-between items-end mb-5 flex-wrap gap-4">
             <div>
               <div className="eyebrow mb-1.5">Emissions schedule</div>
@@ -518,7 +518,7 @@ export default function TokenomicsPage() {
             </div>
           </div>
           <EmissionsChart />
-          <div className="grid grid-cols-5 mt-5">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 mt-5">
             {EMISSIONS_YEARS.map((y, i) => (
               <div
                 key={y.label}
@@ -555,7 +555,7 @@ export default function TokenomicsPage() {
 
       {/* ── USDG header ───────────────────────────────────────── */}
       <section className="bg-paper-alt border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-6 flex items-center justify-between flex-wrap gap-4">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-6 flex items-center justify-between flex-wrap gap-4">
           <div className="flex items-center gap-5">
             <div
               className="font-mono font-medium"
@@ -604,7 +604,7 @@ export default function TokenomicsPage() {
 
       {/* ── USDG stats strip ──────────────────────────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto grid grid-cols-4">
+        <div className="max-w-[1320px] mx-auto grid grid-cols-2 sm:grid-cols-4">
           {USDG_STATS.map((s, i) => (
             <div
               key={s.label}
@@ -781,8 +781,8 @@ export default function TokenomicsPage() {
 
       {/* ── Footer disclosure ─────────────────────────────────── */}
       <section className="border-t border-ink bg-paper-alt">
-        <div className="max-w-[1320px] mx-auto px-8 py-9">
-          <div className="grid grid-cols-[1.4fr_1fr] gap-6 items-center">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-9">
+          <div className="grid grid-cols-1 md:grid-cols-[1.4fr_1fr] gap-6 items-center">
             <div>
               <div className="eyebrow mb-2">Forward-looking statements</div>
               <p

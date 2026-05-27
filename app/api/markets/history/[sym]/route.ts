@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { PYTH_PRICE_IDS } from "@/lib/web3/pyth";
+import { HISTORY_ENABLED, readSeries, type HistoryPoint } from "@/lib/web3/price-history";
 
 /// Pyth Benchmarks-backed OHLCV history for a single ticker. Used by the
 /// asset detail page (`/markets/[sym]`) to render a real price chart.
@@ -85,32 +86,47 @@ export async function GET(req: Request, { params }: Params) {
       );
     }
     const data = (await res.json()) as BenchmarksBars;
-    if (data.s !== "ok" || !data.t?.length) {
+    const hasBenchmarks = data.s === "ok" && !!data.t?.length;
+
+    const t = hasBenchmarks ? data.t! : [];
+    const o = hasBenchmarks ? (data.o ?? []) : [];
+    const h = hasBenchmarks ? (data.h ?? []) : [];
+    const l = hasBenchmarks ? (data.l ?? []) : [];
+    const c = hasBenchmarks ? (data.c ?? []) : [];
+
+    if (HISTORY_ENABLED) {
+      const bucketSize = resolutionToSeconds(resolution);
+      const keeperFrom = t.length > 0
+        ? t[t.length - 1] + 1
+        : from;
+      const nowTs = Math.floor(Date.now() / 1000);
+      const gapSeconds = nowTs - (t.length > 0 ? t[t.length - 1] : from);
+      if (gapSeconds > bucketSize) {
+        const ticks = await readSeries(upper, keeperFrom);
+        if (ticks.length > 0) {
+          const bars = ticksToOhlcv(ticks, bucketSize);
+          for (const bar of bars) {
+            t.push(bar.t);
+            o.push(bar.o);
+            h.push(bar.h);
+            l.push(bar.l);
+            c.push(bar.c);
+          }
+        }
+      }
+    }
+
+    if (t.length === 0) {
       return NextResponse.json(
-        { s: data.s ?? "no_data", errmsg: data.errmsg ?? "" },
-        // Tell the browser to remember the empty result briefly so reloads
-        // don't hammer Benchmarks for symbols that are truly unsupported.
+        { s: "no_data", errmsg: data.errmsg ?? "" },
         { headers: { "Cache-Control": "public, max-age=120, s-maxage=120" } },
       );
     }
 
-    // Trim to the OHLC fields the chart needs — drop volume (TV shim returns
-    // it as `v` but it's null for most equity feeds and noisy on the wire).
     return NextResponse.json(
-      {
-        s: "ok",
-        symbol: upper,
-        resolution,
-        t: data.t,
-        o: data.o ?? [],
-        h: data.h ?? [],
-        l: data.l ?? [],
-        c: data.c ?? [],
-      },
+      { s: "ok", symbol: upper, resolution, t, o, h, l, c },
       {
         headers: {
-          // 60s = enough granularity for chart freshness without thrashing
-          // Benchmarks on every tab focus.
           "Cache-Control": "public, max-age=60, s-maxage=60",
         },
       },
@@ -122,4 +138,41 @@ export async function GET(req: Request, { params }: Params) {
       { status: 502 },
     );
   }
+}
+
+function resolutionToSeconds(res: string): number {
+  if (res === "D") return 86400;
+  const mins = Number(res);
+  return (mins || 60) * 60;
+}
+
+interface OhlcvBar { t: number; o: number; h: number; l: number; c: number }
+
+function ticksToOhlcv(ticks: HistoryPoint[], bucketSec: number): OhlcvBar[] {
+  if (ticks.length === 0) return [];
+  const sorted = [...ticks].sort((a, b) => a.t - b.t);
+  const bars: OhlcvBar[] = [];
+  let bucketStart = Math.floor(sorted[0].t / bucketSec) * bucketSec;
+  let o = sorted[0].p;
+  let h = sorted[0].p;
+  let l = sorted[0].p;
+  let c = sorted[0].p;
+
+  for (const tick of sorted) {
+    const thisBucket = Math.floor(tick.t / bucketSec) * bucketSec;
+    if (thisBucket !== bucketStart) {
+      bars.push({ t: bucketStart, o, h, l, c });
+      bucketStart = thisBucket;
+      o = tick.p;
+      h = tick.p;
+      l = tick.p;
+      c = tick.p;
+    } else {
+      h = Math.max(h, tick.p);
+      l = Math.min(l, tick.p);
+      c = tick.p;
+    }
+  }
+  bars.push({ t: bucketStart, o, h, l, c });
+  return bars;
 }

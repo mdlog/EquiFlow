@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { encodeFunctionData, parseUnits, type Address, type Hex } from "viem";
+import { encodeFunctionData, maxUint256, parseUnits, type Address, type Hex } from "viem";
 import {
   useAccount,
   useReadContract,
@@ -11,9 +11,8 @@ import {
 import {
   ERC20_ABI,
   EQUIFLOW_VAULT_ABI,
-  EQUIFLOW_VAULT_ADDRESS,
-  USDC_ADDRESS,
 } from "@/lib/contracts";
+import { useVaultContext } from "@/lib/hooks/use-vault-context";
 import { ROBINHOOD_CHAIN_TESTNET_ID } from "@/lib/config/chain";
 import { fmt } from "@/lib/format";
 import { useSmartWallet } from "@/lib/aa/use-smart-wallet";
@@ -65,6 +64,11 @@ export function RepayDebtModal({
   ltvCap,
   liqLtv,
 }: Props) {
+  const { vault } = useVaultContext();
+  const VAULT_ADDR = vault.address;
+  const TOKEN_ADDR = vault.tokenAddress;
+  const tokenSymbol = vault.borrowSymbol;
+
   const { address: eoaAddress, isConnected } = useAccount();
   const { mode: aaMode, smartAccount, smartAddress, prepareForSubmit } =
     useSmartWallet();
@@ -87,38 +91,43 @@ export function RepayDebtModal({
 
   const { data: stableDecimalsRaw } = useReadContract({
     abi: ERC20_ABI,
-    address: USDC_ADDRESS,
+    address: TOKEN_ADDR,
     functionName: "decimals",
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!USDC_ADDRESS },
+    query: { enabled: !!TOKEN_ADDR },
   });
   const stableDec =
     typeof stableDecimalsRaw === "number" ? stableDecimalsRaw : 6;
 
   const { data: balance } = useReadContract({
     abi: ERC20_ABI,
-    address: USDC_ADDRESS,
+    address: TOKEN_ADDR,
     functionName: "balanceOf",
     args: address ? [address] : undefined,
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!USDC_ADDRESS && !!address, refetchInterval: 12_000 },
+    query: { enabled: !!TOKEN_ADDR && !!address, refetchInterval: 12_000 },
   });
   const { data: allowanceRaw, refetch: refetchAllowance } = useReadContract({
     abi: ERC20_ABI,
-    address: USDC_ADDRESS,
+    address: TOKEN_ADDR,
     functionName: "allowance",
     args:
-      address && EQUIFLOW_VAULT_ADDRESS
-        ? [address, EQUIFLOW_VAULT_ADDRESS]
+      address && VAULT_ADDR
+        ? [address, VAULT_ADDR]
         : undefined,
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
     query: {
-      enabled: !!USDC_ADDRESS && !!address && !!EQUIFLOW_VAULT_ADDRESS,
+      enabled: !!TOKEN_ADDR && !!address && !!VAULT_ADDR,
     },
   });
 
-  const usdgNeeded =
+  const usdgExact =
     amount > 0 ? parseUnits(amount.toFixed(stableDec), stableDec) : 0n;
+  const amountUsd18 =
+    stableDec < 18
+      ? usdgExact * 10n ** BigInt(18 - stableDec)
+      : usdgExact / 10n ** BigInt(stableDec - 18);
+  const usdgNeeded = usdgExact + (amount > 0 ? 1n : 0n);
   const allowance = (allowanceRaw as bigint | undefined) ?? 0n;
   const userBalance = (balance as bigint | undefined) ?? 0n;
   const insufficient = usdgNeeded > userBalance;
@@ -136,20 +145,19 @@ export function RepayDebtModal({
     if (stage === "approve-mining") {
       setStage("repaying");
       refetchAllowance();
-      if (EQUIFLOW_VAULT_ADDRESS) {
+      if (VAULT_ADDR) {
         if (useMax) {
           writeContract({
             abi: EQUIFLOW_VAULT_ABI,
-            address: EQUIFLOW_VAULT_ADDRESS,
+            address: VAULT_ADDR,
             functionName: "repayMax",
             args: [],
             chainId: ROBINHOOD_CHAIN_TESTNET_ID,
           });
         } else {
-          const amountUsd18 = parseUnits(amount.toFixed(18), 18);
           writeContract({
             abi: EQUIFLOW_VAULT_ABI,
-            address: EQUIFLOW_VAULT_ADDRESS,
+            address: VAULT_ADDR,
             functionName: "repay",
             args: [amountUsd18],
             chainId: ROBINHOOD_CHAIN_TESTNET_ID,
@@ -176,7 +184,7 @@ export function RepayDebtModal({
   }, [open, reset]);
 
   function handleClick() {
-    if (!EQUIFLOW_VAULT_ADDRESS || !USDC_ADDRESS) return;
+    if (!VAULT_ADDR || !TOKEN_ADDR) return;
     if (aaActive && smartAccount && AA_CONFIGURED) {
       void handleBundle();
       return;
@@ -185,9 +193,9 @@ export function RepayDebtModal({
       setStage("approving");
       writeContract({
         abi: ERC20_ABI,
-        address: USDC_ADDRESS,
+        address: TOKEN_ADDR,
         functionName: "approve",
-        args: [EQUIFLOW_VAULT_ADDRESS, usdgNeeded],
+        args: [VAULT_ADDR, maxUint256],
         chainId: ROBINHOOD_CHAIN_TESTNET_ID,
       });
     } else {
@@ -195,16 +203,15 @@ export function RepayDebtModal({
       if (useMax) {
         writeContract({
           abi: EQUIFLOW_VAULT_ABI,
-          address: EQUIFLOW_VAULT_ADDRESS,
+          address: VAULT_ADDR,
           functionName: "repayMax",
           args: [],
           chainId: ROBINHOOD_CHAIN_TESTNET_ID,
         });
       } else {
-        const amountUsd18 = parseUnits(amount.toFixed(18), 18);
         writeContract({
           abi: EQUIFLOW_VAULT_ABI,
-          address: EQUIFLOW_VAULT_ADDRESS,
+          address: VAULT_ADDR,
           functionName: "repay",
           args: [amountUsd18],
           chainId: ROBINHOOD_CHAIN_TESTNET_ID,
@@ -214,7 +221,7 @@ export function RepayDebtModal({
   }
 
   async function handleBundle() {
-    if (!EQUIFLOW_VAULT_ADDRESS || !USDC_ADDRESS || !smartAccount) return;
+    if (!VAULT_ADDR || !TOKEN_ADDR || !smartAccount) return;
     setAaError(null);
     setStage("repaying");
     try {
@@ -222,18 +229,18 @@ export function RepayDebtModal({
       const calls = [];
       if (allowance < usdgNeeded) {
         calls.push({
-          to: USDC_ADDRESS as Address,
+          to: TOKEN_ADDR as Address,
           data: encodeFunctionData({
             abi: ERC20_ABI,
             functionName: "approve",
-            args: [EQUIFLOW_VAULT_ADDRESS, usdgNeeded],
+            args: [VAULT_ADDR, maxUint256],
           }),
         });
       }
       calls.push(
         useMax
           ? {
-              to: EQUIFLOW_VAULT_ADDRESS as Address,
+              to: VAULT_ADDR as Address,
               data: encodeFunctionData({
                 abi: EQUIFLOW_VAULT_ABI,
                 functionName: "repayMax",
@@ -241,11 +248,11 @@ export function RepayDebtModal({
               }),
             }
           : {
-              to: EQUIFLOW_VAULT_ADDRESS as Address,
+              to: VAULT_ADDR as Address,
               data: encodeFunctionData({
                 abi: EQUIFLOW_VAULT_ABI,
                 functionName: "repay",
-                args: [parseUnits(amount.toFixed(18), 18)],
+                args: [amountUsd18],
               }),
             },
       );
@@ -274,8 +281,8 @@ export function RepayDebtModal({
 
   const canRepay =
     isConnected &&
-    !!EQUIFLOW_VAULT_ADDRESS &&
-    !!USDC_ADDRESS &&
+    !!VAULT_ADDR &&
+    !!TOKEN_ADDR &&
     amount > 0 &&
     !overDebt &&
     !insufficient &&
@@ -284,9 +291,9 @@ export function RepayDebtModal({
 
   let ctaLabel: string;
   if (!isConnected) ctaLabel = "Connect wallet";
-  else if (!EQUIFLOW_VAULT_ADDRESS || !USDC_ADDRESS)
+  else if (!VAULT_ADDR || !TOKEN_ADDR)
     ctaLabel = "Vault not configured";
-  else if (insufficient) ctaLabel = "Insufficient USDG balance";
+  else if (insufficient) ctaLabel = `Insufficient ${tokenSymbol} balance`;
   else if (aaActive && stage === "repaying") ctaLabel = "Bundling UserOp…";
   else if (stage === "approving" || stage === "approve-mining")
     ctaLabel =
@@ -310,7 +317,7 @@ export function RepayDebtModal({
     <ModalShell
       open={open}
       onClose={onClose}
-      eyebrow="repay / repayMax · USDG transferFrom"
+      eyebrow={`repay / repayMax · ${tokenSymbol} transferFrom`}
       title="Repay debt"
       footer={
         <>
@@ -321,7 +328,7 @@ export function RepayDebtModal({
           )}
           {insufficient && amount > 0 && (
             <ValidationError>
-              Wallet USDG ({fmt.usd(walletUsdg, 2)}) is less than{" "}
+              Wallet {tokenSymbol} ({fmt.usd(walletUsdg, 2)}) is less than{" "}
               {fmt.usd(amount, 2)} needed. Claim from faucet or reduce amount.
             </ValidationError>
           )}
@@ -350,7 +357,7 @@ export function RepayDebtModal({
               {useMax ? "repayMax()" : `repay(${fmt.usd(amount, 2)})`}
             </span>
             {allowance < usdgNeeded && amount > 0
-              ? " — auto-approves USDG first"
+              ? ` — auto-approves ${tokenSymbol} first`
               : ""}
           </ModalFootnote>
         </>
@@ -363,7 +370,7 @@ export function RepayDebtModal({
       >
         <SumRow k="Current debt" v={fmt.usd(borrowedUsd, 2)} />
         <SumRow
-          k="Wallet USDG balance"
+          k={`Wallet ${tokenSymbol} balance`}
           v={fmt.usd(walletUsdg, 2)}
           color={insufficient ? "var(--down)" : "var(--ink)"}
         />
@@ -436,7 +443,7 @@ export function RepayDebtModal({
             style={{ fontSize: 22, letterSpacing: "-0.02em" }}
           />
           <span className="font-mono text-ink-soft" style={{ fontSize: 13 }}>
-            USDG
+            {tokenSymbol}
           </span>
         </div>
         <div className="flex gap-1.5 mt-2.5">

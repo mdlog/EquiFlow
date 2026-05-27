@@ -7,10 +7,12 @@ import { HowItWorks } from "./_landing/HowItWorks";
 import { SupportedAssets } from "./_landing/SupportedAssets";
 import { Integrations } from "./_landing/Integrations";
 import { FinalCta } from "./_landing/FinalCta";
+import { WalletRedirect } from "./_landing/WalletRedirect";
 
 export default function Landing() {
   return (
     <div className="flex flex-col">
+      <WalletRedirect />
       <TopNav />
       <OracleMarquee />
       <Hero />

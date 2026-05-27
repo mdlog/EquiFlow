@@ -6,9 +6,9 @@ import { encodeFunctionData, type Address, type Hex } from "viem";
 import {
   ERC20_ABI,
   STOCK_TOKEN_ADDRESSES,
-  USDC_ADDRESS,
   explorerTx,
 } from "@/lib/contracts";
+import { useVaultContext } from "@/lib/hooks/use-vault-context";
 import { ROBINHOOD_CHAIN_TESTNET_ID } from "@/lib/config/chain";
 import { useSmartWallet } from "@/lib/aa/use-smart-wallet";
 import { sendUserOp } from "@/lib/aa/send-userop";
@@ -27,18 +27,27 @@ interface Tracked {
   decimals: number;
 }
 
-const TOKENS: Tracked[] = [
-  ...(USDC_ADDRESS
-    ? [{ symbol: "USDG", address: USDC_ADDRESS, decimals: 6 } as Tracked]
-    : []),
-  ...Object.entries(STOCK_TOKEN_ADDRESSES)
-    .filter((entry): entry is [string, Address] => !!entry[1])
-    .map(([sym, addr]) => ({ symbol: sym, address: addr, decimals: 18 })),
-];
+const STOCK_TOKENS: Tracked[] = Object.entries(STOCK_TOKEN_ADDRESSES)
+  .filter((entry): entry is [string, Address] => !!entry[1])
+  .map(([sym, addr]) => ({ symbol: sym, address: addr, decimals: 18 }));
 
 export function EmptySmartWalletButton() {
+  const { vault } = useVaultContext();
+  const TOKEN_ADDR = vault.tokenAddress;
+  const tokenSymbol = vault.borrowSymbol;
+
   const { address: eoaAddress } = useAccount();
   const { mode, smartAccount, smartAddress } = useSmartWallet();
+
+  const TOKENS: Tracked[] = useMemo(
+    () => [
+      ...(TOKEN_ADDR
+        ? [{ symbol: tokenSymbol, address: TOKEN_ADDR, decimals: vault.tokenDecimals } as Tracked]
+        : []),
+      ...STOCK_TOKENS,
+    ],
+    [TOKEN_ADDR, tokenSymbol, vault.tokenDecimals],
+  );
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<
     { ok: true; txHash: Hex } | { ok: false; error: string } | null

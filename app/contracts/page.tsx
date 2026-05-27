@@ -504,7 +504,7 @@ export default function ContractsPage() {
 
       {/* ── Hero ─────────────────────────────────────────────── */}
       <section className="border-b border-ink">
-        <div className="max-w-[1320px] mx-auto px-8 pt-6 pb-5">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 pt-6 pb-5">
           <div className="flex items-end justify-between gap-6">
             <div>
               <div className="eyebrow mb-2">
@@ -561,10 +561,10 @@ export default function ContractsPage() {
 
       {/* ── Contract tabs ────────────────────────────────────── */}
       <section className="border-b border-hairline bg-paper-alt">
-        <div className="max-w-[1320px] mx-auto px-8 py-5">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-5">
           <div className="eyebrow mb-3">Browse · {CONTRACTS.length} contracts</div>
           <div
-            className="grid grid-cols-4"
+            className="grid grid-cols-2 sm:grid-cols-4"
             style={{ border: "1px solid var(--ink)", background: "var(--paper)" }}
           >
             {CONTRACTS.map((c, i) => {
@@ -670,7 +670,7 @@ function NetworkStrip() {
 
   return (
     <section className="bg-paper-alt border-b border-hairline">
-      <div className="max-w-[1320px] mx-auto grid grid-cols-5">
+      <div className="max-w-[1320px] mx-auto grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
         {cells.map((c, i) => (
           <div
             key={c.label}
@@ -716,7 +716,7 @@ function NetworkStrip() {
           </div>
         ))}
       </div>
-      <div className="max-w-[1320px] mx-auto px-8 py-3 flex items-center gap-3 flex-wrap">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-3 flex items-center gap-3 flex-wrap">
         <span
           className="font-mono text-ink-mute"
           style={{ fontSize: 10, letterSpacing: "0.08em" }}
@@ -778,10 +778,10 @@ function NetworkStrip() {
 function ContractDetail({ c }: { c: Contract }) {
   return (
     <section className="border-b border-hairline">
-      <div className="max-w-[1320px] mx-auto px-8 py-7">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-7">
         <div
-          className="grid"
-          style={{ gridTemplateColumns: "1.4fr 1fr", gap: 28 }}
+          className="grid grid-cols-1 md:[grid-template-columns:1.4fr_1fr]"
+          style={{ gap: 28 }}
         >
           {/* address card */}
           <AddressCard c={c} />
@@ -892,8 +892,8 @@ function ContractDetail({ c }: { c: Contract }) {
 
         {/* events + storage two-col */}
         <div
-          className="mt-7 grid"
-          style={{ gridTemplateColumns: "1fr 1fr", gap: 28 }}
+          className="mt-7 grid grid-cols-1 md:grid-cols-2"
+          style={{ gap: 28 }}
         >
           <div>
             <div className="eyebrow mb-1">Events · {c.events.length} emitted</div>
@@ -1251,7 +1251,7 @@ function AccessBadge({ tag }: { tag: AccessTag }) {
 function DeploymentTimeline() {
   return (
     <section className="border-b border-hairline">
-      <div className="max-w-[1320px] mx-auto px-8 py-7">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-7">
         <div className="flex justify-between items-baseline mb-4">
           <div>
             <div className="eyebrow mb-1">
@@ -1421,7 +1421,7 @@ function ReadingGuide() {
   ];
   return (
     <section className="border-t border-ink bg-paper-alt">
-      <div className="max-w-[1320px] mx-auto px-8 py-8">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-8">
         <div className="mb-5">
           <div className="eyebrow mb-1.5">How to read this codebase</div>
           <h2
@@ -1432,7 +1432,7 @@ function ReadingGuide() {
           </h2>
         </div>
         <div
-          className="grid grid-cols-4 bg-paper"
+          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 bg-paper"
           style={{ border: "1px solid var(--hairline)" }}
         >
           {items.map((s, i) => (

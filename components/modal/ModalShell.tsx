@@ -67,8 +67,8 @@ export function ModalShell({
         }
       : {
           height: "100vh",
-          width,
-          maxWidth: "100vw",
+          width: "100%",
+          maxWidth: width,
           borderLeft: "1px solid var(--ink)",
           boxShadow: "-16px 0 40px rgba(20, 18, 14, 0.18)",
           animation: "ef-slide-right 0.32s cubic-bezier(0.2, 0.8, 0.2, 1)",

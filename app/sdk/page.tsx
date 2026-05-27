@@ -325,7 +325,7 @@ export default function SdkPage() {
 function SdkHero() {
   return (
     <section className="border-b border-ink">
-      <div className="max-w-[1320px] mx-auto px-8 pt-7 pb-7">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 pt-7 pb-7">
         <div className="grid" style={{ gridTemplateColumns: "1.3fr 1fr", gap: 36 }}>
           <div>
             <div className="eyebrow mb-2">
@@ -440,7 +440,7 @@ function QuickStart() {
       id="quick-start"
       className="border-b border-hairline bg-paper-alt"
     >
-      <div className="max-w-[1320px] mx-auto px-8 py-8">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-8">
         <div className="mb-5">
           <div className="eyebrow mb-1.5">Quick start · 4 steps · ~3 min</div>
           <h2
@@ -514,7 +514,7 @@ function ExamplesSection() {
 
   return (
     <section className="border-b border-hairline">
-      <div className="max-w-[1320px] mx-auto px-8 py-8">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-8">
         <div className="flex justify-between items-baseline mb-4 flex-wrap gap-3">
           <div>
             <div className="eyebrow mb-1">
@@ -619,7 +619,7 @@ function ExamplesSection() {
 function ModulesReference() {
   return (
     <section className="border-b border-hairline bg-paper-alt">
-      <div className="max-w-[1320px] mx-auto px-8 py-8">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-8">
         <div className="flex justify-between items-baseline mb-3.5">
           <div>
             <div className="eyebrow mb-1">
@@ -732,7 +732,7 @@ function ModulesReference() {
 function TypesSection() {
   return (
     <section className="border-b border-hairline">
-      <div className="max-w-[1320px] mx-auto px-8 py-8">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-8">
         <div className="mb-4">
           <div className="eyebrow mb-1">
             Core types · re-exported from @equiflow/sdk/types
@@ -831,7 +831,7 @@ function ComparisonStrip() {
   ];
   return (
     <section className="border-b border-hairline bg-paper-alt">
-      <div className="max-w-[1320px] mx-auto px-8 py-8">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-8">
         <div className="mb-4">
           <div className="eyebrow mb-1">Comparison · pick your altitude</div>
           <h2
@@ -923,7 +923,7 @@ function ComparisonStrip() {
 function CtaStrip() {
   return (
     <section className="border-t border-ink bg-paper-alt">
-      <div className="max-w-[1320px] mx-auto px-8 py-8">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-8">
         <div
           className="flex items-center justify-between gap-4 flex-wrap"
           style={{

@@ -5,10 +5,9 @@ import { Arrow } from "./shared";
 export function Hero() {
   return (
     <section
-      className="border-b border-hairline"
-      style={{ padding: "64px 0 56px" }}
+      className="border-b border-hairline py-10 sm:py-16"
     >
-      <div className="max-w-[1320px] mx-auto px-8 grid gap-20 items-center grid-cols-1 lg:[grid-template-columns:1.15fr_1fr]">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 grid gap-10 lg:gap-20 items-center grid-cols-1 lg:[grid-template-columns:1.15fr_1fr]">
         <div>
           <div
             className="inline-flex items-center gap-3 bg-paper-alt border border-hairline-soft rounded-[2px] mb-7"
@@ -46,7 +45,7 @@ export function Hero() {
             generate no yield beyond price drift.{" "}
             <strong className="text-ink font-medium">EquiFlow</strong> turns
             those holdings into productive collateral: pledge AAPL or SPY,
-            borrow regulated stablecoins, and route the proceeds into Aave V3.{" "}
+            borrow regulated stablecoins, and earn yield from the borrow spread.{" "}
             <strong className="text-ink font-medium">One signature.</strong>{" "}
             <strong className="text-ink font-medium">Sponsored gas.</strong>{" "}
             <strong className="text-ink font-medium">No taxable sale.</strong>

@@ -35,10 +35,9 @@ export function StatBand() {
 
   return (
     <section
-      className="border-b border-hairline bg-paper-alt"
-      style={{ padding: "44px 0" }}
+      className="border-b border-hairline bg-paper-alt py-8 sm:py-11"
     >
-      <div className="max-w-[1320px] mx-auto px-8 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-y-6">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-y-6">
         {cells.map((s, i) => (
           <div
             key={s.label}

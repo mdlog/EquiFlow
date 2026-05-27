@@ -6,8 +6,8 @@ import { SectionHead } from "./shared";
 
 export function SupportedAssets() {
   return (
-    <section className="border-b border-hairline" style={{ padding: "80px 0" }}>
-      <div className="max-w-[1320px] mx-auto px-8">
+    <section className="border-b border-hairline py-12 sm:py-20">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8">
         <SectionHead
           eyebrow={`Supported assets · ${STOCKS.length} tokenized equities`}
           title="Pledge any of these."

@@ -30,3 +30,8 @@ export const EQUIFLOW_VAULT_ADDRESS = clean(
   process.env.NEXT_PUBLIC_VAULT_ADDRESS,
 );
 export const USDC_ADDRESS = clean(process.env.NEXT_PUBLIC_USDC_ADDRESS);
+
+export const WETH_VAULT_ADDRESS = clean(
+  process.env.NEXT_PUBLIC_WETH_VAULT_ADDRESS,
+);
+export const WETH_ADDRESS = clean(process.env.NEXT_PUBLIC_WETH_ADDRESS);

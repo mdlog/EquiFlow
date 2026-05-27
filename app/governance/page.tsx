@@ -249,7 +249,7 @@ export default function GovernancePage() {
 
       {/* ── Hero ───────────────────────────────────────────── */}
       <section className="border-b border-ink">
-        <div className="max-w-[1320px] mx-auto px-8 pt-6 pb-5">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 pt-6 pb-5">
           <div className="flex items-end justify-between gap-6">
             <div>
               <div className="eyebrow mb-2">
@@ -298,7 +298,7 @@ export default function GovernancePage() {
 
       {/* ── KPI strip ─────────────────────────────────────── */}
       <section className="bg-paper-alt border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto grid grid-cols-5">
+        <div className="max-w-[1320px] mx-auto grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
           <KpiCell label="EQUI supply" value={fmtAbbr(TOTAL_SUPPLY)} sub="circulating · fully diluted" />
           <KpiCell
             label="Voting power"
@@ -328,7 +328,7 @@ export default function GovernancePage() {
 
       {/* ── Active proposals ──────────────────────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-6">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-6">
           <div className="flex justify-between items-baseline mb-3.5">
             <div>
               <div
@@ -392,7 +392,7 @@ export default function GovernancePage() {
 
       {/* ── Delegation panel + Top delegates ──────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto grid grid-cols-[1fr_1.3fr]">
+        <div className="max-w-[1320px] mx-auto grid grid-cols-1 md:grid-cols-[1fr_1.3fr]">
           <div
             style={{ padding: "24px 28px", borderRight: "1px solid var(--hairline)" }}
           >
@@ -583,7 +583,7 @@ export default function GovernancePage() {
 
       {/* ── Past proposals ────────────────────────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-6">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-6">
           <div className="flex justify-between items-baseline mb-3.5">
             <div>
               <div className="eyebrow mb-1">History · last 12 months</div>
@@ -678,7 +678,7 @@ export default function GovernancePage() {
 
       {/* ── Governance parameters ─────────────────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto px-8 py-6">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-6">
           <div className="flex justify-between items-baseline mb-3.5">
             <div>
               <div className="eyebrow mb-1">Constitution · on-chain</div>
@@ -1199,7 +1199,7 @@ function HowGovernanceWorks() {
   ];
   return (
     <section className="border-t border-ink bg-paper-alt">
-      <div className="max-w-[1320px] mx-auto px-8 py-8">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-8">
         <div className="mb-5">
           <div className="eyebrow mb-1.5">How EquiFlow governance works</div>
           <h2
@@ -1209,7 +1209,7 @@ function HowGovernanceWorks() {
             Four steps from <span className="italic">forum thread</span> to on-chain effect.
           </h2>
         </div>
-        <div className="grid grid-cols-4 bg-paper" style={{ border: "1px solid var(--hairline)" }}>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 bg-paper" style={{ border: "1px solid var(--hairline)" }}>
           {steps.map((s, i) => (
             <div
               key={s.n}

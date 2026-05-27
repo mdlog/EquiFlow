@@ -16,7 +16,7 @@ export function SectionHead({
 }) {
   return (
     <div
-      className="flex items-end justify-between pb-7 mb-10"
+      className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pb-5 sm:pb-7 mb-6 sm:mb-10"
       style={{ borderBottom: "1px solid var(--ink)" }}
     >
       <div className="max-w-[760px]">
@@ -26,7 +26,7 @@ export function SectionHead({
         <h2
           className="font-serif font-medium m-0"
           style={{
-            fontSize: 38,
+            fontSize: "clamp(26px, 4vw, 38px)",
             letterSpacing: "-0.03em",
             lineHeight: 1.05,
           }}

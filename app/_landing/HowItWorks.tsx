@@ -5,8 +5,8 @@ const MAX_LTV = Math.max(...STOCKS.map((s) => s.ltv));
 
 export function HowItWorks() {
   return (
-    <section className="border-b border-hairline" style={{ padding: "80px 0" }}>
-      <div className="max-w-[1320px] mx-auto px-8">
+    <section className="border-b border-hairline py-12 sm:py-20">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8">
         <SectionHead
           eyebrow="How EquiFlow works"
           title="Three motions."
@@ -38,15 +38,14 @@ export function HowItWorks() {
           />
           <Motion
             num="MOTION 03 · EARN"
-            title="Auto-route to"
-            titleEm="yield"
-            desc="Planned: deposit borrowed stables straight into Aave V3 in the same bundle. Vault integration is on the roadmap — the toggle in the composer is visible but disabled until the on-chain route is wired."
-            footLabel="Net APY"
-            footValue="Coming soon"
-            footValueClass="text-ink-mute"
+            title="Earn from"
+            titleEm="borrow spread"
+            desc="LPs deposit USDG or WETH into the vault and earn yield from borrower interest. The protocol's utilization-based rate model ensures fair pricing — higher demand means higher LP returns."
+            footLabel="LP APY"
+            footValue="Variable"
+            footValueClass="text-up"
             viz={<EarnViz />}
             isLast={true}
-            comingSoon
           />
         </div>
       </div>
@@ -228,7 +227,7 @@ function EarnViz() {
       </circle>
       <circle cx="120" cy="40" r="14" fill="#1A1814" />
       <text x="120" y="38" fontFamily="JetBrains Mono" fontSize="7" fill="#FAF8F2" textAnchor="middle">
-        AAVE V3
+        LP VAULT
       </text>
       <text x="120" y="48" fontFamily="Source Serif 4" fontSize="11" fontWeight="500" fill="#FAF8F2" textAnchor="middle">
         yield

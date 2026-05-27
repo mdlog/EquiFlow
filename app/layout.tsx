@@ -34,8 +34,9 @@ export default function RootLayout({
     <html
       lang="en"
       className={`${geist.variable} ${jetbrainsMono.variable} ${sourceSerif.variable}`}
+      suppressHydrationWarning
     >
-      <body className="min-h-screen bg-paper text-ink">
+      <body className="min-h-screen bg-paper text-ink" suppressHydrationWarning>
         <Providers>{children}</Providers>
       </body>
     </html>

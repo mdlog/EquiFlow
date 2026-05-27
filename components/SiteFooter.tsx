@@ -58,10 +58,10 @@ export function SiteFooter({ gap = true }: { gap?: boolean } = {}) {
 
   return (
     <footer
-      className="bg-paper-alt border-t border-ink"
-      style={{ padding: "64px 0 36px", marginTop: gap ? 40 : 0 }}
+      className="bg-paper-alt border-t border-ink pt-12 sm:pt-16 pb-8 sm:pb-9"
+      style={{ marginTop: gap ? 40 : 0 }}
     >
-      <div className="max-w-[1320px] mx-auto px-8">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8">
         <div className="grid gap-12 grid-cols-2 md:grid-cols-3 lg:[grid-template-columns:1.6fr_repeat(4,1fr)]">
           <div className="col-span-2 lg:col-span-1">
             <Wordmark size={16} />

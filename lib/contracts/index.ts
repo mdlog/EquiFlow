@@ -8,5 +8,7 @@ export {
   STOCK_TOKEN_ADDRESSES,
   EQUIFLOW_VAULT_ADDRESS,
   USDC_ADDRESS,
+  WETH_VAULT_ADDRESS,
+  WETH_ADDRESS,
 } from "./addresses";
 export { shortAddr, explorerTx, explorerAddr } from "./explorer";

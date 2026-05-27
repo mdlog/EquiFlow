@@ -24,6 +24,9 @@ export const robinhoodChainTestnet = defineChain({
       url: "https://explorer.testnet.chain.robinhood.com",
     },
   },
+  fees: {
+    defaultPriorityFee: () => 1n,
+  },
   // NOTE: Address 0xa432504b6F04Cafe775b09D8AA92e8dbe41Ec7a8 on RBN testnet
   // implements Multicall v1/v2 (aggregate, tryAggregate) but NOT Multicall3
   // (aggregate3). Registering it as `multicall3` caused viem to call

@@ -22,7 +22,6 @@ import { useProtocolStats, useListedAssets } from "@/lib/hooks/use-protocol-stat
 import { fmt } from "@/lib/format";
 import {
   EQUIFLOW_VAULT_ABI,
-  EQUIFLOW_VAULT_ADDRESS,
   STOCK_TOKEN_ADDRESSES,
   explorerTx,
   shortAddr,
@@ -34,21 +33,17 @@ import { usePositionEvents } from "@/lib/hooks/use-position-events";
 import { useActiveWallet } from "@/lib/hooks/use-active-wallet";
 import { useLiveAdapterTick, useStockPrices } from "@/lib/hooks/use-adapter-price";
 import { SessionBadge } from "@/components/SessionBadge";
-import { AutoDefenderModal } from "@/components/AutoDefenderModal";
-import {
-  useDefenderStatus,
-  type DefenderStatus,
-} from "@/lib/hooks/use-defender-status";
-import { revokeSessionKey } from "@/lib/aa/session-key";
-import { useSmartWallet } from "@/lib/aa/use-smart-wallet";
 import type { Address } from "viem";
+import { VaultSelector } from "@/components/VaultSelector";
+import { useVaultContext } from "@/lib/hooks/use-vault-context";
 
 export default function PositionsPage() {
+  const { vault } = useVaultContext();
   const pos = usePosition();
   const { isConnected } = useAccount();
   const { connectors, connect } = useConnect();
-  const listed = useListedAssets();
-  const protocolStats = useProtocolStats(listed);
+  const listed = useListedAssets(vault.address);
+  const protocolStats = useProtocolStats(listed, vault.address, vault.tokenAddress);
 
   // ── derived display ──────────────────────────────────────────────────
   const lines = pos.lines;
@@ -104,7 +99,7 @@ export default function PositionsPage() {
 
         {/* 5-KPI banner */}
         <section
-          className="grid grid-cols-5 bg-paper-alt"
+          className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 bg-paper-alt"
           style={{ borderBottom: "1px solid var(--ink)" }}
         >
           <Kpi
@@ -113,7 +108,7 @@ export default function PositionsPage() {
             sub={`${lines.length} asset${lines.length !== 1 ? "s" : ""} pledged`}
           />
           <Kpi
-            label="Debt · USDG"
+            label={`Debt · ${vault.borrowSymbol}`}
             value={fmt.usd(borrowedUsd, 0)}
             sub={borrowApr != null ? `@ ${borrowApr.toFixed(2)}% APR` : "—"}
           />
@@ -136,15 +131,10 @@ export default function PositionsPage() {
           />
         </section>
 
-        <AutoDefenderCard
-          lines={lines}
-          healthFactor={healthFactor}
-        />
-
         {!isConnected && (
           <div
-            className="border-b border-hairline-soft flex items-center justify-between"
-            style={{ padding: "12px 32px", background: "var(--amber-soft)" }}
+            className="border-b border-hairline-soft flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 px-4 sm:px-8 py-3"
+            style={{ background: "var(--amber-soft)" }}
           >
             <span style={{ fontSize: 12 }} className="text-ink-soft">
               Wallet not connected — connect to view your position.
@@ -170,17 +160,19 @@ export default function PositionsPage() {
         {/* Orbit + Collateral/Debt tables */}
         {pos.hasPosition || !isConnected ? (
           <section
-            className="grid border-b border-hairline"
-            style={{ gridTemplateColumns: "1.05fr 1fr" }}
+            className="grid grid-cols-1 lg:[grid-template-columns:1.05fr_1fr] border-b border-hairline"
           >
             {/* LEFT: orbit */}
             <div
-              className="border-r border-hairline"
-              style={{ padding: "24px 28px" }}
+              className="lg:border-r border-hairline border-b lg:border-b-0"
+              style={{ padding: "24px 16px" }}
             >
               <div className="flex justify-between items-end mb-1">
                 <div>
-                  <div className="eyebrow mb-1">Position view</div>
+                  <div className="eyebrow mb-1 flex items-center gap-3">
+                    <span>Position view</span>
+                    <VaultSelector compact />
+                  </div>
                   <h2
                     className="font-serif font-medium m-0"
                     style={{
@@ -211,7 +203,7 @@ export default function PositionsPage() {
                 className="mt-4 bg-paper-alt border border-hairline-soft flex gap-5 flex-wrap"
                 style={{ padding: "12px 14px" }}
               >
-                <LegendItem dot="var(--ink)" label="Loan" desc="USDG borrowed" />
+                <LegendItem dot="var(--ink)" label="Loan" desc={`${vault.borrowSymbol} borrowed`} />
                 <LegendItem
                   ring
                   label="Collateral"
@@ -267,8 +259,7 @@ export default function PositionsPage() {
             <LpPoolPanel />
 
             <section
-              className="grid"
-              style={{ gridTemplateColumns: "1fr 1fr" }}
+              className="grid grid-cols-1 md:grid-cols-2"
             >
               <OracleActivityLog
                 stocks={lines}
@@ -299,21 +290,20 @@ function PositionSelectorBar({
   HFTone: string;
   isConnected: boolean;
 }) {
-  // LP shares are keyed by the address that called `lpDeposit`. In AA mode
-  // that's the smart account, so query via the active wallet.
+  const { vault } = useVaultContext();
+  const vaultAddr = vault.address;
   const { address } = useActiveWallet();
   const [depositOpen, setDepositOpen] = useState(false);
   const [withdrawLpOpen, setWithdrawLpOpen] = useState(false);
 
-  // Read user's LP shares to decide whether to show "Withdraw LP" button
   const { data: lpPos } = useReadContract({
     abi: EQUIFLOW_VAULT_ABI,
-    address: EQUIFLOW_VAULT_ADDRESS,
+    address: vaultAddr,
     functionName: "lpPositionOf",
     args: address ? [address] : undefined,
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
     query: {
-      enabled: !!EQUIFLOW_VAULT_ADDRESS && !!address,
+      enabled: !!vaultAddr && !!address,
       refetchInterval: 15_000,
     },
   });
@@ -323,10 +313,9 @@ function PositionSelectorBar({
 
   return (
     <section
-      className="flex items-center justify-between border-b border-hairline-soft"
-      style={{ padding: "14px 28px" }}
+      className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-hairline-soft px-4 sm:px-7 py-3 sm:py-3.5"
     >
-      <div className="flex items-center gap-5">
+      <div className="flex items-center gap-3 sm:gap-5 flex-wrap">
         <div
           className="flex items-center gap-2.5 border border-ink rounded-[2px] cursor-pointer"
           style={{ padding: "6px 12px" }}
@@ -356,12 +345,12 @@ function PositionSelectorBar({
           </svg>
         </div>
         <div
-          className="flex items-center gap-4 flex-wrap"
+          className="hidden sm:flex items-center gap-4 flex-wrap"
           style={{ fontSize: 12 }}
         >
           <MetaItem k="Opened" v="—" />
           <MetaItem k="Pledged" v={`${assetCount} assets`} />
-          <MetaItem k="Loan" v="USDG" />
+          <MetaItem k="Loan" v={vault.borrowSymbol} />
           <MetaItem
             k="Status"
             v={
@@ -372,7 +361,7 @@ function PositionSelectorBar({
           />
         </div>
       </div>
-      <div className="flex gap-2">
+      <div className="flex gap-2 flex-wrap">
         <button
           type="button"
           onClick={() => setDepositOpen(true)}
@@ -384,7 +373,7 @@ function PositionSelectorBar({
             color: "var(--ink)",
             border: "1px solid var(--up)",
           }}
-          title="Deposit USDG as LP · earn APY from borrow spread"
+          title={`Deposit ${vault.borrowSymbol} as LP · earn APY from borrow spread`}
         >
           ✦ Deposit LP
         </button>
@@ -818,8 +807,10 @@ function PerfChart({
 
   const minHf = Math.min(1, Math.min(...data.map((d) => d.hf))) - 0.1;
   const maxHf = Math.max(...data.map((d) => d.hf)) + 0.2;
-  const minC = Math.min(...data.map((d) => d.c)) * 0.97;
-  const maxC = Math.max(...data.map((d) => d.c)) * 1.03;
+  const rawMinC = Math.min(...data.map((d) => d.c));
+  const rawMaxC = Math.max(...data.map((d) => d.c));
+  const minC = rawMinC === rawMaxC ? rawMinC - 1 : rawMinC * 0.97;
+  const maxC = rawMinC === rawMaxC ? rawMaxC + 1 : rawMaxC * 1.03;
 
   const yHf = (v: number) =>
     H - ((v - minHf) / (maxHf - minHf)) * (H - 20) - 10;
@@ -971,11 +962,11 @@ function PositionActions({
   ltvCap: number;
   liqAt: number;
 }) {
+  const { vault } = useVaultContext();
   const [borrowOpen, setBorrowOpen] = useState(false);
   const [withdrawOpen, setWithdrawOpen] = useState(false);
   const [repayOpen, setRepayOpen] = useState(false);
 
-  // Max withdrawable preview (LTV-safe) — for the action button sub-label
   const minCollatRequired =
     ltvCap > 0 ? borrowedUsd / (ltvCap / 100) : 0;
   const maxWithdrawUsd = Math.max(0, collateralUsd - minCollatRequired);
@@ -983,7 +974,7 @@ function PositionActions({
   return (
     <>
       <section
-        className="grid grid-cols-4 border-b border-hairline"
+        className="grid grid-cols-2 md:grid-cols-4 border-b border-hairline"
         style={{ gap: 0 }}
       >
         <ActionBtn
@@ -991,7 +982,7 @@ function PositionActions({
           label="Repay debt"
           sub={
             borrowedUsd > 0
-              ? `Settle ${fmt.usd(borrowedUsd, 2)} USDG`
+              ? `Settle ${fmt.usd(borrowedUsd, 2)} ${vault.borrowSymbol}`
               : "No outstanding debt"
           }
           icon="↓"
@@ -1239,64 +1230,64 @@ function OracleActivityLog({
    LP POOL PANEL · public, real-time vault stats
    ────────────────────────────────────────────────────────── */
 function LpPoolPanel() {
+  const { vault } = useVaultContext();
+  const vaultAddr = vault.address;
   const { address } = useActiveWallet();
-  // Read vault stats in parallel
   const { data: tvlRaw } = useReadContract({
     abi: EQUIFLOW_VAULT_ABI,
-    address: EQUIFLOW_VAULT_ADDRESS,
+    address: vaultAddr,
     functionName: "totalAssetsUsd",
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!EQUIFLOW_VAULT_ADDRESS, refetchInterval: 12_000 },
+    query: { enabled: !!vaultAddr, refetchInterval: 12_000 },
   });
   const { data: bookedRaw } = useReadContract({
     abi: EQUIFLOW_VAULT_ABI,
-    address: EQUIFLOW_VAULT_ADDRESS,
+    address: vaultAddr,
     functionName: "bookedUsdg",
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!EQUIFLOW_VAULT_ADDRESS, refetchInterval: 12_000 },
+    query: { enabled: !!vaultAddr, refetchInterval: 12_000 },
   });
   const { data: totalSharesRaw } = useReadContract({
     abi: EQUIFLOW_VAULT_ABI,
-    address: EQUIFLOW_VAULT_ADDRESS,
+    address: vaultAddr,
     functionName: "totalShares",
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!EQUIFLOW_VAULT_ADDRESS, refetchInterval: 12_000 },
+    query: { enabled: !!vaultAddr, refetchInterval: 12_000 },
   });
   const { data: apyRaw } = useReadContract({
     abi: EQUIFLOW_VAULT_ABI,
-    address: EQUIFLOW_VAULT_ADDRESS,
+    address: vaultAddr,
     functionName: "lpApyBps",
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!EQUIFLOW_VAULT_ADDRESS, refetchInterval: 12_000 },
+    query: { enabled: !!vaultAddr, refetchInterval: 12_000 },
   });
   const { data: utilizationRaw } = useReadContract({
     abi: EQUIFLOW_VAULT_ABI,
-    address: EQUIFLOW_VAULT_ADDRESS,
+    address: vaultAddr,
     functionName: "utilizationBps",
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!EQUIFLOW_VAULT_ADDRESS, refetchInterval: 12_000 },
+    query: { enabled: !!vaultAddr, refetchInterval: 12_000 },
   });
   const { data: borrowRateRaw } = useReadContract({
     abi: EQUIFLOW_VAULT_ABI,
-    address: EQUIFLOW_VAULT_ADDRESS,
+    address: vaultAddr,
     functionName: "borrowRateBps",
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!EQUIFLOW_VAULT_ADDRESS, staleTime: 60_000 },
+    query: { enabled: !!vaultAddr, staleTime: 60_000 },
   });
   const { data: myLp } = useReadContract({
     abi: EQUIFLOW_VAULT_ABI,
-    address: EQUIFLOW_VAULT_ADDRESS,
+    address: vaultAddr,
     functionName: "lpPositionOf",
     args: address ? [address] : undefined,
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
     query: {
-      enabled: !!EQUIFLOW_VAULT_ADDRESS && !!address,
+      enabled: !!vaultAddr && !!address,
       refetchInterval: 12_000,
     },
   });
 
-  // USDG decimals = 6 on RBN
-  const usdgDec = 6;
+  const usdgDec = vault.tokenDecimals;
 
   const tvl = tvlRaw !== undefined ? Number(tvlRaw as bigint) / 1e18 : 0;
   const idle =
@@ -1329,7 +1320,7 @@ function LpPoolPanel() {
             className="font-serif font-medium m-0"
             style={{ fontSize: 20, letterSpacing: "-0.02em" }}
           >
-            Deposit USDG, earn from borrow spread
+            Deposit {vault.borrowSymbol}, earn from borrow spread
           </h3>
           <p
             className="text-ink-soft m-0"
@@ -1337,12 +1328,12 @@ function LpPoolPanel() {
           >
             Borrowers pay {borrowPct.toFixed(2)}% APR. Interest accrues
             on-chain into your share value. Withdraw anytime your share of vault
-            USDG is idle.
+            {vault.borrowSymbol} is idle.
           </p>
         </div>
       </div>
       <div
-        className="grid grid-cols-5 bg-paper rounded-[2px] border border-hairline-soft"
+        className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 bg-paper rounded-[2px] border border-hairline-soft"
         style={{ overflow: "hidden" }}
       >
         <PoolStat label="Vault TVL" value={fmt.usd(tvl, 0)} />
@@ -1357,7 +1348,7 @@ function LpPoolPanel() {
           value={`${utilPct.toFixed(1)}%`}
           sub={`${fmt.usd(tvl - idle, 0)} lent out`}
         />
-        <PoolStat label="Idle USDG" value={fmt.usd(idle, 0)} />
+        <PoolStat label={`Idle ${vault.borrowSymbol}`} value={fmt.usd(idle, 0)} />
         <PoolStat
           label="Your shares"
           value={
@@ -1688,6 +1679,7 @@ function Orbit({
   tension: number;
   borrowed: number;
 }) {
+  const { vault } = useVaultContext();
   const livePrices = useStockPrices();
   const W = 620,
     H = 380;
@@ -1782,7 +1774,7 @@ function Orbit({
             opacity="0.7"
             letterSpacing="0.06em"
           >
-            USDG
+            {vault.borrowSymbol}
           </text>
           <text
             x={cx}
@@ -1950,250 +1942,3 @@ function Orbit({
   );
 }
 
-/* ──────────────────────────────────────────────────────────────
-   AUTO-DEFENDER · session-key card
-   ────────────────────────────────────────────────────────── */
-function AutoDefenderCard({
-  lines,
-  healthFactor,
-}: {
-  lines: LiveCollateralLine[];
-  healthFactor: number;
-}) {
-  const { address, isSmartWallet } = useActiveWallet();
-  const { smartAccount } = useSmartWallet();
-  const { status, refresh } = useDefenderStatus(address);
-  const [open, setOpen] = useState(false);
-  const [revoking, setRevoking] = useState(false);
-
-  const tokens = useMemo<Address[]>(() => {
-    const out: Address[] = [];
-    for (const l of lines) {
-      const a = STOCK_TOKEN_ADDRESSES[l.sym];
-      if (a) out.push(a);
-    }
-    return out;
-  }, [lines]);
-
-  const active = !!status?.enabled;
-
-  async function handleRevoke() {
-    if (!address || revoking) return;
-    setRevoking(true);
-    try {
-      await revokeSessionKey({
-        smartAccount,
-        smartWalletAddress: address,
-      });
-      await refresh();
-    } finally {
-      setRevoking(false);
-    }
-  }
-
-  return (
-    <section
-      className="border-b border-hairline"
-      style={{ padding: "20px 28px" }}
-    >
-      <div
-        className="bg-paper-alt border border-hairline-soft rounded-[2px] grid items-center"
-        style={{
-          gridTemplateColumns: "auto 1fr auto",
-          padding: "18px 22px",
-          gap: 24,
-        }}
-      >
-        {/* Left: icon + label */}
-        <div className="flex items-center gap-3">
-          <div
-            className="border border-ink rounded-full flex items-center justify-center"
-            style={{
-              width: 38,
-              height: 38,
-              background: active ? "var(--ink)" : "var(--paper)",
-              color: active ? "var(--paper)" : "var(--ink)",
-              fontSize: 18,
-              fontFamily: "JetBrains Mono",
-            }}
-          >
-            ⏻
-          </div>
-          <div>
-            <div className="eyebrow" style={{ marginBottom: 3 }}>
-              Auto-Defender · session key
-            </div>
-            <div
-              className="font-serif font-medium"
-              style={{ fontSize: 17, letterSpacing: "-0.02em" }}
-            >
-              {active ? (
-                <>
-                  Active · keeper authorized to{" "}
-                  <em>repayDebt()</em>
-                </>
-              ) : (
-                <>
-                  Disabled · sleep through{" "}
-                  <em>liquidations</em>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Middle: status detail */}
-        <div className="font-mono" style={{ fontSize: 11, lineHeight: 1.7 }}>
-          {active && status ? (
-            <DefenderStatusLine status={status} healthFactor={healthFactor} />
-          ) : (
-            <span className="text-ink-mute">
-              Pre-authorize the EquiFlow keeper to top up your debt when health
-              drops — bounded by a weekly cap and an expiry date. No popups at
-              3am, no liquidation cascade.
-            </span>
-          )}
-        </div>
-
-        {/* Right: actions */}
-        <div className="flex gap-2">
-          {active ? (
-            <>
-              <button
-                type="button"
-                onClick={handleRevoke}
-                disabled={revoking}
-                className="bg-transparent text-ink border border-hairline rounded-[2px] font-medium disabled:opacity-50"
-                style={{ padding: "8px 14px", fontSize: 12 }}
-              >
-                {revoking ? "Revoking…" : "Revoke"}
-              </button>
-              <button
-                type="button"
-                onClick={() => setOpen(true)}
-                className="bg-ink text-paper rounded-[2px] font-medium"
-                style={{ padding: "8px 14px", fontSize: 12 }}
-              >
-                Re-configure
-              </button>
-            </>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setOpen(true)}
-              disabled={!isSmartWallet}
-              className="bg-ink text-paper rounded-[2px] font-medium disabled:opacity-40 disabled:cursor-not-allowed"
-              style={{ padding: "8px 14px", fontSize: 12 }}
-              title={
-                !isSmartWallet
-                  ? "Enable Smart wallet mode first"
-                  : "Enable session-key based auto-repay"
-              }
-            >
-              Enable Auto-Defender →
-            </button>
-          )}
-        </div>
-      </div>
-
-      <AutoDefenderModal
-        open={open}
-        onClose={() => setOpen(false)}
-        collateralTokens={tokens}
-        onSuccess={() => {
-          void refresh();
-        }}
-      />
-    </section>
-  );
-}
-
-function DefenderStatusLine({
-  status,
-  healthFactor,
-}: {
-  status: DefenderStatus;
-  healthFactor: number;
-}) {
-  const threshold = status.threshold
-    ? Number(BigInt(status.threshold)) / 1e18
-    : 0;
-  const weeklyLimit = status.weeklyLimit
-    ? Number(BigInt(status.weeklyLimit)) / 1e6
-    : 0;
-  const weekUsed = status.weekUsed
-    ? Number(BigInt(status.weekUsed)) / 1e6
-    : 0;
-  const expires = status.expiresAt
-    ? new Date(status.expiresAt * 1000).toISOString().slice(0, 10)
-    : "—";
-  const armed = healthFactor < threshold;
-  const pct = weeklyLimit > 0 ? Math.min(100, (weekUsed / weeklyLimit) * 100) : 0;
-
-  return (
-    <div className="flex flex-wrap items-center gap-x-5 gap-y-1">
-      <span>
-        <span className="text-ink-mute">Trigger </span>
-        <span
-          className="font-semibold"
-          style={{
-            color: armed ? "var(--down)" : "var(--ink)",
-          }}
-        >
-          HF&lt;{threshold.toFixed(2)}
-        </span>
-        {armed && (
-          <span
-            className="text-down"
-            style={{ marginLeft: 6, letterSpacing: "0.04em", fontSize: 10 }}
-          >
-            · ARMED
-          </span>
-        )}
-      </span>
-      <span>
-        <span className="text-ink-mute">Used </span>
-        <span className="font-semibold tabular">
-          {fmt.usd(weekUsed, 0)} / {fmt.usd(weeklyLimit, 0)}
-        </span>
-        <span
-          className="inline-block align-middle"
-          style={{
-            width: 60,
-            height: 3,
-            background: "var(--hairline-soft)",
-            marginLeft: 8,
-            position: "relative",
-            verticalAlign: "middle",
-          }}
-        >
-          <span
-            style={{
-              position: "absolute",
-              left: 0,
-              top: 0,
-              bottom: 0,
-              width: `${pct}%`,
-              background: pct > 80 ? "var(--down)" : "var(--ink)",
-            }}
-          />
-        </span>
-      </span>
-      <span>
-        <span className="text-ink-mute">Expires </span>
-        <span className="font-semibold tabular">{expires}</span>
-      </span>
-      {status.installUserOpHash && (
-        <a
-          href={explorerTx(status.installUserOpHash)}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-ink-soft hover:text-ink no-underline"
-          style={{ fontSize: 10 }}
-        >
-          install op {shortAddr(status.installUserOpHash, 8, 6)} ↗
-        </a>
-      )}
-    </div>
-  );
-}

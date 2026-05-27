@@ -9,6 +9,7 @@ import { getWagmiConfig } from "@/lib/web3/wagmi";
 import { robinhoodChainTestnet } from "@/lib/config/chain";
 import { PriceKeeperMount } from "@/components/PriceKeeperMount";
 import { SmartWalletProvider } from "@/lib/aa/use-smart-wallet";
+import { VaultProvider } from "@/lib/hooks/use-vault-context";
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(
@@ -39,8 +40,10 @@ export function Providers({ children }: { children: React.ReactNode }) {
           showRecentTransactions
         >
           <SmartWalletProvider>
-            <PriceKeeperMount />
-            {children}
+            <VaultProvider>
+              <PriceKeeperMount />
+              {children}
+            </VaultProvider>
           </SmartWalletProvider>
         </RainbowKitProvider>
       </QueryClientProvider>

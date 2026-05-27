@@ -13,7 +13,7 @@ export function Sparkline({
   h = 24,
   color = "var(--ink)",
   fill = false,
-  points = 24,
+  points = 48,
 }: Props) {
   const series = data && data.length >= 2 ? data : Array(points).fill(50);
 

@@ -8,9 +8,9 @@ import {
 } from "wagmi";
 import {
   EQUIFLOW_VAULT_ABI,
-  EQUIFLOW_VAULT_ADDRESS,
   STOCK_TOKEN_ADDRESSES,
 } from "@/lib/contracts";
+import { useVaultContext } from "@/lib/hooks/use-vault-context";
 import { ROBINHOOD_CHAIN_TESTNET_ID } from "@/lib/config/chain";
 import { fmt } from "@/lib/format";
 import { useStockPrices } from "@/lib/hooks/use-adapter-price";
@@ -55,6 +55,11 @@ export function WithdrawCollateralModal({
   ltvCap,
   liqLtv,
 }: Props) {
+  const { vault } = useVaultContext();
+  const VAULT_ADDR = vault.address;
+  const TOKEN_ADDR = vault.tokenAddress;
+  const tokenSymbol = vault.borrowSymbol;
+
   const { isConnected } = useActiveWallet();
   const { mode: aaMode, smartAccount, smartAddress, prepareForSubmit } =
     useSmartWallet();
@@ -124,7 +129,7 @@ export function WithdrawCollateralModal({
   const canWithdraw =
     isConnected &&
     !!tokenAddr &&
-    !!EQUIFLOW_VAULT_ADDRESS &&
+    !!VAULT_ADDR &&
     shares > 0 &&
     !invalid &&
     !isPending &&
@@ -133,7 +138,7 @@ export function WithdrawCollateralModal({
     !sealed;
 
   function handleWithdraw() {
-    if (!tokenAddr || !EQUIFLOW_VAULT_ADDRESS) return;
+    if (!tokenAddr || !VAULT_ADDR) return;
     // Use the raw on-chain balance when the user is withdrawing their full
     // position. `parseUnits(shares.toFixed(18), 18)` drifts by ~1 wei on
     // non-exactly-representable decimals (e.g. 0.11), and the vault rejects
@@ -149,7 +154,7 @@ export function WithdrawCollateralModal({
     }
     writeContract({
       abi: EQUIFLOW_VAULT_ABI,
-      address: EQUIFLOW_VAULT_ADDRESS,
+      address: VAULT_ADDR,
       functionName: "withdraw",
       args: [tokenAddr, amount],
       chainId: ROBINHOOD_CHAIN_TESTNET_ID,
@@ -157,7 +162,7 @@ export function WithdrawCollateralModal({
   }
 
   async function handleBundle(amount: bigint) {
-    if (!tokenAddr || !EQUIFLOW_VAULT_ADDRESS || !smartAccount) return;
+    if (!tokenAddr || !VAULT_ADDR || !smartAccount) return;
     setAaError(null);
     setAaBusy(true);
     try {
@@ -166,7 +171,7 @@ export function WithdrawCollateralModal({
         smartAccount,
         calls: [
           {
-            to: EQUIFLOW_VAULT_ADDRESS as Address,
+            to: VAULT_ADDR as Address,
             data: encodeFunctionData({
               abi: EQUIFLOW_VAULT_ABI,
               functionName: "withdraw",

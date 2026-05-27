@@ -16,6 +16,11 @@ import { useRecommendedLtv } from "@/lib/hooks/use-recommended-ltv";
 import { shortAddr, explorerAddr } from "@/lib/contracts";
 import { AssetLogo } from "@/components/AssetLogo";
 import { LtvBreakdown } from "@/components/LtvBreakdown";
+import { Sparkline } from "@/components/Sparkline";
+import { VaultSelector } from "@/components/VaultSelector";
+import { useVaultContext } from "@/lib/hooks/use-vault-context";
+import { useMarkets24h, useMarketsSparkline } from "@/lib/hooks/use-market-history";
+import { PledgeSidebar } from "@/components/PledgeSidebar";
 
 type Mode = "vault" | "borrow" | "ltv";
 type SortKey =
@@ -30,24 +35,21 @@ export default function TopographyPage() {
   const [mode, setMode] = useState<Mode>("vault");
   const [sortBy, setSortBy] = useState<SortKey>("price");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [pledgeSym, setPledgeSym] = useState<string | null>(null);
 
+  const { vault } = useVaultContext();
   const stocks = STOCKS;
   const focused = stocks.find((s) => s.sym === focus) ?? stocks[0];
 
-  /// Derived protocol-wide rates via kinked IRM (lib/irm.ts) — these replace
-  /// the static per-asset averages because the vault is single-pool USDG.
-  const listed = useListedAssets();
-  const stats = useProtocolStats(listed);
+  const listed = useListedAssets(vault.address);
+  const stats = useProtocolStats(listed, vault.address, vault.tokenAddress);
   const derivedBorrowApr =
     stats.derived ? stats.derived.borrowAprBps / 100 : null;
   const derivedVaultApr =
     stats.derived ? stats.derived.supplyAprBps / 100 : null;
 
-  /// "Best vault" is now degenerate (all assets share the rate) but kept as a
-  /// stat for the header. Reports the protocol rate + a symbol the focus
-  /// panel defaults to; cosmetic only.
   const bestVault = derivedVaultApr ?? 0;
-  const bestVaultSym = derivedVaultApr != null ? "all" : "—";
+  const bestVaultSym = vault.borrowSymbol;
   const avgVault = derivedVaultApr ?? 0;
   const avgBorrow = derivedBorrowApr ?? 0;
   const totalLiquid =
@@ -55,6 +57,10 @@ export default function TopographyPage() {
       ? Number(stats.liquidityUsd) / 1e18
       : 0;
   const spread = avgVault - avgBorrow;
+
+  const allSyms = useMemo(() => STOCKS.map((s) => s.sym), []);
+  const history24h = useMarkets24h(allSyms);
+  const sparkline = useMarketsSparkline(allSyms, 48);
 
   return (
     <div className="flex flex-col min-h-screen">
@@ -66,16 +72,18 @@ export default function TopographyPage() {
       <div className="max-w-[1320px] w-full mx-auto flex-1 flex flex-col">
         {/* Header */}
         <section
-          className="border-b border-hairline-soft"
-          style={{ padding: "24px 32px 18px" }}
+          className="border-b border-hairline-soft px-4 sm:px-8 pt-5 sm:pt-6 pb-4"
         >
-          <div className="flex items-end justify-between gap-6">
+          <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 sm:gap-6">
             <div>
-              <div className="eyebrow mb-2">Markets · Yield topography</div>
+              <div className="eyebrow mb-2 flex items-center gap-3">
+                <span>Markets · Yield topography</span>
+                <VaultSelector compact />
+              </div>
               <h1
                 className="font-serif font-medium m-0"
                 style={{
-                  fontSize: 30,
+                  fontSize: "clamp(22px, 4vw, 30px)",
                   fontWeight: 500,
                   letterSpacing: "-0.025em",
                   lineHeight: 1.05,
@@ -84,7 +92,7 @@ export default function TopographyPage() {
                 Where your collateral can <em>climb</em>.
               </h1>
               <p
-                className="text-ink-soft m-0"
+                className="text-ink-soft m-0 hidden sm:block"
                 style={{
                   fontSize: 13,
                   marginTop: 8,
@@ -97,7 +105,7 @@ export default function TopographyPage() {
                 summit to focus its details.
               </p>
             </div>
-            <div className="flex gap-1 p-[3px] border border-hairline rounded-[2px]">
+            <div className="flex gap-1 p-[3px] border border-hairline rounded-[2px] shrink-0 self-start sm:self-auto">
               {(
                 [
                   ["vault", "Vault APR"],
@@ -125,22 +133,22 @@ export default function TopographyPage() {
         </section>
 
         {/* KPI strip */}
-        <section className="grid grid-cols-5 border-b border-hairline bg-paper-alt">
+        <section className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 border-b border-hairline bg-paper-alt">
           <KpiCell
-            label="Best vault yield"
-            value={"+" + bestVault.toFixed(2) + "%"}
-            sub={`on ${bestVaultSym}`}
+            label={`${vault.borrowSymbol} vault yield`}
+            value={fmt.signedPct(bestVault, 2)}
+            sub={`${bestVaultSym} pool`}
             color="var(--up)"
           />
           <KpiCell
-            label="Avg. vault APR"
-            value={"+" + avgVault.toFixed(2) + "%"}
-            sub="weighted blended"
+            label={`${vault.borrowSymbol} vault APR`}
+            value={fmt.signedPct(avgVault, 2)}
+            sub="pool rate"
           />
           <KpiCell
-            label="Avg. borrow APR"
+            label={`${vault.borrowSymbol} borrow APR`}
             value={avgBorrow.toFixed(2) + "%"}
-            sub={`spread +${spread.toFixed(2)}%`}
+            sub={`spread ${fmt.signedPct(spread, 2)}`}
           />
           <KpiCell
             label="Total liquidity"
@@ -158,10 +166,9 @@ export default function TopographyPage() {
 
         {/* Terrain + Markets table (left) · Asset deep dive (right) */}
         <section
-          className="grid border-t border-hairline"
-          style={{ gridTemplateColumns: "1fr 380px" }}
+          className="grid border-t border-hairline grid-cols-1 lg:[grid-template-columns:1fr_380px]"
         >
-          <div className="flex flex-col border-r border-hairline">
+          <div className="flex flex-col lg:border-r border-hairline">
             <Terrain
               stocks={stocks}
               focus={focus}
@@ -179,15 +186,25 @@ export default function TopographyPage() {
               mode={mode}
               derivedBorrowApr={derivedBorrowApr}
               derivedVaultApr={derivedVaultApr}
+              history24h={history24h.data}
+              sparklineData={sparkline.data}
+              collateralByToken={stats.collateralByToken}
             />
           </div>
           <AssetDeepDive
             stock={focused}
             derivedBorrowApr={derivedBorrowApr}
             derivedVaultApr={derivedVaultApr}
+            onPledge={() => setPledgeSym(focused.sym)}
           />
         </section>
       </div>
+
+      <PledgeSidebar
+        sym={pledgeSym ?? "TSLA"}
+        open={pledgeSym != null}
+        onClose={() => setPledgeSym(null)}
+      />
 
       <SiteFooter />
     </div>
@@ -255,10 +272,9 @@ function Terrain({
   setFocus: (s: string) => void;
   mode: Mode;
 }) {
-  // Live on-chain inputs: prices from Pyth adapters, LTV caps from vault.assets().
-  // Falls back to STOCKS catalogue for assets without an on-chain token.
   const livePrices = useStockPrices();
-  const assetConfigs = useAssetConfigsMap();
+  const { vault } = useVaultContext();
+  const assetConfigs = useAssetConfigsMap(vault.address);
 
   const sorted = useMemo(
     () => [...stocks].sort((a, b) => a.sym.localeCompare(b.sym)),
@@ -268,10 +284,8 @@ function Terrain({
     H = 280,
     BASE = H - 36;
 
-  // Vault/borrow APR now come from the protocol-wide derived IRM rate.
-  // Max LTV reads from vault.assets(token).ltvBps so it always matches contract.
-  const listed = useListedAssets();
-  const stats = useProtocolStats(listed);
+  const listed = useListedAssets(vault.address);
+  const stats = useProtocolStats(listed, vault.address, vault.tokenAddress);
   const derivedBorrowApr =
     stats.derived ? stats.derived.borrowAprBps / 100 : null;
   const derivedVaultApr =
@@ -284,7 +298,8 @@ function Terrain({
     const ltvBps = cfg?.ltvBps ?? s.ltv * 10_000;
     return (ltvBps / 1000); // scale into ~5–9 range to match APR axis
   };
-  const metricMax = Math.max(...stocks.map(metric)) * 1.18;
+  const rawMetricMax = Math.max(...stocks.map(metric));
+  const metricMax = rawMetricMax > 0 ? rawMetricMax * 1.18 : 1;
   const heightFor = (s: Stock) => (metric(s) / metricMax) * (BASE - 30);
 
   const slice = W / sorted.length;
@@ -518,6 +533,9 @@ function MarketsTable({
   mode,
   derivedBorrowApr,
   derivedVaultApr,
+  history24h,
+  sparklineData,
+  collateralByToken,
 }: {
   stocks: Stock[];
   focus: string;
@@ -527,10 +545,11 @@ function MarketsTable({
   sortDir: SortDir;
   setSortDir: (d: SortDir | ((d: SortDir) => SortDir)) => void;
   mode: Mode;
-  /// Protocol-wide derived rates (null while loading). Single value applied
-  /// uniformly to every row — single-pool architecture.
   derivedBorrowApr: number | null;
   derivedVaultApr: number | null;
+  history24h?: Record<string, { changePct: number | null }>;
+  sparklineData?: { enabled: boolean; series: Record<string, number[]> };
+  collateralByToken: Record<string, bigint>;
 }) {
   const sorted = useMemo(() => {
     const copy = [...stocks];
@@ -621,9 +640,6 @@ function MarketsTable({
             <Header k="price" right>
               Price
             </Header>
-            <Header k="price" right>
-              24h
-            </Header>
             <Header k="ltv" right>
               Max LTV
             </Header>
@@ -634,22 +650,35 @@ function MarketsTable({
               Vault
             </Header>
             <Header k="price" right>
-              Liquidity
+              Volume
+            </Header>
+            <Header k="price" right>
+              24h
             </Header>
           </tr>
         </thead>
         <tbody>
-          {sorted.map((s) => (
-            <MarketRow
-              key={s.sym}
-              stock={s}
-              focused={s.sym === focus}
-              onClick={() => setFocus(s.sym)}
-              mode={mode}
-              derivedBorrowApr={derivedBorrowApr}
-              derivedVaultApr={derivedVaultApr}
-            />
-          ))}
+          {sorted.map((s) => {
+            const addr = stockAddress(s.sym);
+            return (
+              <MarketRow
+                key={s.sym}
+                stock={s}
+                focused={s.sym === focus}
+                onClick={() => setFocus(s.sym)}
+                mode={mode}
+                derivedBorrowApr={derivedBorrowApr}
+                derivedVaultApr={derivedVaultApr}
+                changePct={history24h?.[s.sym]?.changePct ?? null}
+                sparkData={sparklineData?.series?.[s.sym]}
+                collateralVolumeUsd={
+                  addr
+                    ? collateralByToken[addr.toLowerCase()] ?? null
+                    : null
+                }
+              />
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -663,6 +692,9 @@ function MarketRow({
   mode,
   derivedBorrowApr,
   derivedVaultApr,
+  changePct,
+  sparkData,
+  collateralVolumeUsd,
 }: {
   stock: Stock;
   focused: boolean;
@@ -670,16 +702,16 @@ function MarketRow({
   mode: Mode;
   derivedBorrowApr: number | null;
   derivedVaultApr: number | null;
+  changePct: number | null;
+  sparkData?: number[];
+  collateralVolumeUsd: bigint | null;
 }) {
   const adapterTick = useLiveAdapterTick(s.sym, (v) => fmt.usd(v));
   const simTick = useLiveTick(s.price, s.volatility, (v) => fmt.usd(v));
   const live = adapterTick.isLive ? adapterTick : simTick;
-
-  const listed = useListedAssets();
-  const stats = useProtocolStats(listed);
-  const utilizationPct = stats.utilizationPct ?? 0;
-  const liquidityDisplay =
-    stats.liquidityUsd != null ? Number(stats.liquidityUsd) / 1e18 : 0;
+  const effectiveChange = changePct ?? 0;
+  const up = effectiveChange >= 0;
+  const hasRealSpark = !!sparkData && sparkData.length >= 2;
 
   return (
     <tr
@@ -727,14 +759,6 @@ function MarketRow({
           }}
         >
           {live.formatted}
-        </span>
-      </td>
-      <td style={{ padding: "14px 14px", textAlign: "right" }}>
-        <span
-          className="font-mono tabular font-medium text-ink-mute"
-          style={{ fontSize: 12 }}
-        >
-          —
         </span>
       </td>
       <td style={{ padding: "14px 14px", textAlign: "right" }}>
@@ -790,19 +814,43 @@ function MarketRow({
             fontWeight: mode === "vault" ? 600 : 500,
           }}
         >
-          +{(derivedVaultApr ?? 0).toFixed(2)}%
+          {fmt.signedPct(derivedVaultApr ?? 0, 2)}
         </span>
       </td>
       <td style={{ padding: "14px 14px", textAlign: "right" }}>
         <div className="font-mono tabular font-medium" style={{ fontSize: 12 }}>
-          ${fmt.abbr(liquidityDisplay)}
+          {collateralVolumeUsd != null && collateralVolumeUsd > 0n
+            ? "$" + fmt.abbr(Number(collateralVolumeUsd / 10n ** 12n) / 1e6)
+            : "—"}
         </div>
         <div
           className="text-ink-mute"
           style={{ fontSize: 10, marginTop: 2 }}
         >
-          {utilizationPct.toFixed(0)}% util
+          collateral locked
         </div>
+      </td>
+      <td style={{ padding: "14px 14px", textAlign: "right" }}>
+        <div
+          className="font-mono tabular font-medium"
+          style={{
+            fontSize: 12,
+            color: up ? "var(--up)" : "var(--down)",
+          }}
+        >
+          {fmt.pct(effectiveChange, 2, true)}
+        </div>
+        {hasRealSpark && (
+          <div className="flex justify-end mt-1">
+            <Sparkline
+              data={sparkData}
+              w={56}
+              h={14}
+              color={up ? "var(--up)" : "var(--down)"}
+              fill
+            />
+          </div>
+        )}
       </td>
     </tr>
   );
@@ -815,10 +863,12 @@ function AssetDeepDive({
   stock: s,
   derivedBorrowApr,
   derivedVaultApr,
+  onPledge,
 }: {
   stock: Stock;
   derivedBorrowApr: number | null;
   derivedVaultApr: number | null;
+  onPledge: () => void;
 }) {
   const adapterTick = useLiveAdapterTick(s.sym, (v) => fmt.usd(v));
   const simTick = useLiveTick(s.price, s.volatility, (v) => fmt.usd(v));
@@ -828,14 +878,15 @@ function AssetDeepDive({
   const effectiveBorrowApr = derivedBorrowApr ?? 0;
   const effectiveVaultApr = derivedVaultApr ?? 0;
   const ltvRecommendation = useRecommendedLtv(s.sym);
+  const { vault } = useVaultContext();
 
-  const listed = useListedAssets();
-  const stats = useProtocolStats(listed);
+  const listed = useListedAssets(vault.address);
+  const stats = useProtocolStats(listed, vault.address, vault.tokenAddress);
   const utilizationPct = stats.utilizationPct ?? 0;
   const liquidityDisplay =
     stats.liquidityUsd != null ? Number(stats.liquidityUsd) / 1e18 : 0;
 
-  const [calcShares, setCalcShares] = useState(100);
+  const [calcShares, setCalcShares] = useState(0);
   const calcUsd = s.price * calcShares;
   const maxBorrow = calcUsd * s.ltv;
   const yearlyYield =
@@ -991,7 +1042,7 @@ function AssetDeepDive({
                 : "Reference vault APR — utilization not yet loaded"
             }
           >
-            +{effectiveVaultApr.toFixed(2)}%
+            {fmt.signedPct(effectiveVaultApr, 2)}
           </div>
         </div>
         <svg viewBox={`0 0 ${W} ${H}`} width="100%" className="block">
@@ -1042,10 +1093,10 @@ function AssetDeepDive({
             ["Liquidation LTV", liqLtv.toFixed(0) + "%"],
             ["Liquidation penalty", "5.00%"],
             ["Borrow APR · protocol", effectiveBorrowApr.toFixed(2) + "%"],
-            ["Vault APR · protocol", "+" + effectiveVaultApr.toFixed(2) + "%"],
+            ["Vault APR · protocol", fmt.signedPct(effectiveVaultApr, 2)],
             [
               "Spread (you keep)",
-              "+" + (effectiveVaultApr - effectiveBorrowApr).toFixed(2) + "%",
+              fmt.signedPct(effectiveVaultApr - effectiveBorrowApr, 2),
             ],
             ["Liquidity", "$" + fmt.abbr(liquidityDisplay)],
             [
@@ -1141,24 +1192,45 @@ function AssetDeepDive({
             className="font-mono tabular font-medium text-up"
             style={{ fontSize: 13 }}
           >
-            +{fmt.usd(yearlyYield, 0)} / yr
+            {yearlyYield >= 0 ? "+" : "−"}{fmt.usd(Math.abs(yearlyYield), 0)} / yr
           </span>
         </div>
-        <Link
-          href={`/pledge?sym=${s.sym}`}
-          className="rounded-[2px] flex justify-between items-center bg-ink text-paper no-underline font-medium"
-          style={{
-            marginTop: 12,
-            padding: "12px 16px",
-            width: "100%",
-            fontSize: 13,
-          }}
-        >
-          <span>Pledge {s.sym} · 1-click bundle</span>
-          <span className="font-mono opacity-70" style={{ fontSize: 10 }}>
-            ERC-4337
+        {addr ? (
+          <button
+            type="button"
+            onClick={onPledge}
+            className="rounded-[2px] flex justify-between items-center bg-ink text-paper font-medium"
+            style={{
+              marginTop: 12,
+              padding: "12px 16px",
+              width: "100%",
+              fontSize: 13,
+              border: "none",
+              cursor: "pointer",
+            }}
+          >
+            <span>Pledge {s.sym} · borrow {vault.borrowSymbol}</span>
+            <span className="font-mono opacity-70" style={{ fontSize: 10 }}>
+              ERC-4337
+            </span>
+          </button>
+        ) : (
+          <span
+            className="rounded-[2px] flex justify-between items-center border border-hairline text-ink-mute font-medium"
+            style={{
+              marginTop: 12,
+              padding: "12px 16px",
+              width: "100%",
+              fontSize: 13,
+              cursor: "not-allowed",
+            }}
+          >
+            <span>{s.sym} · not yet on-chain</span>
+            <span className="font-mono opacity-50" style={{ fontSize: 10 }}>
+              Soon
+            </span>
           </span>
-        </Link>
+        )}
         <div
           className="text-center text-ink-mute"
           style={{ fontSize: 10, marginTop: 8 }}

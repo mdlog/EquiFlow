@@ -12,11 +12,10 @@ import {
 import {
   ERC20_ABI,
   EQUIFLOW_VAULT_ABI,
-  EQUIFLOW_VAULT_ADDRESS,
-  USDC_ADDRESS,
   explorerTx,
   shortAddr,
 } from "@/lib/contracts";
+import { useVaultContext } from "@/lib/hooks/use-vault-context";
 import { ROBINHOOD_CHAIN_TESTNET_ID } from "@/lib/config/chain";
 import { fmt } from "@/lib/format";
 import { findStock } from "@/lib/config/stocks";
@@ -67,12 +66,17 @@ export function LiquidateModal({
   healthFactor,
   listedAssets,
 }: Props) {
+  const { vault } = useVaultContext();
+  const VAULT_ADDR = vault.address;
+  const TOKEN_ADDR = vault.tokenAddress;
+  const tokenSymbol = vault.borrowSymbol;
+
   const { data: bonusBpsRaw } = useReadContract({
     abi: EQUIFLOW_VAULT_ABI,
-    address: EQUIFLOW_VAULT_ADDRESS,
+    address: VAULT_ADDR,
     functionName: "LIQUIDATION_BONUS_BPS",
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!EQUIFLOW_VAULT_ADDRESS, staleTime: Infinity },
+    query: { enabled: !!VAULT_ADDR, staleTime: Infinity },
   });
   const LIQUIDATION_BONUS_BPS = bonusBpsRaw != null
     ? Number(bonusBpsRaw as bigint)
@@ -102,7 +106,7 @@ export function LiquidateModal({
     () =>
       listedAssets.map((token) => ({
         abi: EQUIFLOW_VAULT_ABI,
-        address: EQUIFLOW_VAULT_ADDRESS,
+        address: VAULT_ADDR,
         functionName: "collateral" as const,
         args: [user, token] as const,
         chainId: ROBINHOOD_CHAIN_TESTNET_ID,
@@ -174,33 +178,33 @@ export function LiquidateModal({
   /// USDG decimals + allowance/balance for the liquidator wallet.
   const { data: stableDecimalsRaw } = useReadContract({
     abi: ERC20_ABI,
-    address: USDC_ADDRESS,
+    address: TOKEN_ADDR,
     functionName: "decimals",
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: open && !!USDC_ADDRESS },
+    query: { enabled: open && !!TOKEN_ADDR },
   });
   const stableDec =
     typeof stableDecimalsRaw === "number" ? stableDecimalsRaw : 6;
 
   const { data: usdgBalance } = useReadContract({
     abi: ERC20_ABI,
-    address: USDC_ADDRESS,
+    address: TOKEN_ADDR,
     functionName: "balanceOf",
     args: liquidator ? [liquidator] : undefined,
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: open && !!USDC_ADDRESS && !!liquidator },
+    query: { enabled: open && !!TOKEN_ADDR && !!liquidator },
   });
 
   const { data: allowance, refetch: refetchAllowance } = useReadContract({
     abi: ERC20_ABI,
-    address: USDC_ADDRESS,
+    address: TOKEN_ADDR,
     functionName: "allowance",
     args:
-      liquidator && EQUIFLOW_VAULT_ADDRESS
-        ? [liquidator, EQUIFLOW_VAULT_ADDRESS]
+      liquidator && VAULT_ADDR
+        ? [liquidator, VAULT_ADDR]
         : undefined,
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: open && !!USDC_ADDRESS && !!liquidator },
+    query: { enabled: open && !!TOKEN_ADDR && !!liquidator },
   });
 
   /// On the wire, repay amount = debtRepayUsd in 1e18 USD units (vault converts).
@@ -245,14 +249,14 @@ export function LiquidateModal({
   }, [liqSealed, stage]);
 
   function onApprove() {
-    if (!USDC_ADDRESS || !EQUIFLOW_VAULT_ADDRESS) return;
+    if (!TOKEN_ADDR || !VAULT_ADDR) return;
     setStage("approving");
     writeApprove(
       {
         abi: ERC20_ABI,
-        address: USDC_ADDRESS,
+        address: TOKEN_ADDR,
         functionName: "approve",
-        args: [EQUIFLOW_VAULT_ADDRESS, requiredUsdg],
+        args: [VAULT_ADDR, requiredUsdg],
         chainId: ROBINHOOD_CHAIN_TESTNET_ID,
       },
       {
@@ -263,12 +267,12 @@ export function LiquidateModal({
   }
 
   function onLiquidate() {
-    if (!EQUIFLOW_VAULT_ADDRESS || !selected) return;
+    if (!VAULT_ADDR || !selected) return;
     setStage("liquidating");
     writeLiquidate(
       {
         abi: EQUIFLOW_VAULT_ABI,
-        address: EQUIFLOW_VAULT_ADDRESS,
+        address: VAULT_ADDR,
         functionName: "liquidate",
         args: [user, selected.address, debtRepayE18],
         chainId: ROBINHOOD_CHAIN_TESTNET_ID,
@@ -282,7 +286,7 @@ export function LiquidateModal({
 
   // ── AA flow: USDG.approve + vault.liquidate in ONE UserOperation ────
   async function onBundle() {
-    if (!USDC_ADDRESS || !EQUIFLOW_VAULT_ADDRESS || !selected || !smartAccount) {
+    if (!TOKEN_ADDR || !VAULT_ADDR || !selected || !smartAccount) {
       return;
     }
     setAaError(null);
@@ -294,16 +298,16 @@ export function LiquidateModal({
       const calls = [];
       if (needsApprove) {
         calls.push({
-          to: USDC_ADDRESS as Address,
+          to: TOKEN_ADDR as Address,
           data: encodeFunctionData({
             abi: ERC20_ABI,
             functionName: "approve",
-            args: [EQUIFLOW_VAULT_ADDRESS, requiredUsdg],
+            args: [VAULT_ADDR, requiredUsdg],
           }),
         });
       }
       calls.push({
-        to: EQUIFLOW_VAULT_ADDRESS as Address,
+        to: VAULT_ADDR as Address,
         data: encodeFunctionData({
           abi: EQUIFLOW_VAULT_ABI,
           functionName: "liquidate",
@@ -415,7 +419,7 @@ export function LiquidateModal({
               className="border border-hairline rounded-[2px] p-4 text-center text-ink-mute"
               style={{ fontSize: 13 }}
             >
-              Connect a wallet to liquidate. Your account pays the USDG, the
+              Connect a wallet to liquidate. Your account pays the {tokenSymbol}, the
               vault hands you the seized collateral plus a {bonusPct.toFixed(0)}%
               bonus.
             </div>
@@ -483,7 +487,7 @@ export function LiquidateModal({
               </div>
 
               {/* Debt-to-repay input */}
-              <div className="eyebrow mb-2">Debt to repay (USDG)</div>
+              <div className="eyebrow mb-2">Debt to repay ({tokenSymbol})</div>
               <div
                 className="flex items-center gap-2 mb-2"
                 style={{
@@ -512,7 +516,7 @@ export function LiquidateModal({
                 className="text-ink-mute mb-4"
                 style={{ fontSize: 11 }}
               >
-                Up to {fmt.usd(borrowedUsdNum, 2)} · Your USDG balance{" "}
+                Up to {fmt.usd(borrowedUsdNum, 2)} · Your {tokenSymbol} balance{" "}
                 {usdgBalance != null
                   ? fmt.usd(
                       Number(usdgBalance as bigint) /
@@ -578,7 +582,7 @@ export function LiquidateModal({
                     fontSize: 12,
                   }}
                 >
-                  Your USDG balance is short of the repay amount.
+                  Your {tokenSymbol} balance is short of the repay amount.
                 </div>
               )}
 
@@ -616,7 +620,7 @@ export function LiquidateModal({
                       ? "Awaiting wallet…"
                       : stage === "approve-mining"
                         ? "Approval mining…"
-                        : "Approve USDG"}
+                        : `Approve ${tokenSymbol}`}
                   </span>
                   <span
                     className="font-mono opacity-60"

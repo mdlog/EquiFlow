@@ -1,3 +1,6 @@
+"use client";
+
+import { useState } from "react";
 import Link from "next/link";
 import { Logo } from "@/components/Wordmark";
 import { ChainTicker } from "@/components/ChainTicker";
@@ -12,11 +15,9 @@ const NAV_LINKS = [
   { label: "Audits", href: "#", muted: true },
 ];
 
-/// Sticky top bar with logo, primary nav, chain status, wallet button.
-/// `btnStyles` is injected inline because the rest of the landing reuses these
-/// utility classes (.btn-primary, .btn-ghost, .btn-on-dark-*) — keeping them
-/// here means every page that mounts TopNav also gets the styles.
 export function TopNav() {
+  const [menuOpen, setMenuOpen] = useState(false);
+
   return (
     <header
       className="sticky top-0 z-50 border-b border-hairline"
@@ -25,7 +26,7 @@ export function TopNav() {
         backdropFilter: "blur(8px)",
       }}
     >
-      <div className="max-w-[1320px] mx-auto px-8 flex items-center justify-between h-14">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 flex items-center justify-between h-14">
         <Link href="/" className="flex items-center gap-0 no-underline text-ink">
           <Logo size={22} />
           <span
@@ -35,7 +36,7 @@ export function TopNav() {
             quiFlow
           </span>
           <span
-            className="font-mono text-ink-mute border-l border-hairline pl-2.5 ml-1"
+            className="font-mono text-ink-mute border-l border-hairline pl-2.5 ml-1 hidden sm:inline"
             style={{ fontSize: 10, letterSpacing: "0.08em" }}
           >
             PROTOCOL · TESTNET
@@ -55,11 +56,46 @@ export function TopNav() {
           ))}
         </nav>
 
-        <div className="flex items-center gap-3">
-          <ChainTicker />
+        <div className="flex items-center gap-2 sm:gap-3">
+          <span className="hidden sm:inline-flex"><ChainTicker /></span>
           <WalletButton />
+          <button
+            type="button"
+            onClick={() => setMenuOpen((v) => !v)}
+            className="md:hidden flex flex-col justify-center items-center w-9 h-9 border border-hairline rounded-[2px] bg-transparent"
+            aria-label="Toggle menu"
+          >
+            <span className="block w-4 h-[1.5px] bg-ink transition-transform" style={{
+              transform: menuOpen ? "translateY(2.75px) rotate(45deg)" : "none",
+            }} />
+            <span className="block w-4 h-[1.5px] bg-ink mt-[4px] transition-opacity" style={{
+              opacity: menuOpen ? 0 : 1,
+            }} />
+            <span className="block w-4 h-[1.5px] bg-ink mt-[4px] transition-transform" style={{
+              transform: menuOpen ? "translateY(-6.25px) rotate(-45deg)" : "none",
+            }} />
+          </button>
         </div>
       </div>
+
+      {menuOpen && (
+        <nav className="md:hidden border-t border-hairline bg-paper px-4 py-3 flex flex-col gap-0.5">
+          {NAV_LINKS.map((l) => (
+            <Link
+              key={l.label}
+              href={l.href}
+              onClick={() => setMenuOpen(false)}
+              className="no-underline py-2.5 px-2 rounded-[2px] transition-colors hover:bg-paper-alt"
+              style={{ fontSize: 14, color: l.muted ? "var(--ink-mute)" : "var(--ink-soft)" }}
+            >
+              {l.label}
+            </Link>
+          ))}
+          <div className="pt-2 mt-1 border-t border-hairline-soft sm:hidden">
+            <ChainTicker />
+          </div>
+        </nav>
+      )}
 
       <style>{btnStyles}</style>
     </header>

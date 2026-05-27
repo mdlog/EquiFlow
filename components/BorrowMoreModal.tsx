@@ -8,9 +8,9 @@ import {
 } from "wagmi";
 import {
   EQUIFLOW_VAULT_ABI,
-  EQUIFLOW_VAULT_ADDRESS,
   STOCK_TOKEN_ADDRESSES,
 } from "@/lib/contracts";
+import { useVaultContext } from "@/lib/hooks/use-vault-context";
 import { ROBINHOOD_CHAIN_TESTNET_ID } from "@/lib/config/chain";
 import { fmt } from "@/lib/format";
 import type { LiveCollateralLine } from "@/lib/hooks/use-position";
@@ -56,6 +56,11 @@ export function BorrowMoreModal({
   ltvCap,
   liqLtv,
 }: Props) {
+  const { vault } = useVaultContext();
+  const VAULT_ADDR = vault.address;
+  const TOKEN_ADDR = vault.tokenAddress;
+  const tokenSymbol = vault.borrowSymbol;
+
   const { isConnected } = useActiveWallet();
   const { mode: aaMode, smartAccount, prepareForSubmit } = useSmartWallet();
   const aaActive = aaMode !== "off" && smartAccount != null;
@@ -96,7 +101,7 @@ export function BorrowMoreModal({
   const canBorrow =
     isConnected &&
     !!tokenAddr &&
-    !!EQUIFLOW_VAULT_ADDRESS &&
+    !!VAULT_ADDR &&
     amount > 0 &&
     !overCap &&
     !isPending &&
@@ -105,7 +110,7 @@ export function BorrowMoreModal({
     !sealed;
 
   function handleBorrow() {
-    if (!tokenAddr || !EQUIFLOW_VAULT_ADDRESS) return;
+    if (!tokenAddr || !VAULT_ADDR) return;
     const borrowUsd = parseUnits(amount.toFixed(18), 18);
     if (aaActive && smartAccount && AA_CONFIGURED) {
       void handleBundle(borrowUsd);
@@ -113,7 +118,7 @@ export function BorrowMoreModal({
     }
     writeContract({
       abi: EQUIFLOW_VAULT_ABI,
-      address: EQUIFLOW_VAULT_ADDRESS,
+      address: VAULT_ADDR,
       functionName: "pledgeAndBorrow",
       args: [tokenAddr, 0n, borrowUsd],
       chainId: ROBINHOOD_CHAIN_TESTNET_ID,
@@ -121,7 +126,7 @@ export function BorrowMoreModal({
   }
 
   async function handleBundle(borrowUsd: bigint) {
-    if (!tokenAddr || !EQUIFLOW_VAULT_ADDRESS || !smartAccount) return;
+    if (!tokenAddr || !VAULT_ADDR || !smartAccount) return;
     setAaError(null);
     setAaBusy(true);
     try {
@@ -130,7 +135,7 @@ export function BorrowMoreModal({
         smartAccount,
         calls: [
           {
-            to: EQUIFLOW_VAULT_ADDRESS as Address,
+            to: VAULT_ADDR as Address,
             data: encodeFunctionData({
               abi: EQUIFLOW_VAULT_ABI,
               functionName: "pledgeAndBorrow",
@@ -175,7 +180,7 @@ export function BorrowMoreModal({
           <TxLink hash={aaTxHash ?? txHash} />
           {sealed && (
             <SealedMessage>
-              Borrowed {fmt.usd(amount, 2)} USDG · refresh position to see update
+              Borrowed {fmt.usd(amount, 2)} {tokenSymbol} · refresh position to see update
             </SealedMessage>
           )}
           <ModalActions
@@ -248,7 +253,7 @@ export function BorrowMoreModal({
             style={{ fontSize: 22, letterSpacing: "-0.02em" }}
           />
           <span className="font-mono text-ink-soft" style={{ fontSize: 13 }}>
-            USDG
+            {tokenSymbol}
           </span>
         </div>
         <div className="flex gap-1.5 mt-2.5">

@@ -133,6 +133,13 @@ export const EQUIFLOW_VAULT_ABI = [
   // ── LP actions (v2) ──
   {
     type: "function",
+    name: "announceDeposit",
+    stateMutability: "nonpayable",
+    inputs: [{ name: "amount", type: "uint256" }],
+    outputs: [],
+  },
+  {
+    type: "function",
     name: "register",
     stateMutability: "nonpayable",
     inputs: [{ name: "amount", type: "uint256" }],

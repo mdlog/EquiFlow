@@ -10,9 +10,8 @@ import {
 import {
   ERC20_ABI,
   EQUIFLOW_VAULT_ABI,
-  EQUIFLOW_VAULT_ADDRESS,
-  USDC_ADDRESS,
 } from "@/lib/contracts";
+import { useVaultContext } from "@/lib/hooks/use-vault-context";
 import { ROBINHOOD_CHAIN_TESTNET_ID } from "@/lib/config/chain";
 import { fmt } from "@/lib/format";
 import { useActiveWallet } from "@/lib/hooks/use-active-wallet";
@@ -40,8 +39,10 @@ interface Props {
 }
 
 export function LpWithdrawModal({ open, onClose }: Props) {
-  // LP shares live under the address that called `lpDeposit`. In AA mode
-  // that's the smart account, so read shares via the active wallet.
+  const { vault } = useVaultContext();
+  const VAULT_ADDR = vault.address;
+  const TOKEN_ADDR = vault.tokenAddress;
+  const tokenSymbol = vault.borrowSymbol;
   const { address, isConnected } = useActiveWallet();
   const { mode: aaMode, smartAccount, prepareForSubmit } = useSmartWallet();
   const aaActive = aaMode !== "off" && smartAccount != null;
@@ -49,22 +50,22 @@ export function LpWithdrawModal({ open, onClose }: Props) {
 
   const { data: stableDecimalsRaw } = useReadContract({
     abi: ERC20_ABI,
-    address: USDC_ADDRESS,
+    address: TOKEN_ADDR,
     functionName: "decimals",
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!USDC_ADDRESS },
+    query: { enabled: !!TOKEN_ADDR },
   });
   const stableDec =
     typeof stableDecimalsRaw === "number" ? stableDecimalsRaw : 6;
 
   const { data: lpPos } = useReadContract({
     abi: EQUIFLOW_VAULT_ABI,
-    address: EQUIFLOW_VAULT_ADDRESS,
+    address: VAULT_ADDR,
     functionName: "lpPositionOf",
     args: address ? [address] : undefined,
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
     query: {
-      enabled: !!EQUIFLOW_VAULT_ADDRESS && !!address,
+      enabled: !!VAULT_ADDR && !!address,
       refetchInterval: 12_000,
     },
   });
@@ -78,10 +79,10 @@ export function LpWithdrawModal({ open, onClose }: Props) {
 
   const { data: bookedRaw } = useReadContract({
     abi: EQUIFLOW_VAULT_ABI,
-    address: EQUIFLOW_VAULT_ADDRESS,
+    address: VAULT_ADDR,
     functionName: "bookedUsdg",
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!EQUIFLOW_VAULT_ADDRESS, refetchInterval: 12_000 },
+    query: { enabled: !!VAULT_ADDR, refetchInterval: 12_000 },
   });
   const vaultIdle =
     bookedRaw !== undefined
@@ -118,7 +119,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
   }, [open, reset]);
 
   function handleWithdraw() {
-    if (!EQUIFLOW_VAULT_ADDRESS) return;
+    if (!VAULT_ADDR) return;
     const raw = parseUnits(shares.toFixed(18), 18);
     if (aaActive && smartAccount && AA_CONFIGURED) {
       void handleBundle(raw);
@@ -126,7 +127,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
     }
     writeContract({
       abi: EQUIFLOW_VAULT_ABI,
-      address: EQUIFLOW_VAULT_ADDRESS,
+      address: VAULT_ADDR,
       functionName: "withdrawLp",
       args: [raw],
       chainId: ROBINHOOD_CHAIN_TESTNET_ID,
@@ -134,7 +135,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
   }
 
   async function handleBundle(raw: bigint) {
-    if (!EQUIFLOW_VAULT_ADDRESS || !smartAccount) return;
+    if (!VAULT_ADDR || !smartAccount) return;
     setAaError(null);
     setAaBusy(true);
     try {
@@ -143,7 +144,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
         smartAccount,
         calls: [
           {
-            to: EQUIFLOW_VAULT_ADDRESS as Address,
+            to: VAULT_ADDR as Address,
             data: encodeFunctionData({
               abi: EQUIFLOW_VAULT_ABI,
               functionName: "withdrawLp",
@@ -164,7 +165,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
 
   const canWithdraw =
     isConnected &&
-    !!EQUIFLOW_VAULT_ADDRESS &&
+    !!VAULT_ADDR &&
     shares > 0 &&
     !overShares &&
     !insufficientIdle &&
@@ -185,7 +186,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
     <ModalShell
       open={open}
       onClose={onClose}
-      eyebrow="withdrawLp(shares) · burn for USDG"
+      eyebrow={`withdrawLp(shares) · burn for ${tokenSymbol}`}
       title="Withdraw LP"
       footer={
         <>
@@ -194,7 +195,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
           )}
           {insufficientIdle && shares > 0 && (
             <ValidationError>
-              Vault doesn&apos;t have enough idle USDG ({fmt.usd(vaultIdle, 2)}{" "}
+              Vault doesn&apos;t have enough idle {tokenSymbol} ({fmt.usd(vaultIdle, 2)}{" "}
               available, you&apos;d need {fmt.usd(usdgOut, 2)}). Borrowers must
               repay first.
             </ValidationError>
@@ -203,7 +204,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
           <TxLink hash={aaTxHash ?? txHash} />
           {sealed && (
             <SealedMessage>
-              Withdrew {fmt.usd(usdgOut, 2)} USDG · check your wallet
+              Withdrew {fmt.usd(usdgOut, 2)} {tokenSymbol} · check your wallet
             </SealedMessage>
           )}
           <ModalActions
@@ -232,7 +233,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
           color="var(--up)"
         />
         <SumRow
-          k="Vault idle USDG"
+          k={`Vault idle ${tokenSymbol}`}
           v={fmt.usd(vaultIdle, 2)}
           color={insufficientIdle ? "var(--down)" : "var(--ink)"}
         />
@@ -298,7 +299,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
           You receive
         </div>
         <PreviewRow
-          k="USDG to wallet"
+          k={`${tokenSymbol} to wallet`}
           v={fmt.usd(usdgOut, 2)}
           color="var(--up)"
         />

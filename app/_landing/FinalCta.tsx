@@ -37,13 +37,13 @@ export function FinalCta() {
 
   return (
     <section
+      className="py-16 sm:py-24"
       style={{
-        padding: "96px 0",
         background: "var(--ink)",
         color: "var(--paper)",
       }}
     >
-      <div className="max-w-[1320px] mx-auto px-8 grid items-center grid-cols-1 lg:[grid-template-columns:1.4fr_1fr] gap-12 lg:gap-16">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 grid items-center grid-cols-1 lg:[grid-template-columns:1.4fr_1fr] gap-12 lg:gap-16">
         <div>
           <div
             className="uppercase"
@@ -59,7 +59,7 @@ export function FinalCta() {
           </div>
           <h2
             className="font-serif font-medium m-0"
-            style={{ fontSize: 52, letterSpacing: "-0.035em", lineHeight: 1.02 }}
+            style={{ fontSize: "clamp(28px, 5vw, 52px)", letterSpacing: "-0.035em", lineHeight: 1.02 }}
           >
             Pledge a single share.
             <br />

@@ -19,4 +19,8 @@ export const fmt = {
   },
   pct: (n: number, dp = 2, sign = false) =>
     (sign && n > 0 ? "+" : "") + n.toFixed(dp) + "%",
+  signedPct: (n: number, dp = 2) =>
+    (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n).toFixed(dp) + "%",
+  signedUsd: (n: number, dp = 0) =>
+    (n > 0 ? "+" : n < 0 ? "−" : "") + "$" + fmt.abbr(Math.abs(n)),
 };

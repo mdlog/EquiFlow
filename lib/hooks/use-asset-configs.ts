@@ -32,8 +32,8 @@ export interface AssetConfig {
   onChain: boolean;
 }
 
-export function useAssetConfigsMap(): Map<string, AssetConfig> {
-  const vault = EQUIFLOW_VAULT_ADDRESS;
+export function useAssetConfigsMap(overrideVaultAddress?: Address): Map<string, AssetConfig> {
+  const vault = overrideVaultAddress ?? EQUIFLOW_VAULT_ADDRESS;
 
   const liveSymbols = useMemo(
     () => STOCKS.filter((s) => !!STOCK_TOKEN_ADDRESSES[s.sym]),

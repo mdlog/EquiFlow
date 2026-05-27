@@ -69,55 +69,61 @@ interface BenchmarksBars {
   errmsg?: string;
 }
 
-/// Fetch the close price closest to `target` (unix seconds) from Pyth Benchmarks.
-/// Uses 60-minute resolution and a ±90-minute window, then picks the bar whose
-/// timestamp is closest to `target`. Returns null when Benchmarks has no data
-/// for this symbol/window (common at session boundaries / weekends).
+/// Fetch a historical anchor price from Pyth Benchmarks for computing 24h change.
+///
+/// Single 5-day window (avoids double API call / rate limits). Logic:
+///   - If a bar exists near t-24h (within 6h), use that for genuine 24h change.
+///   - Otherwise (weekends / holidays), find the previous session's close —
+///     the last bar before a >2h gap. This gives "change since prev close",
+///     the standard convention for equity apps during off-hours.
 async function fetchBenchmarksClose(
   sym: string,
   target: number,
 ): Promise<{ price: number; time: number } | null> {
   const symbol = benchmarkSymbol(sym);
-  // Wider window — Benchmarks 60-min bars only fall inside regular trading
-  // hours, so a ±90min window misses anything that lands in pre/post/overnight.
-  // ±12h guarantees we catch at least the previous regular session close.
-  const from = target - 43200;
-  const to = target + 43200;
+  const now = Math.floor(Date.now() / 1000);
   const url =
     `${BENCHMARKS}/v1/shims/tradingview/history` +
     `?symbol=${encodeURIComponent(symbol)}` +
     `&resolution=60` +
-    `&from=${from}` +
-    `&to=${to}`;
+    `&from=${now - 432000}` +
+    `&to=${now}`;
 
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) {
-    console.warn(
-      `[24h] benchmarks http ${res.status} for ${sym} (${symbol}) url=${url}`,
-    );
+    console.warn(`[24h] benchmarks http ${res.status} for ${sym}`);
     return null;
   }
   const data = (await res.json()) as BenchmarksBars;
   if (data.s !== "ok" || !data.t?.length || !data.c?.length) {
-    console.warn(
-      `[24h] benchmarks no_data for ${sym} (${symbol}) s=${data.s} errmsg=${data.errmsg ?? ""} tlen=${data.t?.length ?? 0}`,
-    );
+    console.warn(`[24h] benchmarks no_data for ${sym} (${symbol})`);
     return null;
   }
 
-  /// Pick the bar whose timestamp is closest to `target` — Benchmarks bars
-  /// are bucketed, not point-in-time, so "closest" is a better approximation
-  /// than "first after".
-  let bestIdx = 0;
-  let bestDist = Math.abs(data.t[0] - target);
-  for (let i = 1; i < data.t.length; i++) {
-    const d = Math.abs(data.t[i] - target);
-    if (d < bestDist) {
-      bestDist = d;
-      bestIdx = i;
+  const ts = data.t;
+  const cs = data.c;
+
+  // Check if any bar is within 6h of `target` (genuine 24h comparison)
+  let bestIdx = -1;
+  let bestDist = 21600; // 6h threshold
+  for (let i = 0; i < ts.length; i++) {
+    const d = Math.abs(ts[i] - target);
+    if (d < bestDist) { bestDist = d; bestIdx = i; }
+  }
+  if (bestIdx >= 0) {
+    return { price: cs[bestIdx], time: ts[bestIdx] };
+  }
+
+  // No bar near t-24h → off-hours. Find previous session's close.
+  const SESSION_GAP = 7200;
+  for (let i = ts.length - 1; i > 0; i--) {
+    if (ts[i] - ts[i - 1] > SESSION_GAP) {
+      return { price: cs[i - 1], time: ts[i - 1] };
     }
   }
-  return { price: data.c[bestIdx], time: data.t[bestIdx] };
+
+  // Only one session — use its first bar (open)
+  return { price: cs[0], time: ts[0] };
 }
 
 export async function GET(req: Request) {
@@ -195,7 +201,7 @@ export async function GET(req: Request) {
 
   return NextResponse.json(out, {
     headers: {
-      "Cache-Control": "public, max-age=60, s-maxage=60",
+      "Cache-Control": "public, max-age=120, s-maxage=120",
     },
   });
 }

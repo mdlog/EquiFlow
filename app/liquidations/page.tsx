@@ -122,8 +122,8 @@ export default function LiquidationsPage() {
 
       {/* ── 1. Hero ─────────────────────────────────────────── */}
       <section className="border-b border-ink">
-        <div className="max-w-[1320px] mx-auto px-8 pt-6 pb-5">
-          <div className="flex items-end justify-between gap-6">
+        <div className="max-w-[1320px] mx-auto px-4 sm:px-8 pt-5 sm:pt-6 pb-5">
+          <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 sm:gap-6">
             <div>
               <div className="eyebrow mb-2">
                 Risk · liquidations ·{" "}
@@ -133,7 +133,7 @@ export default function LiquidationsPage() {
               <h1
                 className="font-serif font-medium m-0"
                 style={{
-                  fontSize: 30,
+                  fontSize: "clamp(22px, 4vw, 30px)",
                   letterSpacing: "-0.025em",
                   lineHeight: 1.05,
                 }}
@@ -143,7 +143,7 @@ export default function LiquidationsPage() {
                 <span className="italic">Close them, claim the bonus.</span>
               </h1>
               <p
-                className="text-ink-soft mt-2 max-w-[640px]"
+                className="text-ink-soft mt-2 max-w-[640px] hidden sm:block"
                 style={{ fontSize: 13, lineHeight: 1.55 }}
               >
                 When a borrower's health factor falls below 1.000, anyone can
@@ -188,7 +188,7 @@ export default function LiquidationsPage() {
 
       {/* ── 2. KPI strip ────────────────────────────────────── */}
       <section className="bg-paper-alt border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto grid grid-cols-5">
+        <div className="max-w-[1320px] mx-auto grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
           <KpiCell
             label="Active borrowers"
             value={atRisk.activeBorrowers.toLocaleString()}
@@ -231,7 +231,7 @@ export default function LiquidationsPage() {
 
       {/* ── 3. Risk distribution + 24h timeline ─────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto grid grid-cols-[1.3fr_1fr]">
+        <div className="max-w-[1320px] mx-auto grid grid-cols-1 md:[grid-template-columns:1.3fr_1fr]">
           <RiskDistribution
             liquidatable={liquidatable}
             watching={watching}
@@ -272,7 +272,7 @@ export default function LiquidationsPage() {
 
       {/* ── 6. Recently liquidated + leaderboard ────────────── */}
       <section className="border-b border-hairline">
-        <div className="max-w-[1320px] mx-auto grid grid-cols-[1.4fr_1fr]">
+        <div className="max-w-[1320px] mx-auto grid grid-cols-1 md:[grid-template-columns:1.4fr_1fr]">
           <RecentLiquidationsPanel
             events={recent.events.slice(0, 6)}
             isLoading={recent.isLoading}
@@ -321,7 +321,7 @@ function RpcErrorBanner({
       className="border-b border-hairline"
       style={{ background: "var(--down-soft, #fbe9e9)" }}
     >
-      <div className="max-w-[1320px] mx-auto px-8 py-3.5 flex items-start gap-3">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-3.5 flex items-start gap-3">
         <span
           className="inline-block mt-1"
           style={{
@@ -794,8 +794,8 @@ function LiquidatableTable({
 }) {
   return (
     <section className="border-b border-hairline">
-      <div className="max-w-[1320px] mx-auto px-8 py-6">
-        <div className="flex justify-between items-baseline mb-3.5">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-6">
+        <div className="flex flex-col sm:flex-row justify-between sm:items-baseline gap-3 mb-3.5">
           <div>
             <div
               className="eyebrow mb-1 inline-flex items-center gap-1.5"
@@ -861,9 +861,9 @@ function LiquidatableTable({
           </div>
         </div>
 
-        <div style={{ border: "1px solid var(--ink)" }}>
+        <div className="overflow-x-auto" style={{ border: "1px solid var(--ink)" }}>
           <table
-            style={{ width: "100%", borderCollapse: "collapse" }}
+            style={{ width: "100%", borderCollapse: "collapse", minWidth: 700 }}
           >
             <thead>
               <tr
@@ -950,8 +950,8 @@ function WatchTable({
 
   return (
     <section className="border-b border-hairline">
-      <div className="max-w-[1320px] mx-auto px-8 py-6">
-        <div className="flex justify-between items-baseline mb-3.5">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-6">
+        <div className="flex flex-col sm:flex-row justify-between sm:items-baseline gap-3 mb-3.5">
           <div>
             <div
               className="eyebrow mb-1 inline-flex items-center gap-1.5"
@@ -1003,8 +1003,8 @@ function WatchTable({
           </div>
         </div>
 
-        <div style={{ border: "1px solid var(--hairline)" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <div className="overflow-x-auto" style={{ border: "1px solid var(--hairline)" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 700 }}>
             <thead>
               <tr
                 style={{
@@ -1622,7 +1622,7 @@ function HowItWorks() {
   ];
   return (
     <section className="border-t border-ink bg-paper-alt">
-      <div className="max-w-[1320px] mx-auto px-8 py-8">
+      <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-8">
         <div className="mb-5">
           <div className="eyebrow mb-1.5">How EquiFlow liquidations work</div>
           <h2
@@ -1634,7 +1634,7 @@ function HowItWorks() {
           </h2>
         </div>
         <div
-          className="grid grid-cols-4 bg-paper"
+          className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 bg-paper"
           style={{ border: "1px solid var(--hairline)" }}
         >
           {steps.map((s, i) => (
