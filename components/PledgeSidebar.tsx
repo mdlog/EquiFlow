@@ -263,6 +263,12 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
     writePending || receiptPending;
   const sealed = stage === "sealed";
 
+  useEffect(() => {
+    if (!sealed) return;
+    const t = setTimeout(() => onClose(), 2000);
+    return () => clearTimeout(t);
+  }, [sealed, onClose]);
+
   let ctaLabel: string;
   let ctaAction: (() => void) | null = null;
   let ctaDisabled = false;

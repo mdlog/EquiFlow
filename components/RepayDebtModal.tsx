@@ -183,6 +183,12 @@ export function RepayDebtModal({
     }
   }, [open, reset]);
 
+  useEffect(() => {
+    if (stage !== "sealed") return;
+    const t = setTimeout(() => onClose(), 2000);
+    return () => clearTimeout(t);
+  }, [stage, onClose]);
+
   function handleClick() {
     if (!VAULT_ADDR || !TOKEN_ADDR) return;
     if (aaActive && smartAccount && AA_CONFIGURED) {

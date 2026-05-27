@@ -248,6 +248,12 @@ export function LiquidateModal({
     if (liqSealed && stage === "liquidate-mining") setStage("sealed");
   }, [liqSealed, stage]);
 
+  useEffect(() => {
+    if (stage !== "sealed") return;
+    const t = setTimeout(() => onClose(), 2000);
+    return () => clearTimeout(t);
+  }, [stage, onClose]);
+
   function onApprove() {
     if (!TOKEN_ADDR || !VAULT_ADDR) return;
     setStage("approving");

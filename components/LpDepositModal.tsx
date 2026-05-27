@@ -255,6 +255,12 @@ export function LpDepositModal({ open, onClose }: Props) {
     }
   }, [open, reset]);
 
+  useEffect(() => {
+    if (step !== "sealed") return;
+    const t = setTimeout(() => onClose(), 2000);
+    return () => clearTimeout(t);
+  }, [step, onClose]);
+
   function handleStart() {
     if (!TOKEN_ADDR || !VAULT_ADDR) return;
     if (aaActive && smartAccount && AA_CONFIGURED) {

@@ -250,8 +250,6 @@ export default function PositionsPage() {
               </div>
             </section>
 
-            <LpPoolPanel />
-
             <section>
               <div className="max-w-[1320px] mx-auto w-full grid grid-cols-1 md:grid-cols-2">
               <OracleActivityLog
@@ -263,6 +261,14 @@ export default function PositionsPage() {
             </section>
           </>
         ) : null}
+
+        {isConnected && !pos.hasPosition && (
+          <section className="border-b border-hairline">
+            <div className="max-w-[1320px] mx-auto w-full">
+              <TxHistory />
+            </div>
+          </section>
+        )}
       </div>
 
       <SiteFooter />
@@ -909,8 +915,8 @@ function PerfChart({
                 stroke="var(--hairline-soft)" strokeDasharray="2 4"
               />
               <text
-                x={PAD_L - 8} y={y + 3}
-                fontSize="9" fontFamily="JetBrains Mono" fill="var(--ink-mute)"
+                x={PAD_L - 8} y={y + 4}
+                fontSize="11" fontFamily="JetBrains Mono" fill="var(--ink-mute)"
                 textAnchor="end"
               >
                 {v.toFixed(v % 1 === 0 ? 0 : 1)}
@@ -995,8 +1001,8 @@ function PerfChart({
         {dayLabels.map((d) => (
           <text
             key={d}
-            x={xAt(d)} y={H - 4}
-            fontSize="9" fontFamily="JetBrains Mono" fill="var(--ink-mute)"
+            x={xAt(d)} y={H - 2}
+            fontSize="12" fontFamily="JetBrains Mono" fill="var(--ink-mute)"
             textAnchor={d === 0 ? "start" : d === 30 ? "end" : "middle"}
           >
             {d === 30 ? "now" : `−${30 - d}d`}
@@ -1306,197 +1312,6 @@ function OracleActivityLog({
           </span>
         </div>
       </div>
-    </div>
-  );
-}
-
-/* ──────────────────────────────────────────────────────────────
-   LP POOL PANEL · public, real-time vault stats
-   ────────────────────────────────────────────────────────── */
-function LpPoolPanel() {
-  const { vault } = useVaultContext();
-  const vaultAddr = vault.address;
-  const { address } = useActiveWallet();
-  const { data: tvlRaw } = useReadContract({
-    abi: EQUIFLOW_VAULT_ABI,
-    address: vaultAddr,
-    functionName: "totalAssetsUsd",
-    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!vaultAddr, refetchInterval: 12_000 },
-  });
-  const { data: bookedRaw } = useReadContract({
-    abi: EQUIFLOW_VAULT_ABI,
-    address: vaultAddr,
-    functionName: "bookedUsdg",
-    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!vaultAddr, refetchInterval: 12_000 },
-  });
-  const { data: totalSharesRaw } = useReadContract({
-    abi: EQUIFLOW_VAULT_ABI,
-    address: vaultAddr,
-    functionName: "totalShares",
-    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!vaultAddr, refetchInterval: 12_000 },
-  });
-  const { data: apyRaw } = useReadContract({
-    abi: EQUIFLOW_VAULT_ABI,
-    address: vaultAddr,
-    functionName: "lpApyBps",
-    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!vaultAddr, refetchInterval: 12_000 },
-  });
-  const { data: utilizationRaw } = useReadContract({
-    abi: EQUIFLOW_VAULT_ABI,
-    address: vaultAddr,
-    functionName: "utilizationBps",
-    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!vaultAddr, refetchInterval: 12_000 },
-  });
-  const { data: borrowRateRaw } = useReadContract({
-    abi: EQUIFLOW_VAULT_ABI,
-    address: vaultAddr,
-    functionName: "borrowRateBps",
-    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!vaultAddr, staleTime: 60_000 },
-  });
-  const { data: myLp } = useReadContract({
-    abi: EQUIFLOW_VAULT_ABI,
-    address: vaultAddr,
-    functionName: "lpPositionOf",
-    args: address ? [address] : undefined,
-    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: {
-      enabled: !!vaultAddr && !!address,
-      refetchInterval: 12_000,
-    },
-  });
-
-  const usdgDec = vault.tokenDecimals;
-
-  const tvl = tvlRaw !== undefined ? Number(tvlRaw as bigint) / 1e18 : 0;
-  const idle =
-    bookedRaw !== undefined ? Number(bookedRaw as bigint) / 10 ** usdgDec : 0;
-  const totalShares =
-    totalSharesRaw !== undefined ? Number(totalSharesRaw as bigint) / 1e18 : 0;
-  const apyPct = apyRaw !== undefined ? Number(apyRaw as bigint) / 100 : 0;
-  const utilPct =
-    utilizationRaw !== undefined ? Number(utilizationRaw as bigint) / 100 : 0;
-  const borrowPct =
-    borrowRateRaw !== undefined ? Number(borrowRateRaw as bigint) / 100 : 0;
-  const [myShares, myUsdValue] = (myLp as
-    | readonly [bigint, bigint, bigint]
-    | undefined) ?? [0n, 0n, 0n];
-  const myShareNum = Number(myShares) / 1e18;
-  const myUsdNum = Number(myUsdValue) / 1e18;
-
-  return (
-    <section
-      className="border-b border-hairline bg-paper-alt"
-    >
-      <div className="max-w-[1320px] mx-auto w-full" style={{ padding: "24px 28px" }}>
-      <div
-        className="flex justify-between items-end"
-        style={{ marginBottom: 16 }}
-      >
-        <div>
-          <div className="eyebrow mb-1">Liquidity pool · open LP</div>
-          <h3
-            className="font-serif font-medium m-0"
-            style={{ fontSize: 20, letterSpacing: "-0.02em" }}
-          >
-            Deposit {vault.borrowSymbol}, earn from borrow spread
-          </h3>
-          <p
-            className="text-ink-soft m-0"
-            style={{ fontSize: 12, marginTop: 4, maxWidth: 540, lineHeight: 1.5 }}
-          >
-            Borrowers pay {borrowPct.toFixed(2)}% APR. Interest accrues
-            on-chain into your share value. Withdraw anytime your share of vault
-            {vault.borrowSymbol} is idle.
-          </p>
-        </div>
-      </div>
-      <div
-        className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 bg-paper rounded-[2px] border border-hairline-soft"
-        style={{ overflow: "hidden" }}
-      >
-        <PoolStat label="Vault TVL" value={fmt.usd(tvl, 0)} />
-        <PoolStat
-          label="LP APY"
-          value={`+${apyPct.toFixed(2)}%`}
-          color="var(--up)"
-          sub={`= ${borrowPct.toFixed(1)}% × ${utilPct.toFixed(0)}% util`}
-        />
-        <PoolStat
-          label="Utilization"
-          value={`${utilPct.toFixed(1)}%`}
-          sub={`${fmt.usd(tvl - idle, 0)} lent out`}
-        />
-        <PoolStat label={`Idle ${vault.borrowSymbol}`} value={fmt.usd(idle, 0)} />
-        <PoolStat
-          label="Your shares"
-          value={
-            myShareNum > 0 ? myShareNum.toFixed(myShareNum < 1 ? 4 : 2) : "—"
-          }
-          sub={
-            myShareNum > 0
-              ? `${fmt.usd(myUsdNum, 2)} · ${
-                  totalShares > 0
-                    ? ((myShareNum / totalShares) * 100).toFixed(2)
-                    : "0"
-                }% of pool`
-              : "Not deposited yet"
-          }
-          last
-        />
-      </div>
-      </div>
-    </section>
-  );
-}
-
-function PoolStat({
-  label,
-  value,
-  sub,
-  color,
-  last,
-}: {
-  label: string;
-  value: string;
-  sub?: string;
-  color?: string;
-  last?: boolean;
-}) {
-  return (
-    <div
-      style={{
-        padding: "16px 20px",
-        borderRight: last ? "none" : "1px solid var(--hairline-soft)",
-      }}
-    >
-      <div className="eyebrow" style={{ fontSize: 9, marginBottom: 6 }}>
-        {label}
-      </div>
-      <div
-        className="font-serif font-medium tabular"
-        style={{
-          fontSize: 22,
-          letterSpacing: "-0.025em",
-          lineHeight: 1,
-          color: color ?? "var(--ink)",
-        }}
-      >
-        {value}
-      </div>
-      {sub && (
-        <div
-          className="font-mono text-ink-mute tabular"
-          style={{ fontSize: 10, marginTop: 6 }}
-        >
-          {sub}
-        </div>
-      )}
     </div>
   );
 }

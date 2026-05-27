@@ -118,6 +118,12 @@ export function LpWithdrawModal({ open, onClose }: Props) {
     }
   }, [open, reset]);
 
+  useEffect(() => {
+    if (!sealed) return;
+    const t = setTimeout(() => onClose(), 2000);
+    return () => clearTimeout(t);
+  }, [sealed, onClose]);
+
   function handleWithdraw() {
     if (!VAULT_ADDR) return;
     const raw = parseUnits(shares.toFixed(18), 18);

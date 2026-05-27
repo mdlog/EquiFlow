@@ -126,6 +126,12 @@ export function WithdrawCollateralModal({
     }
   }, [open, reset]);
 
+  useEffect(() => {
+    if (!sealed) return;
+    const t = setTimeout(() => onClose(), 2000);
+    return () => clearTimeout(t);
+  }, [sealed, onClose]);
+
   const canWithdraw =
     isConnected &&
     !!tokenAddr &&
