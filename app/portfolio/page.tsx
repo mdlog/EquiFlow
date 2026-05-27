@@ -78,7 +78,7 @@ export default function PositionsPage() {
   return (
     <div className="flex flex-col min-h-screen">
       <PageNav
-        current="positions"
+        current="portfolio"
         rightExtras={
           <OraclePing
             label={pos.vaultConfigured ? "Vault · on-chain" : `${lines.length} oracles streaming`}
@@ -993,7 +993,7 @@ function PositionActions({
           label="Add collateral"
           sub="Improve health factor"
           icon="+"
-          href="/pledge"
+          href="/markets"
         />
         <ActionBtn
           label="Borrow more"
@@ -1603,15 +1603,15 @@ function EmptyState() {
         className="text-ink-soft mt-2"
         style={{ fontSize: 13, lineHeight: 1.5, maxWidth: 360 }}
       >
-        Pledge tokenized stocks via the Pledge page to mint a position. It
+        Pledge tokenized stocks via the Markets page to mint a position. It
         will appear here as a live orbital constellation with health factor.
       </div>
       <Link
-        href="/pledge"
+        href="/markets"
         className="mt-5 px-4 py-2.5 bg-ink text-paper rounded-[2px] no-underline font-medium"
         style={{ fontSize: 13 }}
       >
-        Compose a pledge →
+        Browse markets →
       </Link>
     </div>
   );

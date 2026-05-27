@@ -133,10 +133,10 @@ export function SupportedAssets() {
                     </td>
                     <td className="text-right" style={{ padding: 16 }}>
                       <Link
-                        href={`/pledge?sym=${s.sym}`}
+                        href={`/markets/${s.sym}`}
                         className="btn-ghost btn-sm"
                       >
-                        Pledge
+                        View
                       </Link>
                     </td>
                   </tr>

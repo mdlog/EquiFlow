@@ -7,7 +7,6 @@ import { SectionHead } from "@/components/SectionHead";
 import { SiteFooter } from "@/components/SiteFooter";
 import { OraclePing } from "@/components/OraclePing";
 import { Sparkline } from "@/components/Sparkline";
-import { useAccount } from "wagmi";
 import { STOCKS, type Stock, stockAddress } from "@/lib/config/stocks";
 import { fmt } from "@/lib/format";
 import { useLiveTick } from "@/lib/hooks/use-live-tick";
@@ -21,7 +20,6 @@ import {
   useMarketsSparkline,
 } from "@/lib/hooks/use-market-history";
 import { shortAddr, explorerAddr } from "@/lib/contracts";
-import { StockBalanceCell } from "@/components/StockBalanceCell";
 import { SessionBadge } from "@/components/SessionBadge";
 import { AssetLogo } from "@/components/AssetLogo";
 import { PledgeSidebar } from "@/components/PledgeSidebar";
@@ -61,7 +59,6 @@ export default function MarketsPage() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
   const [hoverSym, setHoverSym] = useState<string | null>(null);
   const [pledgeSym, setPledgeSym] = useState<string | null>(null);
-  const { isConnected } = useAccount();
 
   const listed = useListedAssets();
   const stats = useProtocolStats(listed);
@@ -326,9 +323,7 @@ export default function MarketsPage() {
           <div className="text-right">Max LTV</div>
           <div className="text-right">Borrow APR</div>
           <div className="text-right">Vault APR</div>
-          <div className="text-right">
-            {isConnected ? "Your balance" : "Volume"}
-          </div>
+          <div className="text-right">Volume</div>
           <div className="text-right">24h</div>
           <div />
         </div>
@@ -363,7 +358,6 @@ export default function MarketsPage() {
                 stock={s}
                 index={i}
                 hovered={hoverSym === s.sym}
-                walletConnected={isConnected}
                 onHover={() => setHoverSym(s.sym)}
                 onLeave={() => setHoverSym(null)}
                 live24hPct={history24h.data?.[s.sym]?.changePct ?? null}
@@ -505,7 +499,6 @@ function LedgerRow({
   stock,
   index,
   hovered,
-  walletConnected,
   onHover,
   onLeave,
   live24hPct,
@@ -519,7 +512,6 @@ function LedgerRow({
   stock: Stock;
   index: number;
   hovered: boolean;
-  walletConnected: boolean;
   onHover: () => void;
   onLeave: () => void;
   live24hPct: number | null;
@@ -717,22 +709,16 @@ function LedgerRow({
         </div>
       </div>
 
-      {/* Volume / Wallet balance */}
+      {/* Volume */}
       <div className="text-right">
-        {walletConnected && onChain ? (
-          <StockBalanceCell sym={stock.sym} price={live.value} />
-        ) : (
-          <>
-            <div className="font-mono tabular font-medium" style={{ fontSize: 13 }}>
-              {collateralVolumeUsd != null && collateralVolumeUsd > 0n
-                ? "$" + fmt.abbr(Number(collateralVolumeUsd / 10n ** 12n) / 1e6)
-                : "—"}
-            </div>
-            <div className="text-ink-mute mt-0.5" style={{ fontSize: 10 }}>
-              collateral locked
-            </div>
-          </>
-        )}
+        <div className="font-mono tabular font-medium" style={{ fontSize: 13 }}>
+          {collateralVolumeUsd != null && collateralVolumeUsd > 0n
+            ? "$" + fmt.abbr(Number(collateralVolumeUsd / 10n ** 12n) / 1e6)
+            : "—"}
+        </div>
+        <div className="text-ink-mute mt-0.5" style={{ fontSize: 10 }}>
+          collateral locked
+        </div>
       </div>
 
       {/* 24h change + sparkline */}

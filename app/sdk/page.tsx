@@ -56,7 +56,7 @@ console.log(receipt.txHash, receipt.healthFactor.toString());`,
       "Receipts contain the on-chain tx hash, the new position snapshot, and (when AA was used) the bundler hash.",
     code: `if (receipt.status === "sealed") {
   toast.success(\`Borrowed \${formatUsd(receipt.borrowedUsd)}\`);
-  router.push(\`/positions\`);
+  router.push(\`/portfolio\`);
 } else if (receipt.status === "reverted") {
   console.error(receipt.error); // typed: ExceedsLtv | StalePrice | ...
 }`,
@@ -814,7 +814,7 @@ function ComparisonStrip() {
       label: "Health-factor math",
       sdk: "ef.utils.healthFactor()",
       wagmi: "manual · read collateralUsd + borrowedUsd",
-      api: "GET /v1/positions/:addr",
+      api: "GET /v1/portfolio/:addr",
     },
     {
       label: "Liquidation stream",

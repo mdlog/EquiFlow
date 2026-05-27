@@ -136,20 +136,20 @@ const GROUPS: ResourceGroup[] = [
   },
   {
     id: "positions",
-    name: "/positions",
+    name: "/portfolio",
     tag: "borrowers · collateral · health",
     intro:
       "Per-account position snapshots. Mirrors what the vault returns from positionOf() plus a few denormalised columns for the dashboard.",
     endpoints: [
       {
         method: "GET",
-        path: "/positions/:address",
+        path: "/portfolio/:address",
         desc: "Snapshot for a single borrower. Returns collateral by token, debt, health factor, and the drop required to liquidate.",
         params: [
           { name: "address", type: "address", required: true, desc: "EOA or smart-account address" },
           { name: "include", type: "string[]", required: false, desc: "'pledges' | 'history' | 'oracles' (comma-separated)" },
         ],
-        curl: `curl -s "${BASE_URL}/positions/0xA73d3F8c4d7b612Ba8e63a89F0e1f2c901c92cC1?include=pledges" \\
+        curl: `curl -s "${BASE_URL}/portfolio/0xA73d3F8c4d7b612Ba8e63a89F0e1f2c901c92cC1?include=pledges" \\
   -H "X-EquiFlow-Key: $EF_KEY"`,
         response: `{
   "user": "0xA73d…2cC1",
@@ -168,7 +168,7 @@ const GROUPS: ResourceGroup[] = [
       },
       {
         method: "GET",
-        path: "/positions",
+        path: "/portfolio",
         desc: "List positions across the protocol with filters. Use for risk dashboards. Same shape as :address but paginated.",
         params: [
           { name: "hfMax", type: "float", required: false, desc: "upper bound on health factor (e.g. 1.05)" },
@@ -177,7 +177,7 @@ const GROUPS: ResourceGroup[] = [
           { name: "limit", type: "int", required: false, desc: "1–200 · default 50" },
           { name: "cursor", type: "string", required: false, desc: "opaque pagination cursor" },
         ],
-        curl: `curl -s "${BASE_URL}/positions?hfMax=1.05&minDebtUsd=500" \\
+        curl: `curl -s "${BASE_URL}/portfolio?hfMax=1.05&minDebtUsd=500" \\
   -H "X-EquiFlow-Key: $EF_KEY"`,
         response: `{
   "data": [
@@ -196,7 +196,7 @@ const GROUPS: ResourceGroup[] = [
       },
       {
         method: "POST",
-        path: "/positions/simulate",
+        path: "/portfolio/simulate",
         desc: "Server-side simulation. Mirrors vault.simulatePledge / simulateRepay. Returns the post-action position without sending a tx.",
         params: [
           { name: "user", type: "address", required: true, desc: "borrower the simulation is run against" },
@@ -204,7 +204,7 @@ const GROUPS: ResourceGroup[] = [
           { name: "token", type: "address", required: false, desc: "asset · required for pledge / withdraw" },
           { name: "amount", type: "uint256", required: true, desc: "amount in base units (1e18 USDG, 1e18 stock)" },
         ],
-        curl: `curl -s -X POST ${BASE_URL}/positions/simulate \\
+        curl: `curl -s -X POST ${BASE_URL}/portfolio/simulate \\
   -H "X-EquiFlow-Key: $EF_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -470,7 +470,7 @@ const TIER_TABLE: {
     rpd: 1_000_000,
     burst: 1_200,
     websockets: 8,
-    features: "/positions/simulate · /aa/userop · 25 webhooks · email support",
+    features: "/portfolio/simulate · /aa/userop · 25 webhooks · email support",
     tone: "primary",
   },
   {
@@ -882,7 +882,7 @@ function AuthSection() {
 export EF_KEY="ef_live_a09b3c4d2…"
 
 # 2 · authenticated GET
-curl -s ${BASE_URL}/positions/0xA73d…2cC1 \\
+curl -s ${BASE_URL}/portfolio/0xA73d…2cC1 \\
   -H "X-EquiFlow-Key: $EF_KEY"
 
 # 3 · scope check — 403 if your key is read-only

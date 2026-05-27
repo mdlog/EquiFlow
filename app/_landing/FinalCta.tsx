@@ -78,12 +78,12 @@ export function FinalCta() {
             can unwind any time — your shares stay yours.
           </p>
           <div className="mt-7 flex gap-3 flex-wrap">
-            <Link href="/pledge" className="btn-on-dark-primary btn-primary">
-              Open pledge flow
+            <Link href="/markets" className="btn-on-dark-primary btn-primary">
+              Explore markets
               <Arrow />
             </Link>
-            <Link href="/markets" className="btn-on-dark-ghost btn-ghost">
-              Browse markets first
+            <Link href="/portfolio" className="btn-on-dark-ghost btn-ghost">
+              View portfolio
             </Link>
           </div>
         </div>

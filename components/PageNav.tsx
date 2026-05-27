@@ -8,9 +8,7 @@ import { WalletButton } from "./WalletButton";
 
 const PAGES = [
   { id: "markets", label: "Markets", href: "/markets" },
-  { id: "topography", label: "Topography", href: "/topography" },
-  { id: "pledge", label: "Pledge", href: "/pledge" },
-  { id: "positions", label: "Positions", href: "/positions" },
+  { id: "portfolio", label: "Portfolio", href: "/portfolio" },
   { id: "liquidations", label: "Liquidations", href: "/liquidations" },
 ] as const;
 

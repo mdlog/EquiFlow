@@ -76,7 +76,7 @@ export function AssetActivityFeed({ symbol, token }: Props) {
             <Empty>
               No on-chain activity for {symbol} in the last 24h. Try{" "}
               <a
-                href="/pledge"
+                href="/markets"
                 className="underline text-ink-soft hover:text-ink"
               >
                 pledging

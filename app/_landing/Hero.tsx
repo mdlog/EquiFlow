@@ -52,12 +52,12 @@ export function Hero() {
           </p>
 
           <div className="mt-8 flex flex-wrap gap-3 items-center">
-            <Link href="/pledge" className="btn-primary">
-              Open pledge flow
+            <Link href="/markets" className="btn-primary">
+              Explore markets
               <Arrow />
             </Link>
-            <Link href="/markets" className="btn-ghost">
-              Browse markets
+            <Link href="/portfolio" className="btn-ghost">
+              View portfolio
             </Link>
           </div>
 

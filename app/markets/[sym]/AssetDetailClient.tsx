@@ -420,7 +420,7 @@ export function AssetDetailClient({ sym }: Props) {
                 </div>
               ))}
               <Link
-                href={`/pledge?sym=${stock.sym}`}
+                href={`/markets`}
                 className="rounded-[2px] flex justify-between items-center bg-ink text-paper no-underline font-medium mt-5"
                 style={{ padding: "14px 18px", fontSize: 14 }}
               >
