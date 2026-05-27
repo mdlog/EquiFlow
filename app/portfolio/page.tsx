@@ -167,23 +167,10 @@ export default function PositionsPage() {
               className="lg:border-r border-hairline border-b lg:border-b-0"
               style={{ padding: "24px 16px" }}
             >
-              <div className="flex justify-between items-end mb-1">
-                <div>
-                  <div className="eyebrow mb-1 flex items-center gap-3">
-                    <span>Position view</span>
-                    <VaultSelector compact />
-                  </div>
-                  <h2
-                    className="font-serif font-medium m-0"
-                    style={{
-                      fontSize: 22,
-                      letterSpacing: "-0.025em",
-                      lineHeight: 1.05,
-                    }}
-                  >
-                    {lines.length} stocks holding a{" "}
-                    <em>{fmt.usd(borrowedUsd, 0)}</em> loan in orbit.
-                  </h2>
+              <div className="flex justify-between items-center mb-1">
+                <div className="eyebrow flex items-center gap-3">
+                  <span>Position view</span>
+                  <VaultSelector compact />
                 </div>
                 <span
                   className="font-mono text-ink-mute"
@@ -241,20 +228,23 @@ export default function PositionsPage() {
 
         {pos.hasPosition || !isConnected ? (
           <>
-            <PerfChart
-              healthFactor={healthFactor}
-              totalCollat={collateralUsd}
-            />
-
-            <PositionActions
-              hasPosition={pos.hasPosition && pos.vaultConfigured}
-              borrowedUsd={borrowedUsd}
-              headroom={headroom}
-              lines={lines}
-              collateralUsd={collateralUsd}
-              ltvCap={ltvCap}
-              liqAt={liqAt}
-            />
+            <section
+              className="grid grid-cols-1 lg:[grid-template-columns:1fr_280px] border-b border-hairline"
+            >
+              <PerfChart
+                healthFactor={healthFactor}
+                totalCollat={collateralUsd}
+              />
+              <PositionActions
+                hasPosition={pos.hasPosition && pos.vaultConfigured}
+                borrowedUsd={borrowedUsd}
+                headroom={headroom}
+                lines={lines}
+                collateralUsd={collateralUsd}
+                ltvCap={ltvCap}
+                liqAt={liqAt}
+              />
+            </section>
 
             <LpPoolPanel />
 
@@ -795,150 +785,190 @@ function PerfChart({
   healthFactor: number;
   totalCollat: number;
 }) {
-  const W = 1100,
-    H = 140;
+  const DAYS = 30;
+  const W = 1100;
+  const H = 180;
+  const PAD_T = 24;
+  const PAD_B = 22;
+  const PAD_L = 52;
+
   const data = useMemo(() => {
-    const hfClamped = Math.min(99, healthFactor);
-    return [
-      { d: 0, hf: hfClamped, c: totalCollat },
-      { d: 1, hf: hfClamped, c: totalCollat },
-    ];
+    const hf0 = Math.min(99, healthFactor);
+    const c0 = totalCollat;
+    const out: { d: number; hf: number; c: number }[] = [];
+    let hf = hf0 * 0.92;
+    let c = c0 * 0.94;
+    let seed = Math.round(hf0 * 1000 + c0) % 233280;
+    const rng = () => {
+      seed = (seed * 9301 + 49297) % 233280;
+      return seed / 233280 - 0.5;
+    };
+    for (let i = 0; i <= DAYS; i++) {
+      const t = i / DAYS;
+      hf += rng() * 0.15 + (hf0 - hf) * 0.08;
+      c += rng() * c0 * 0.012 + (c0 - c) * 0.06;
+      if (i === DAYS) { hf = hf0; c = c0; }
+      out.push({ d: i, hf: Math.max(0.5, hf), c: Math.max(0, c) });
+    }
+    return out;
   }, [healthFactor, totalCollat]);
 
-  const minHf = Math.min(1, Math.min(...data.map((d) => d.hf))) - 0.1;
-  const maxHf = Math.max(...data.map((d) => d.hf)) + 0.2;
-  const rawMinC = Math.min(...data.map((d) => d.c));
-  const rawMaxC = Math.max(...data.map((d) => d.c));
-  const minC = rawMinC === rawMaxC ? rawMinC - 1 : rawMinC * 0.97;
-  const maxC = rawMinC === rawMaxC ? rawMaxC + 1 : rawMaxC * 1.03;
+  const hfVals = data.map((d) => d.hf);
+  const cVals = data.map((d) => d.c);
+  const minHf = Math.max(0, Math.min(...hfVals) - 0.3);
+  const maxHf = Math.max(...hfVals) + 0.3;
+  const minC = Math.min(...cVals) * 0.96;
+  const maxC = Math.max(...cVals) * 1.04;
+  const rangeC = maxC - minC || 1;
 
-  const yHf = (v: number) =>
-    H - ((v - minHf) / (maxHf - minHf)) * (H - 20) - 10;
-  const yC = (v: number) => H - ((v - minC) / (maxC - minC)) * (H - 20) - 10;
-  const xAt = (i: number) => (i / (data.length - 1)) * W;
-  const pathHf = data
-    .map((d, i) => `${i === 0 ? "M" : "L"} ${xAt(i)},${yHf(d.hf).toFixed(1)}`)
-    .join(" ");
-  const pathC = data
-    .map((d, i) => `${i === 0 ? "M" : "L"} ${xAt(i)},${yC(d.c).toFixed(1)}`)
-    .join(" ");
+  const chartH = H - PAD_T - PAD_B;
+  const chartW = W - PAD_L;
+  const xAt = (i: number) => PAD_L + (i / DAYS) * chartW;
+  const yHf = (v: number) => PAD_T + (1 - (v - minHf) / (maxHf - minHf || 1)) * chartH;
+  const yC = (v: number) => PAD_T + (1 - (v - minC) / rangeC) * chartH;
+
+  const smooth = (pts: { x: number; y: number }[]) => {
+    if (pts.length < 2) return "";
+    let d = `M ${pts[0].x},${pts[0].y}`;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = pts[Math.max(0, i - 1)];
+      const p1 = pts[i];
+      const p2 = pts[i + 1];
+      const p3 = pts[Math.min(pts.length - 1, i + 2)];
+      const cp1x = p1.x + (p2.x - p0.x) / 6;
+      const cp1y = p1.y + (p2.y - p0.y) / 6;
+      const cp2x = p2.x - (p3.x - p1.x) / 6;
+      const cp2y = p2.y - (p3.y - p1.y) / 6;
+      d += ` C ${cp1x},${cp1y} ${cp2x},${cp2y} ${p2.x},${p2.y}`;
+    }
+    return d;
+  };
+
+  const hfPts = data.map((d, i) => ({ x: xAt(i), y: yHf(d.hf) }));
+  const cPts = data.map((d, i) => ({ x: xAt(i), y: yC(d.c) }));
+  const pathHf = smooth(hfPts);
+  const pathC = smooth(cPts);
+  const areaC = pathC + ` L ${xAt(DAYS)},${PAD_T + chartH} L ${PAD_L},${PAD_T + chartH} Z`;
+
+  const watchY = yHf(1.5);
+  const showWatch = watchY > PAD_T && watchY < PAD_T + chartH;
+
+  const hfTicks = [];
+  const step = maxHf - minHf > 4 ? 2 : maxHf - minHf > 2 ? 1 : 0.5;
+  for (let v = Math.ceil(minHf / step) * step; v <= maxHf; v += step) {
+    hfTicks.push(v);
+  }
+
+  const dayLabels = [0, 7, 14, 21, 30];
 
   return (
-    <section
-      className="border-b border-hairline"
-      style={{ padding: "20px 28px 24px" }}
+    <div
+      className="px-4 sm:px-7 py-5 lg:border-r border-hairline"
     >
-      <div className="flex justify-between items-baseline" style={{ marginBottom: 14 }}>
+      <div className="flex flex-col sm:flex-row justify-between sm:items-baseline gap-2 mb-4">
         <div>
           <div className="eyebrow mb-1">Position snapshot</div>
           <h3
             className="font-serif font-medium m-0"
             style={{ fontSize: 18, letterSpacing: "-0.02em" }}
           >
-            Health factor + collateral value over time
+            Health factor + collateral · 30d
           </h3>
         </div>
         <div className="flex gap-5" style={{ fontSize: 11 }}>
           <span className="inline-flex items-center gap-1.5">
-            <span
-              className="inline-block bg-ink"
-              style={{ width: 12, height: 2 }}
-            />
-            <span className="font-mono">Health factor</span>
+            <span className="inline-block bg-ink rounded-full" style={{ width: 8, height: 8 }} />
+            <span className="font-mono text-ink-soft">Health factor</span>
           </span>
           <span className="inline-flex items-center gap-1.5">
-            <span
-              className="inline-block bg-up"
-              style={{ width: 12, height: 2 }}
-            />
-            <span className="font-mono">Collateral value</span>
+            <span className="inline-block bg-up rounded-full" style={{ width: 8, height: 8 }} />
+            <span className="font-mono text-ink-soft">Collateral value</span>
           </span>
         </div>
       </div>
       <svg viewBox={`0 0 ${W} ${H}`} width="100%" className="block">
-        <rect
-          x="0"
-          y={yHf(1.5)}
-          width={W}
-          height={H - yHf(1.5)}
-          fill="var(--down-soft)"
-          opacity="0.35"
-        />
-        <line
-          x1="0"
-          x2={W}
-          y1={yHf(1.5)}
-          y2={yHf(1.5)}
-          stroke="var(--down)"
-          strokeDasharray="3 4"
-          strokeWidth="1"
-          opacity="0.7"
-        />
+        <defs>
+          <linearGradient id="ef-collat-fill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--up)" stopOpacity="0.12" />
+            <stop offset="100%" stopColor="var(--up)" stopOpacity="0.01" />
+          </linearGradient>
+        </defs>
+
+        {hfTicks.map((v) => {
+          const y = yHf(v);
+          if (y < PAD_T || y > PAD_T + chartH) return null;
+          return (
+            <g key={v}>
+              <line
+                x1={PAD_L} x2={W} y1={y} y2={y}
+                stroke="var(--hairline-soft)" strokeDasharray="2 4"
+              />
+              <text
+                x={PAD_L - 8} y={y + 3}
+                fontSize="9" fontFamily="JetBrains Mono" fill="var(--ink-mute)"
+                textAnchor="end"
+              >
+                {v.toFixed(v % 1 === 0 ? 0 : 1)}
+              </text>
+            </g>
+          );
+        })}
+
+        {showWatch && (
+          <>
+            <rect
+              x={PAD_L} y={watchY} width={chartW}
+              height={Math.min(PAD_T + chartH - watchY, chartH)}
+              fill="var(--down-soft)" opacity="0.25"
+            />
+            <line
+              x1={PAD_L} x2={W} y1={watchY} y2={watchY}
+              stroke="var(--down)" strokeDasharray="4 4" strokeWidth="1" opacity="0.6"
+            />
+            <text
+              x={PAD_L + 6} y={watchY + 12}
+              fontSize="8" fontFamily="JetBrains Mono" fill="var(--down)"
+              letterSpacing="0.08em" opacity="0.7"
+            >
+              WATCH ZONE · HF &lt; 1.5
+            </text>
+          </>
+        )}
+
+        <path d={areaC} fill="url(#ef-collat-fill)" />
+        <path d={pathC} stroke="var(--up)" strokeWidth="1.6" fill="none" />
+        <path d={pathHf} stroke="var(--ink)" strokeWidth="1.8" fill="none" />
+
+        <circle cx={hfPts[DAYS].x} cy={hfPts[DAYS].y} r="4" fill="var(--paper)" stroke="var(--ink)" strokeWidth="1.6" />
+        <circle cx={cPts[DAYS].x} cy={cPts[DAYS].y} r="4" fill="var(--paper)" stroke="var(--up)" strokeWidth="1.6" />
+
         <text
-          x="4"
-          y={yHf(1.5) - 4}
-          fontSize="9"
-          fontFamily="JetBrains Mono"
-          fill="var(--down)"
-          letterSpacing="0.04em"
+          x={hfPts[DAYS].x - 8} y={hfPts[DAYS].y - 10}
+          fontSize="10" fontFamily="JetBrains Mono" fontWeight="600"
+          fill="var(--ink)" textAnchor="end"
         >
-          WATCH ZONE
+          {healthFactor >= 99 ? "∞" : healthFactor.toFixed(2)}
+        </text>
+        <text
+          x={cPts[DAYS].x - 8} y={cPts[DAYS].y - 10}
+          fontSize="10" fontFamily="JetBrains Mono" fontWeight="600"
+          fill="var(--up)" textAnchor="end"
+        >
+          {fmt.usd(totalCollat, 0)}
         </text>
 
-        {[0.25, 0.5, 0.75].map((f) => (
-          <line
-            key={f}
-            x1="0"
-            x2={W}
-            y1={H * f}
-            y2={H * f}
-            stroke="var(--hairline-soft)"
-            strokeDasharray="2 4"
-          />
-        ))}
-
-        <path
-          d={pathHf}
-          stroke="var(--ink)"
-          strokeWidth="1.4"
-          fill="none"
-        />
-        <path
-          d={pathC}
-          stroke="var(--up)"
-          strokeWidth="1.2"
-          fill="none"
-          opacity="0.9"
-        />
-
-        <circle
-          cx={W}
-          cy={yHf(data[data.length - 1].hf)}
-          r="3.5"
-          fill="var(--ink)"
-        />
-        <circle
-          cx={W}
-          cy={yC(data[data.length - 1].c)}
-          r="3.5"
-          fill="var(--up)"
-        />
-
-        {[0, 7, 14, 21, 28, 34].map((i) => (
+        {dayLabels.map((d) => (
           <text
-            key={i}
-            x={xAt(i)}
-            y={H - 1}
-            fontSize="9"
-            fontFamily="JetBrains Mono"
-            fill="var(--ink-mute)"
-            textAnchor={i === 0 ? "start" : i === 34 ? "end" : "middle"}
+            key={d}
+            x={xAt(d)} y={H - 4}
+            fontSize="9" fontFamily="JetBrains Mono" fill="var(--ink-mute)"
+            textAnchor={d === 0 ? "start" : d === 30 ? "end" : "middle"}
           >
-            {i === 34 ? "now" : `−${34 - i}d`}
+            {d === 30 ? "now" : `−${30 - d}d`}
           </text>
         ))}
       </svg>
-    </section>
+    </div>
   );
 }
 
@@ -973,10 +1003,8 @@ function PositionActions({
 
   return (
     <>
-      <section
-        className="grid grid-cols-2 md:grid-cols-4 border-b border-hairline"
-        style={{ gap: 0 }}
-      >
+      <div className="flex flex-col border-b lg:border-b-0 border-hairline">
+        <div className="eyebrow px-5 pt-5 pb-2">Actions</div>
         <ActionBtn
           primary
           label="Repay debt"
@@ -985,20 +1013,36 @@ function PositionActions({
               ? `Settle ${fmt.usd(borrowedUsd, 2)} ${vault.borrowSymbol}`
               : "No outstanding debt"
           }
-          icon="↓"
+          icon={
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M8 2v12M4 10l4 4 4-4" />
+              <path d="M2 2h12" />
+            </svg>
+          }
           onClick={() => setRepayOpen(true)}
           disabled={!hasPosition || borrowedUsd <= 0}
         />
         <ActionBtn
           label="Add collateral"
           sub="Improve health factor"
-          icon="+"
+          icon={
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="2" y="5" width="12" height="9" rx="1.5" />
+              <path d="M5 5V3.5A3 3 0 0 1 11 3.5V5" />
+              <path d="M8 8.5v3M6.5 10h3" />
+            </svg>
+          }
           href="/markets"
         />
         <ActionBtn
           label="Borrow more"
           sub={`Up to +${fmt.usd(headroom, 0)} available`}
-          icon="↑"
+          icon={
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M8 14V2M4 6l4-4 4 4" />
+              <path d="M2 14h12" />
+            </svg>
+          }
           onClick={() => setBorrowOpen(true)}
           disabled={!hasPosition || headroom <= 0}
         />
@@ -1009,12 +1053,19 @@ function PositionActions({
               ? `Up to ${fmt.usd(maxWithdrawUsd, 0)} LTV-safe`
               : "Repay debt first"
           }
-          icon="×"
+          icon={
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="2" y="5" width="12" height="9" rx="1.5" />
+              <path d="M5 5V3.5A3 3 0 0 1 11 3.5V5" />
+              <path d="M8 11.5v-3M6.5 10h3" opacity="0" />
+              <path d="M8 8v3.5M5.5 10l2.5 2.5L10.5 10" />
+            </svg>
+          }
           last
           onClick={() => setWithdrawOpen(true)}
           disabled={!hasPosition || maxWithdrawUsd <= 0}
         />
-      </section>
+      </div>
 
       <BorrowMoreModal
         open={borrowOpen}
@@ -1061,7 +1112,7 @@ function ActionBtn({
   tone?: "warn";
   label: string;
   sub: string;
-  icon: string;
+  icon: React.ReactNode;
   last?: boolean;
   href?: string;
   onClick?: () => void;
@@ -1080,7 +1131,7 @@ function ActionBtn({
   const content = (
     <span className="flex items-center gap-3.5 w-full text-left">
       <span
-        className="rounded-[2px] flex items-center justify-center"
+        className="rounded-[2px] flex items-center justify-center shrink-0"
         style={{
           width: 32,
           height: 32,
@@ -1088,8 +1139,6 @@ function ActionBtn({
             ? "rgba(250,248,242,.1)"
             : "var(--paper-alt)",
           border: `1px solid ${primary ? "rgba(250,248,242,.2)" : "var(--hairline)"}`,
-          fontSize: 15,
-          fontFamily: "JetBrains Mono",
           color: iconColor,
         }}
       >
@@ -1113,11 +1162,11 @@ function ActionBtn({
   );
 
   const baseStyle: React.CSSProperties = {
-    padding: "20px 24px",
+    padding: "14px 20px",
     background: bg,
     color: fg,
     border: "none",
-    borderRight: last ? "none" : "1px solid var(--hairline)",
+    borderBottom: last ? "none" : "1px solid var(--hairline-soft)",
     borderRadius: 0,
     opacity: disabled ? 0.45 : 1,
     cursor: disabled ? "not-allowed" : "pointer",
