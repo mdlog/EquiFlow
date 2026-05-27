@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 import { useBlockNumber, usePublicClient } from "wagmi";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { parseAbiItem, type Address } from "viem";
 import {
   EQUIFLOW_VAULT_ADDRESS,
@@ -339,6 +339,7 @@ export function usePositionEvents(user: Address | undefined): {
       return out;
     },
     enabled: !!client && !!EQUIFLOW_VAULT_ADDRESS && !!head && !!user,
+    placeholderData: keepPreviousData,
     staleTime: 5 * 60_000,
     refetchInterval: 5 * 60_000,
     retry: 3,

@@ -18,6 +18,13 @@ const DOMAINS: Record<string, string> = {
   QQQ: "invesco.com",
 };
 
+const LOCAL_LOGOS: Record<string, string> = {
+  USDG: "/logo-usdg.png",
+  USDC: "/logo-usdc.png",
+  WETH: "/logo-weth.png",
+  ETH: "/logo-weth.png",
+};
+
 export const assetDomain = (sym: string): string | undefined => DOMAINS[sym];
 
 export function AssetLogo({
@@ -34,10 +41,13 @@ export function AssetLogo({
   rounded?: boolean;
 }) {
   const [errored, setErrored] = useState(false);
+  const local = LOCAL_LOGOS[sym];
   const domain = DOMAINS[sym];
-  const src = domain
-    ? `https://www.google.com/s2/favicons?domain=${domain}&sz=128`
-    : null;
+  const src = local
+    ? local
+    : domain
+      ? `https://www.google.com/s2/favicons?domain=${domain}&sz=128`
+      : null;
 
   if (!src || errored) {
     return (

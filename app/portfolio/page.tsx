@@ -88,7 +88,7 @@ export default function PositionsPage() {
 
       {pos.oracleStale && <StaleOracleBanner />}
 
-      <div className="max-w-[1320px] w-full mx-auto flex-1 flex flex-col">
+      <div className="w-full flex-1 flex flex-col">
         {/* Position selector bar */}
         <PositionSelectorBar
           assetCount={lines.length}
@@ -99,9 +99,10 @@ export default function PositionsPage() {
 
         {/* 5-KPI banner */}
         <section
-          className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 bg-paper-alt"
+          className="bg-paper-alt"
           style={{ borderBottom: "1px solid var(--ink)" }}
         >
+          <div className="max-w-[1320px] mx-auto w-full grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
           <Kpi
             label="Collateral · total"
             value={fmt.usd(collateralUsd, 0)}
@@ -129,13 +130,15 @@ export default function PositionsPage() {
             sub="remaining headroom"
             last
           />
+          </div>
         </section>
 
         {!isConnected && (
           <div
-            className="border-b border-hairline-soft flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 px-4 sm:px-8 py-3"
+            className="border-b border-hairline-soft"
             style={{ background: "var(--amber-soft)" }}
           >
+            <div className="max-w-[1320px] mx-auto w-full flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 px-4 sm:px-8 py-3">
             <span style={{ fontSize: 12 }} className="text-ink-soft">
               Wallet not connected — connect to view your position.
             </span>
@@ -154,14 +157,14 @@ export default function PositionsPage() {
             >
               Connect wallet
             </button>
+            </div>
           </div>
         )}
 
         {/* Orbit + Collateral/Debt tables */}
         {pos.hasPosition || !isConnected ? (
-          <section
-            className="grid grid-cols-1 lg:[grid-template-columns:1.05fr_1fr] border-b border-hairline"
-          >
+          <section className="border-b border-hairline">
+            <div className="max-w-[1320px] mx-auto w-full grid grid-cols-1 lg:[grid-template-columns:1.05fr_1fr]">
             {/* LEFT: orbit */}
             <div
               className="lg:border-r border-hairline border-b lg:border-b-0"
@@ -221,6 +224,7 @@ export default function PositionsPage() {
                 vaultApr={vaultApr}
               />
             </div>
+            </div>
           </section>
         ) : (
           <EmptyState />
@@ -228,9 +232,8 @@ export default function PositionsPage() {
 
         {pos.hasPosition || !isConnected ? (
           <>
-            <section
-              className="grid grid-cols-1 lg:[grid-template-columns:1fr_280px] border-b border-hairline"
-            >
+            <section className="border-b border-hairline">
+              <div className="max-w-[1320px] mx-auto w-full grid grid-cols-1 lg:[grid-template-columns:1fr_260px]">
               <PerfChart
                 healthFactor={healthFactor}
                 totalCollat={collateralUsd}
@@ -244,18 +247,19 @@ export default function PositionsPage() {
                 ltvCap={ltvCap}
                 liqAt={liqAt}
               />
+              </div>
             </section>
 
             <LpPoolPanel />
 
-            <section
-              className="grid grid-cols-1 md:grid-cols-2"
-            >
+            <section>
+              <div className="max-w-[1320px] mx-auto w-full grid grid-cols-1 md:grid-cols-2">
               <OracleActivityLog
                 stocks={lines}
                 healthFactor={healthFactor}
               />
               <TxHistory />
+              </div>
             </section>
           </>
         ) : null}
@@ -302,9 +306,8 @@ function PositionSelectorBar({
     ((lpPos as readonly [bigint, bigint, bigint])[0]) > 0n;
 
   return (
-    <section
-      className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-hairline-soft px-4 sm:px-7 py-3 sm:py-3.5"
-    >
+    <section className="border-b border-hairline-soft">
+      <div className="max-w-[1320px] mx-auto w-full flex flex-col sm:flex-row sm:items-center justify-between gap-3 px-4 sm:px-7 py-3 sm:py-3.5">
       <div className="flex items-center gap-3 sm:gap-5 flex-wrap">
         <div
           className="flex items-center gap-2.5 border border-ink rounded-[2px] cursor-pointer"
@@ -393,6 +396,7 @@ function PositionSelectorBar({
         open={withdrawLpOpen}
         onClose={() => setWithdrawLpOpen(false)}
       />
+      </div>
     </section>
   );
 }
@@ -791,6 +795,7 @@ function PerfChart({
   const PAD_T = 24;
   const PAD_B = 22;
   const PAD_L = 52;
+  const PAD_R = 100;
 
   const data = useMemo(() => {
     const hf0 = Math.min(99, healthFactor);
@@ -822,7 +827,7 @@ function PerfChart({
   const rangeC = maxC - minC || 1;
 
   const chartH = H - PAD_T - PAD_B;
-  const chartW = W - PAD_L;
+  const chartW = W - PAD_L - PAD_R;
   const xAt = (i: number) => PAD_L + (i / DAYS) * chartW;
   const yHf = (v: number) => PAD_T + (1 - (v - minHf) / (maxHf - minHf || 1)) * chartH;
   const yC = (v: number) => PAD_T + (1 - (v - minC) / rangeC) * chartH;
@@ -863,7 +868,7 @@ function PerfChart({
 
   return (
     <div
-      className="px-4 sm:px-7 py-5 lg:border-r border-hairline"
+      className="px-4 sm:px-7 py-5 lg:border-r border-hairline min-w-0"
     >
       <div className="flex flex-col sm:flex-row justify-between sm:items-baseline gap-2 mb-4">
         <div>
@@ -900,7 +905,7 @@ function PerfChart({
           return (
             <g key={v}>
               <line
-                x1={PAD_L} x2={W} y1={y} y2={y}
+                x1={PAD_L} x2={W - PAD_R} y1={y} y2={y}
                 stroke="var(--hairline-soft)" strokeDasharray="2 4"
               />
               <text
@@ -922,7 +927,7 @@ function PerfChart({
               fill="var(--down-soft)" opacity="0.25"
             />
             <line
-              x1={PAD_L} x2={W} y1={watchY} y2={watchY}
+              x1={PAD_L} x2={W - PAD_R} y1={watchY} y2={watchY}
               stroke="var(--down)" strokeDasharray="4 4" strokeWidth="1" opacity="0.6"
             />
             <text
@@ -939,23 +944,53 @@ function PerfChart({
         <path d={pathC} stroke="var(--up)" strokeWidth="1.6" fill="none" />
         <path d={pathHf} stroke="var(--ink)" strokeWidth="1.8" fill="none" />
 
-        <circle cx={hfPts[DAYS].x} cy={hfPts[DAYS].y} r="4" fill="var(--paper)" stroke="var(--ink)" strokeWidth="1.6" />
-        <circle cx={cPts[DAYS].x} cy={cPts[DAYS].y} r="4" fill="var(--paper)" stroke="var(--up)" strokeWidth="1.6" />
+        <circle cx={hfPts[DAYS].x} cy={hfPts[DAYS].y} r="5" fill="var(--paper)" stroke="var(--ink)" strokeWidth="2" />
+        <circle cx={cPts[DAYS].x} cy={cPts[DAYS].y} r="5" fill="var(--paper)" stroke="var(--up)" strokeWidth="2" />
 
-        <text
-          x={hfPts[DAYS].x - 8} y={hfPts[DAYS].y - 10}
-          fontSize="10" fontFamily="JetBrains Mono" fontWeight="600"
-          fill="var(--ink)" textAnchor="end"
-        >
-          {healthFactor >= 99 ? "∞" : healthFactor.toFixed(2)}
-        </text>
-        <text
-          x={cPts[DAYS].x - 8} y={cPts[DAYS].y - 10}
-          fontSize="10" fontFamily="JetBrains Mono" fontWeight="600"
-          fill="var(--up)" textAnchor="end"
-        >
-          {fmt.usd(totalCollat, 0)}
-        </text>
+        {(() => {
+          const dotX = hfPts[DAYS].x;
+          const hfY = hfPts[DAYS].y;
+          const cY = cPts[DAYS].y;
+          const hfLabel = healthFactor >= 99 ? "∞" : healthFactor.toFixed(2);
+          const cLabel = fmt.usd(totalCollat, 0);
+          const labelH = 20;
+          const gap = 4;
+          const labelX = dotX + 12;
+          let hfLabelY = hfY;
+          let cLabelY = cY;
+          if (Math.abs(hfLabelY - cLabelY) < labelH + gap) {
+            const mid = (hfLabelY + cLabelY) / 2;
+            if (hfY <= cY) {
+              hfLabelY = mid - (labelH + gap) / 2;
+              cLabelY = mid + (labelH + gap) / 2;
+            } else {
+              cLabelY = mid - (labelH + gap) / 2;
+              hfLabelY = mid + (labelH + gap) / 2;
+            }
+          }
+          return (
+            <>
+              <line x1={dotX + 6} x2={labelX} y1={hfY} y2={hfLabelY} stroke="var(--ink)" strokeWidth="1" opacity="0.3" />
+              <rect x={labelX} y={hfLabelY - labelH / 2} width={62} height={labelH} rx="2" fill="var(--ink)" />
+              <text
+                x={labelX + 31} y={hfLabelY + 4}
+                fontSize="10" fontFamily="JetBrains Mono" fontWeight="600"
+                fill="var(--paper)" textAnchor="middle"
+              >
+                HF {hfLabel}
+              </text>
+              <line x1={dotX + 6} x2={labelX} y1={cY} y2={cLabelY} stroke="var(--up)" strokeWidth="1" opacity="0.3" />
+              <rect x={labelX} y={cLabelY - labelH / 2} width={72} height={labelH} rx="2" fill="var(--up)" />
+              <text
+                x={labelX + 36} y={cLabelY + 4}
+                fontSize="10" fontFamily="JetBrains Mono" fontWeight="600"
+                fill="var(--paper)" textAnchor="middle"
+              >
+                {cLabel}
+              </text>
+            </>
+          );
+        })()}
 
         {dayLabels.map((d) => (
           <text
@@ -1003,8 +1038,8 @@ function PositionActions({
 
   return (
     <>
-      <div className="flex flex-col border-b lg:border-b-0 border-hairline">
-        <div className="eyebrow px-5 pt-5 pb-2">Actions</div>
+      <div className="flex flex-col border-b lg:border-b-0 border-hairline lg:border-l" style={{ padding: "12px" }}>
+        <div className="eyebrow px-2 pt-1 pb-2">Actions</div>
         <ActionBtn
           primary
           label="Repay debt"
@@ -1162,12 +1197,12 @@ function ActionBtn({
   );
 
   const baseStyle: React.CSSProperties = {
-    padding: "14px 20px",
+    padding: "12px 16px",
     background: bg,
     color: fg,
-    border: "none",
-    borderBottom: last ? "none" : "1px solid var(--hairline-soft)",
-    borderRadius: 0,
+    border: primary ? "none" : "1px solid var(--hairline)",
+    marginBottom: last ? 0 : 6,
+    borderRadius: 2,
     opacity: disabled ? 0.45 : 1,
     cursor: disabled ? "not-allowed" : "pointer",
   };
@@ -1357,8 +1392,8 @@ function LpPoolPanel() {
   return (
     <section
       className="border-b border-hairline bg-paper-alt"
-      style={{ padding: "24px 28px" }}
     >
+      <div className="max-w-[1320px] mx-auto w-full" style={{ padding: "24px 28px" }}>
       <div
         className="flex justify-between items-end"
         style={{ marginBottom: 16 }}
@@ -1414,6 +1449,7 @@ function LpPoolPanel() {
           }
           last
         />
+      </div>
       </div>
     </section>
   );
@@ -1471,14 +1507,13 @@ function PoolStat({
 function TxHistory() {
   const { address } = useActiveWallet();
   const { events, isLoading, isError } = usePositionEvents(address);
+  const [page, setPage] = useState(0);
+  const PER_PAGE = 8;
 
-  /// Color lanes for the right-side value column.
-  /// - up/down/neutral: borrower flows (borrow = up, repay/liquidated = down,
-  ///   collateral pledge/withdraw = neutral).
-  /// - lp-deposit (brand blue): LP capital entering the yield position.
-  /// - lp-withdraw (amber): LP capital leaving the yield position.
-  /// Two distinct hues keep LP rows visually separated from debt rows even
-  /// though both involve USDG.
+  const totalPages = Math.max(1, Math.ceil(events.length / PER_PAGE));
+  const clamped = Math.min(page, totalPages - 1);
+  const pageEvents = events.slice(clamped * PER_PAGE, (clamped + 1) * PER_PAGE);
+
   const COLOR_MAP: Record<
     "up" | "down" | "neutral" | "lp-deposit" | "lp-withdraw",
     string
@@ -1489,6 +1524,8 @@ function TxHistory() {
     "lp-deposit": "var(--brand)",
     "lp-withdraw": "var(--amber)",
   };
+
+  const hasData = events.length > 0;
 
   return (
     <div style={{ padding: "20px 24px" }}>
@@ -1519,7 +1556,7 @@ function TxHistory() {
         </div>
       )}
 
-      {address && isLoading && (
+      {address && isLoading && !hasData && (
         <div
           className="font-mono text-ink-mute"
           style={{ fontSize: 11, padding: "12px 0" }}
@@ -1528,7 +1565,7 @@ function TxHistory() {
         </div>
       )}
 
-      {address && isError && (
+      {address && isError && !hasData && (
         <div
           className="font-mono"
           style={{ fontSize: 11, padding: "12px 0", color: "var(--down)" }}
@@ -1537,7 +1574,7 @@ function TxHistory() {
         </div>
       )}
 
-      {address && !isLoading && !isError && events.length === 0 && (
+      {address && !isLoading && !isError && !hasData && (
         <div
           className="font-mono text-ink-mute"
           style={{ fontSize: 11, padding: "12px 0" }}
@@ -1547,7 +1584,7 @@ function TxHistory() {
       )}
 
       <div>
-        {events.map((e, i) => (
+        {pageEvents.map((e, i) => (
           <div
             key={`${e.txHash}-${i}`}
             className="grid items-center gap-3"
@@ -1555,7 +1592,7 @@ function TxHistory() {
               gridTemplateColumns: "90px 1fr auto",
               padding: "10px 0",
               borderBottom:
-                i < events.length - 1
+                i < pageEvents.length - 1
                   ? "1px dashed var(--hairline-soft)"
                   : "none",
             }}
@@ -1595,6 +1632,37 @@ function TxHistory() {
           </div>
         ))}
       </div>
+
+      {totalPages > 1 && (
+        <div
+          className="flex items-center justify-between mt-3 pt-3"
+          style={{ borderTop: "1px solid var(--hairline-soft)" }}
+        >
+          <span className="font-mono text-ink-mute" style={{ fontSize: 10 }}>
+            {clamped * PER_PAGE + 1}–{Math.min((clamped + 1) * PER_PAGE, events.length)} of {events.length}
+          </span>
+          <div className="flex gap-1">
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              disabled={clamped === 0}
+              className="font-mono border border-hairline rounded-[2px] bg-transparent transition-colors hover:border-ink disabled:opacity-30 disabled:cursor-not-allowed"
+              style={{ fontSize: 11, padding: "4px 10px" }}
+            >
+              ← Prev
+            </button>
+            <button
+              type="button"
+              onClick={() => setPage((p) => Math.min(totalPages - 1, p + 1))}
+              disabled={clamped >= totalPages - 1}
+              className="font-mono border border-hairline rounded-[2px] bg-transparent transition-colors hover:border-ink disabled:opacity-30 disabled:cursor-not-allowed"
+              style={{ fontSize: 11, padding: "4px 10px" }}
+            >
+              Next →
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1731,7 +1799,7 @@ function Orbit({
   const { vault } = useVaultContext();
   const livePrices = useStockPrices();
   const W = 620,
-    H = 380;
+    H = 460;
   const cx = W / 2,
     cy = H / 2;
   const sorted = [...positions].sort((a, b) => b.weight - a.weight);
@@ -1801,42 +1869,17 @@ function Orbit({
 
         <g>
           <circle cx={cx} cy={cy} r="46" fill="url(#ef-core)" />
-          <text
-            x={cx}
-            y={cy - 6}
-            textAnchor="middle"
-            fill="var(--paper)"
-            fontFamily="Source Serif 4"
-            fontSize="14"
-            fontWeight="500"
-            letterSpacing="-0.02em"
-          >
-            ${fmt.abbr(borrowed)}
-          </text>
-          <text
-            x={cx}
-            y={cy + 11}
-            textAnchor="middle"
-            fill="var(--paper)"
-            fontFamily="JetBrains Mono"
-            fontSize="9"
-            opacity="0.7"
-            letterSpacing="0.06em"
-          >
-            {vault.borrowSymbol}
-          </text>
-          <text
-            x={cx}
-            y={cy + 24}
-            textAnchor="middle"
-            fill="var(--paper)"
-            fontFamily="JetBrains Mono"
-            fontSize="8"
-            opacity="0.5"
-            letterSpacing="0.06em"
-          >
-            BORROWED
-          </text>
+          <foreignObject x={cx - 46} y={cy - 46} width={92} height={92} style={{ pointerEvents: "none" }}>
+            <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3 }}>
+              <AssetLogo sym={vault.borrowSymbol} size={24} />
+              <span style={{ fontFamily: "Source Serif 4", fontSize: 14, fontWeight: 500, color: "var(--paper)", letterSpacing: "-0.02em" }}>
+                ${fmt.abbr(borrowed)}
+              </span>
+              <span style={{ fontFamily: "JetBrains Mono", fontSize: 8, color: "var(--paper)", opacity: 0.5, letterSpacing: "0.06em" }}>
+                BORROWED
+              </span>
+            </div>
+          </foreignObject>
           <circle
             cx={cx}
             cy={cy}
@@ -1892,27 +1935,37 @@ function Orbit({
                   opacity="0.6"
                 />
               </g>
-              <text
-                x={x}
-                y={y - 2}
-                textAnchor="middle"
-                fontFamily="JetBrains Mono"
-                fontSize="11"
-                fontWeight="600"
-                fill="var(--ink)"
+              <foreignObject
+                x={x - bodyR}
+                y={y - bodyR}
+                width={bodyR * 2}
+                height={bodyR * 2}
+                style={{ pointerEvents: "none" }}
               >
-                {p.sym}
-              </text>
-              <text
-                x={x}
-                y={y + 11}
-                textAnchor="middle"
-                fontFamily="JetBrains Mono"
-                fontSize="9"
-                fill="var(--ink-mute)"
-              >
-                {fmt.num(p.shares, p.shares < 1 ? 4 : 0)}
-              </text>
+                <div
+                  style={{
+                    width: "100%",
+                    height: "100%",
+                    display: "flex",
+                    flexDirection: "column",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    gap: 2,
+                  }}
+                >
+                  <AssetLogo sym={p.sym} size={Math.round(bodyR * 0.7)} />
+                  <span
+                    style={{
+                      fontFamily: "JetBrains Mono",
+                      fontSize: 9,
+                      color: "var(--ink-mute)",
+                      lineHeight: 1,
+                    }}
+                  >
+                    {fmt.num(p.shares, p.shares < 1 ? 4 : 0)}
+                  </span>
+                </div>
+              </foreignObject>
 
               <g>
                 <line
