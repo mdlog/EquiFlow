@@ -2,25 +2,36 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useAccount, useWriteContract, useWaitForTransactionReceipt } from "wagmi";
-import { type Address, parseUnits } from "viem";
+import { useAccount } from "wagmi";
+import { type Address } from "viem";
 import { PageNav } from "@/components/PageNav";
 import { SiteFooter } from "@/components/SiteFooter";
 import { AssetLogo } from "@/components/AssetLogo";
-import { ERC20_ABI } from "@/lib/contracts/abi";
 import {
   STOCK_TOKEN_ADDRESSES,
   USDC_ADDRESS,
 } from "@/lib/contracts/addresses";
 import { explorerAddr, shortAddr } from "@/lib/contracts";
-import { FAUCET_URL, ROBINHOOD_CHAIN_TESTNET_ID } from "@/lib/config/chain";
+import { FAUCET_URL } from "@/lib/config/chain";
 import { STOCKS, isLive } from "@/lib/config/stocks";
 
-const NATIVE_FAUCETS: { name: string; url: string; note: string }[] = [
+const GAS_AND_STABLE_FAUCETS: {
+  name: string;
+  url: string;
+  note: string;
+  badge: string;
+}[] = [
   {
     name: "Robinhood Chain · Official",
     url: FAUCET_URL,
     note: "Get testnet ETH for gas. ~0.05 ETH per request, 24h cooldown.",
+    badge: "ETH",
+  },
+  {
+    name: "Paxos · USDG faucet",
+    url: "https://faucet.paxos.com/",
+    note: "Official Paxos faucet for regulated stablecoin USDG. Use it to LP, repay debt, or trial the borrow flow.",
+    badge: "USDG",
   },
 ];
 
@@ -97,15 +108,15 @@ export default function FaucetPage() {
         </div>
       </section>
 
-      {/* Step 1: Native ETH */}
+      {/* Step 1: Native ETH + USDG */}
       <StepSection
         n="01"
-        title="Get testnet ETH"
-        subtitle="Required for gas — every on-chain action needs a small amount."
+        title="Get testnet ETH & USDG"
+        subtitle="ETH pays for gas. USDG is the borrow asset — grab it from the official Paxos faucet to LP, repay debt, or trial the borrow flow."
         accent="amber"
       >
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          {NATIVE_FAUCETS.map((f) => (
+          {GAS_AND_STABLE_FAUCETS.map((f) => (
             <a
               key={f.url}
               href={f.url}
@@ -114,19 +125,32 @@ export default function FaucetPage() {
               className="block bg-paper border border-hairline rounded-[2px] hover:border-ink transition-colors no-underline text-ink"
               style={{ padding: "16px 18px" }}
             >
-              <div className="flex items-baseline justify-between mb-1.5">
+              <div className="flex items-baseline justify-between mb-1.5 gap-2">
                 <div
                   className="font-serif font-medium"
                   style={{ fontSize: 15, letterSpacing: "-0.015em" }}
                 >
                   {f.name}
                 </div>
-                <span
-                  className="font-mono text-ink-mute"
-                  style={{ fontSize: 10 }}
-                >
-                  open ↗
-                </span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span
+                    className="font-mono uppercase border border-hairline rounded-[2px]"
+                    style={{
+                      fontSize: 9,
+                      letterSpacing: "0.08em",
+                      padding: "2px 6px",
+                      color: "var(--ink-soft)",
+                    }}
+                  >
+                    {f.badge}
+                  </span>
+                  <span
+                    className="font-mono text-ink-mute"
+                    style={{ fontSize: 10 }}
+                  >
+                    open ↗
+                  </span>
+                </div>
               </div>
               <p
                 className="text-ink-soft m-0"
@@ -138,62 +162,54 @@ export default function FaucetPage() {
           ))}
         </div>
         <Tip>
-          Paste your wallet address into the faucet form. ETH usually arrives in
-          under 30 seconds. The faucet has a 24h cooldown per address.
+          Paste your wallet address into each faucet. ETH usually arrives in
+          under 30 seconds; USDG in about a minute. Both have a 24h cooldown
+          per address.
         </Tip>
       </StepSection>
 
-      {/* Step 2: USDG */}
+      {/* Step 2: Stock Tokens */}
       <StepSection
         n="02"
-        title="Mint test USDG"
-        subtitle="Use USDG to provide liquidity (LP), repay debt, or trial the borrow flow."
-        accent="brand"
-      >
-        {USDC_ADDRESS ? (
-          <MintCard
-            label="USDG · vault stablecoin"
-            sym="USDG"
-            address={USDC_ADDRESS}
-            decimals={6}
-            defaultAmount={1000}
-            isConnected={isConnected}
-            walletAddress={address}
-          />
-        ) : (
-          <NotConfigured asset="USDG (NEXT_PUBLIC_USDC_ADDRESS)" />
-        )}
-      </StepSection>
-
-      {/* Step 3: Stock Tokens */}
-      <StepSection
-        n="03"
-        title="Mint Stock Tokens"
+        title="Get Stock Tokens"
         subtitle="These are the collateral assets. Pick at least one — pledge it on /markets to start borrowing."
         accent="up"
       >
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {STOCKS.filter((s) => isLive(s.sym)).map((s) => {
-            const addr = STOCK_TOKEN_ADDRESSES[s.sym];
-            if (!addr) return null;
-            return (
-              <MintCard
-                key={s.sym}
-                label={`${s.sym} · ${s.name}`}
-                sym={s.sym}
-                address={addr}
-                decimals={18}
-                defaultAmount={10}
-                isConnected={isConnected}
-                walletAddress={address}
-              />
-            );
-          })}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <a
+            href="https://faucet.testnet.chain.robinhood.com/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="block bg-paper border border-hairline rounded-[2px] hover:border-ink transition-colors no-underline text-ink"
+            style={{ padding: "16px 18px" }}
+          >
+            <div className="flex items-baseline justify-between mb-1.5">
+              <div
+                className="font-serif font-medium"
+                style={{ fontSize: 15, letterSpacing: "-0.015em" }}
+              >
+                Robinhood Chain · Stock Tokens
+              </div>
+              <span
+                className="font-mono text-ink-mute"
+                style={{ fontSize: 10 }}
+              >
+                open ↗
+              </span>
+            </div>
+            <p
+              className="text-ink-soft m-0"
+              style={{ fontSize: 12, lineHeight: 1.5 }}
+            >
+              Official Robinhood Chain testnet faucet. Mint TSLA, AMZN, PLTR,
+              NFLX, AMD and other tokenized equities for testing.
+            </p>
+          </a>
         </div>
         <Tip>
-          Each Stock Token is an ERC-20 with public <code className="font-mono">mint(to, amount)</code>{" "}
-          on the contract. You can mint any quantity — there's no rate limit on
-          testnet stock faucets, only the native ETH faucet has one.
+          Each Stock Token is an ERC-20 on Robinhood Chain. Available tickers
+          on the faucet may include TSLA, AMZN, PLTR, NFLX, AMD — pick whichever
+          you want to pledge as collateral.
         </Tip>
       </StepSection>
 
@@ -201,7 +217,7 @@ export default function FaucetPage() {
       <section className="border-b border-hairline">
         <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-6">
           <div className="eyebrow mb-2" style={{ color: "var(--ink-mute)" }}>
-            04 · Optional
+            03 · Optional
           </div>
           <h2
             className="font-serif font-medium m-0 mb-1"
@@ -453,166 +469,3 @@ function AddressRow({
   );
 }
 
-/* ─── Mint card ──────────────────────────────────────────────────── */
-function NotConfigured({ asset }: { asset: string }) {
-  return (
-    <div
-      className="bg-amber-soft border border-amber rounded-[2px]"
-      style={{ padding: "12px 16px", fontSize: 12 }}
-    >
-      <span
-        className="font-mono text-ink-soft"
-        style={{ fontSize: 10, letterSpacing: "0.06em" }}
-      >
-        NOT CONFIGURED ·{" "}
-      </span>
-      <span className="text-ink-soft">
-        {asset} is not set in environment. Contact the operator to wire the
-        token address.
-      </span>
-    </div>
-  );
-}
-
-function MintCard({
-  label,
-  sym,
-  address,
-  decimals,
-  defaultAmount,
-  isConnected,
-  walletAddress,
-}: {
-  label: string;
-  sym: string;
-  address: Address;
-  decimals: number;
-  defaultAmount: number;
-  isConnected: boolean;
-  walletAddress: Address | undefined;
-}) {
-  const [amount, setAmount] = useState<number>(defaultAmount);
-  const { writeContract, data: txHash, isPending, reset } = useWriteContract();
-  const { isLoading: mining, isSuccess: sealed } = useWaitForTransactionReceipt({
-    hash: txHash,
-    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-  });
-
-  const busy = isPending || mining;
-
-  const handleMint = () => {
-    if (!walletAddress) return;
-    const raw = parseUnits(amount.toString(), decimals);
-    writeContract({
-      abi: ERC20_ABI,
-      address,
-      functionName: "mint",
-      args: [walletAddress, raw],
-      chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    });
-  };
-
-  return (
-    <div
-      className="bg-paper border border-hairline-soft rounded-[2px]"
-      style={{ padding: "14px 16px" }}
-    >
-      <div className="flex items-center gap-3 mb-3">
-        <div
-          className="border border-hairline-soft bg-paper-alt rounded-[2px] flex items-center justify-center shrink-0"
-          style={{ width: 32, height: 32 }}
-        >
-          {sym !== "USDG" && <AssetLogo sym={sym} size={22} />}
-          {sym === "USDG" && (
-            <span
-              className="font-serif font-medium"
-              style={{ fontSize: 14, color: "var(--brand)" }}
-            >
-              U
-            </span>
-          )}
-        </div>
-        <div>
-          <div
-            className="font-serif font-medium"
-            style={{ fontSize: 14, letterSpacing: "-0.015em" }}
-          >
-            {label}
-          </div>
-          <a
-            href={explorerAddr(address)}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="font-mono text-ink-mute no-underline hover:text-ink"
-            style={{ fontSize: 10 }}
-          >
-            {shortAddr(address)} ↗
-          </a>
-        </div>
-      </div>
-
-      <div className="flex gap-2 items-center mb-2">
-        <input
-          type="number"
-          value={amount}
-          onChange={(e) => setAmount(Math.max(0, Number(e.target.value) || 0))}
-          disabled={busy}
-          className="bg-paper-alt border border-hairline rounded-[2px] flex-1 outline-none font-mono tabular text-ink min-w-0"
-          style={{ fontSize: 13, padding: "7px 10px" }}
-        />
-        <span
-          className="font-mono text-ink-mute shrink-0"
-          style={{ fontSize: 11 }}
-        >
-          {sym}
-        </span>
-      </div>
-
-      <button
-        type="button"
-        disabled={!isConnected || busy || amount <= 0}
-        onClick={handleMint}
-        className="w-full font-medium rounded-[2px] transition-colors"
-        style={{
-          padding: "8px 12px",
-          fontSize: 12,
-          background: sealed ? "var(--up)" : "var(--ink)",
-          color: "var(--paper)",
-          border: "none",
-          opacity: !isConnected || busy || amount <= 0 ? 0.5 : 1,
-          cursor: !isConnected || busy || amount <= 0 ? "not-allowed" : "pointer",
-        }}
-      >
-        {!isConnected
-          ? "Connect wallet to mint"
-          : sealed
-            ? "✓ Minted"
-            : busy
-              ? "Minting…"
-              : `Mint ${amount} ${sym}`}
-      </button>
-
-      {sealed && txHash && (
-        <a
-          href={`https://explorer.testnet.chain.robinhood.com/tx/${txHash}`}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="font-mono text-ink-mute no-underline hover:text-ink mt-2 block text-center"
-          style={{ fontSize: 10 }}
-        >
-          View tx: {shortAddr(txHash, 8, 6)} ↗
-        </a>
-      )}
-      {sealed && (
-        <button
-          type="button"
-          onClick={reset}
-          className="font-mono text-ink-mute hover:text-ink bg-transparent border-0 w-full mt-1"
-          style={{ fontSize: 10, padding: 0 }}
-        >
-          Mint another batch
-        </button>
-      )}
-    </div>
-  );
-}
