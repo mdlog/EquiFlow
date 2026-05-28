@@ -188,6 +188,10 @@ contract DeployScript is Script {
                 deployer
             );
             adapter.setKeeper(deployer, true);
+            // CRIT-8 fix: explicitly set the deviation cap even though the
+            // constructor now defaults to 500 bps. Belt-and-suspenders so a
+            // future constructor refactor cannot regress the protection.
+            adapter.setMaxDeviation(500);
             console2.log(string.concat("PythAdapter ", s.symbol, ":"), address(adapter));
 
             vault.listAsset(

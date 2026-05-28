@@ -42,7 +42,14 @@ contract PythPriceAdapter is AggregatorV3Interface, Ownable {
     uint64 private _lastConf;
 
     /// @notice Max allowed price change per update in BPS. 0 = uncapped.
+    /// CRIT-8 fix: defaults to 5% (500 bps) on construction so a missed
+    /// `setMaxDeviation` at deploy time still produces a sane cap.
     uint256 public maxDeviationBps;
+
+    /// @notice Hard upper bound on `maxDeviationBps`. Owner cannot push the
+    /// cap above 20% via `setMaxDeviation`. Keeps the deviation guard
+    /// meaningful against a key compromise.
+    uint256 public constant MAX_DEVIATION_BPS_CEILING = 2_000;
 
     // ─── Keeper whitelist (C-02 fix) ─────────────────────────────────────
     mapping(address => bool) public authorizedKeepers;
@@ -91,6 +98,8 @@ contract PythPriceAdapter is AggregatorV3Interface, Ownable {
         _round = 1;
         _lastExpo = -8;
         maxAge = _maxAge;
+        // CRIT-8 fix: never leave deviation uncapped on a fresh adapter.
+        maxDeviationBps = 500; // 5%
     }
 
     // ─── Keeper management ───────────────────────────────────────────────
@@ -100,7 +109,10 @@ contract PythPriceAdapter is AggregatorV3Interface, Ownable {
     }
 
     function setMaxDeviation(uint256 bps) external onlyOwner {
+        require(bps <= MAX_DEVIATION_BPS_CEILING, "deviation>ceiling");
+        uint256 old = maxDeviationBps;
         maxDeviationBps = bps;
+        emit MaxDeviationSet(old, bps);
     }
 
     /// @notice Submit one or more Pyth update payloads and cache the resulting
