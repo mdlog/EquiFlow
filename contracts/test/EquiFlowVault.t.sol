@@ -9,6 +9,7 @@ import {MockPyth} from "@pythnetwork/pyth-sdk-solidity/MockPyth.sol";
 import {IPyth} from "@pythnetwork/pyth-sdk-solidity/IPyth.sol";
 import {PythStructs} from "@pythnetwork/pyth-sdk-solidity/PythStructs.sol";
 import {PythPriceAdapter} from "../src/oracle/PythPriceAdapter.sol";
+import {KinkedRateModel} from "../src/interest/KinkedRateModel.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract EquiFlowVaultTest is Test {
@@ -1242,5 +1243,172 @@ contract EquiFlowVaultTest is Test {
         // Anyone can prune.
         vault.pruneExpiredIntent(alice);
         assertEq(vault.activeIntentLp(), address(0));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // On-chain IRM integration (feat/onchain-irm branch)
+    // ───────────────────────────────────────────────────────────────────
+
+    function _deployAndActivateIrm(
+        uint256 base,
+        uint256 slope1,
+        uint256 slope2,
+        uint256 optimal
+    ) internal returns (KinkedRateModel) {
+        KinkedRateModel newIrm = new KinkedRateModel(
+            "test irm",
+            base,
+            slope1,
+            slope2,
+            optimal
+        );
+        vm.startPrank(owner);
+        vault.scheduleIrm(address(newIrm));
+        vm.warp(block.timestamp + vault.OWNER_WITHDRAW_DELAY());
+        // After warping, the Pyth feeds in the test fixture are stale. Push
+        // fresh prices so any subsequent borrow/HF read passes the
+        // staleAfter check.
+        vm.stopPrank();
+        _push(tslaFeed, TSLA_PRICE_ID, 348_51000000);
+        _push(aaplFeed, AAPL_PRICE_ID, 217_84000000);
+        vm.prank(owner);
+        vault.executeIrm();
+        return newIrm;
+    }
+
+    function test_irm_borrowApyReadsFromModelAtZeroU() public {
+        // Use base=100 (1%) so we can detect IRM is active vs. legacy
+        // flat rate (which is 500 / 5% from setUp).
+        _deployAndActivateIrm(100, 500, 4900, 8500);
+        // At U=0 (no borrows yet) the IRM returns base = 100.
+        assertEq(vault.borrowApyBps(), 100);
+    }
+
+    function test_irm_borrowApyRespondsToUtilization() public {
+        _deployAndActivateIrm(100, 500, 4900, 8500);
+
+        // Mint enough collateral so we can drive utilisation past the
+        // 85% kink on the $1M pool. Need ~$1.6M of TSLA collateral at
+        // 55% LTV to borrow $850K+.
+        tsla.mint(alice, 10_000e18);
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 5_000e18, 900_000e18);
+
+        uint256 u = vault.utilizationBps();
+        assertGt(u, 8500); // past kink
+        // At U > U_opt, rate must exceed base + slope1.
+        assertGt(vault.borrowApyBps(), 600);
+    }
+
+    function test_irm_capRespectedAtMax() public {
+        // Curve whose max output equals 5500 (55%) — exceeds vault's
+        // MAX_BORROW_RATE_BPS = 5000. Clamp must kick in.
+        _deployAndActivateIrm(100, 500, 4900, 8500);
+
+        // Drive U very close to 100% (well past the kink). Need huge
+        // collateral on a $1M pool.
+        tsla.mint(alice, 10_000e18);
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 5_500e18, 999_000e18);
+
+        uint256 u = vault.utilizationBps();
+        assertGt(u, 9000); // well past kink
+        // Even though IRM curve approaches 5500, vault clamps to 5000.
+        uint256 rate = vault.borrowApyBps();
+        assertLe(rate, vault.MAX_BORROW_RATE_BPS());
+    }
+
+    function test_irm_timelockNotReady() public {
+        KinkedRateModel newIrm = new KinkedRateModel(
+            "fast",
+            100,
+            500,
+            4900,
+            8500
+        );
+        vm.startPrank(owner);
+        vault.scheduleIrm(address(newIrm));
+        vm.expectRevert(EquiFlowVault.IrmNotReady.selector);
+        vault.executeIrm();
+        vm.stopPrank();
+    }
+
+    function test_irm_scheduleRejectsZero() public {
+        vm.prank(owner);
+        vm.expectRevert(EquiFlowVault.IrmInvalid.selector);
+        vault.scheduleIrm(address(0));
+    }
+
+    function test_irm_scheduleSanityProbesGetBorrowRate() public {
+        // Pointing to a contract that doesn't implement IRM should fail
+        // the sanity probe in scheduleIrm.
+        vm.prank(owner);
+        vm.expectRevert();
+        vault.scheduleIrm(address(usdc));
+    }
+
+    function test_irm_cancelClearsPending() public {
+        KinkedRateModel newIrm = new KinkedRateModel(
+            "cancelled",
+            100,
+            500,
+            4900,
+            8500
+        );
+        vm.startPrank(owner);
+        vault.scheduleIrm(address(newIrm));
+        vault.cancelIrm();
+        vm.warp(block.timestamp + vault.OWNER_WITHDRAW_DELAY());
+        vm.expectRevert(EquiFlowVault.IrmNotReady.selector);
+        vault.executeIrm();
+        vm.stopPrank();
+    }
+
+    function test_irm_swapSettlesAtOldModelFirst() public {
+        // Borrow under the LEGACY flat 5% rate from setUp, accrue 30
+        // days, then swap to a different rate. The interest already
+        // accrued must be at the old rate, not retro-applied at the new
+        // rate. We test this by snapshotting borrowedOf immediately
+        // before and after executeIrm — they must match (same block,
+        // same accrual).
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 10_000e18);
+
+        // Run interest at the old rate for 30 days.
+        vm.warp(block.timestamp + 30 days);
+
+        // Build + schedule a new IRM and warp through the timelock.
+        KinkedRateModel newIrm = new KinkedRateModel(
+            "swap test",
+            100,
+            500,
+            4900,
+            8500
+        );
+        vm.prank(owner);
+        vault.scheduleIrm(address(newIrm));
+        vm.warp(block.timestamp + vault.OWNER_WITHDRAW_DELAY());
+        // Refresh prices so HF reads stay sound.
+        _push(tslaFeed, TSLA_PRICE_ID, 348_51000000);
+        _push(aaplFeed, AAPL_PRICE_ID, 217_84000000);
+
+        uint256 borrowedBeforeSwap = vault.borrowedOf(alice);
+
+        vm.prank(owner);
+        vault.executeIrm();
+
+        // executeIrm called _accrueInterest at the OLD rate first, then
+        // swapped storage. In the same block, borrowedOf must be
+        // identical (only the rate-going-forward changed, history did
+        // not get rewritten).
+        uint256 borrowedAfterSwap = vault.borrowedOf(alice);
+        assertEq(borrowedBeforeSwap, borrowedAfterSwap);
+    }
+
+    function test_irm_legacyFallbackBeforeWiring() public view {
+        // Fresh vault from setUp has no IRM wired — irm == address(0).
+        // borrowApyBps must return the legacy borrowRateBps (5% from setUp).
+        assertEq(address(vault.irm()), address(0));
+        assertEq(vault.borrowApyBps(), 500);
     }
 }
