@@ -17,22 +17,20 @@ import { STOCKS } from "@/lib/config/stocks";
 ///
 /// Signing happens **server-side** at /api/keeper/tick using KEEPER_PRIVATE_KEY
 /// (NO `NEXT_PUBLIC_` prefix). The browser only:
-///   1. Discovers adapter addresses + priceIds via public on-chain reads.
-///   2. Fetches latest Pyth quote from /api/pyth/[priceId] (Hermes-backed).
-///   3. POSTs { adapterAddress, priceId, pythPrice, ... } to /api/keeper/tick.
-///   4. Server signs and submits adapter.updatePrice([encodedBytes]).
+///   1. Discovers which symbols are live via public on-chain reads.
+///   2. POSTs { symbol } to /api/keeper/tick on each tick.
+///   3. Server fetches its own authoritative Pyth quote, resolves the adapter
+///      from the vault, signs, and submits adapter.updatePrice([encodedBytes]).
 ///
 /// Per tick the keeper rotates one symbol so concurrent tabs don't all collide
-/// on the same nonce. Fallback random walk happens server-side when Pyth fetch
-/// fails, so the demo never freezes.
+/// on the same nonce. If Hermes is unavailable the server refuses to sign
+/// (503 hermes_unavailable) — there is no client-supplied fallback price.
 ///
 /// `active` returns true once at least one adapter has been discovered AND the
 /// server /api/keeper/tick endpoint responded with a non-503 in the last tick.
 
 export interface PriceKeeperOptions {
   intervalMs?: number;
-  /** Standard deviation of the fallback random walk as a fraction of price. */
-  volatility?: number;
   verbose?: boolean;
 }
 
@@ -102,14 +100,9 @@ interface TickResponse {
   detail?: string;
 }
 
-async function postTick(payload: {
-  adapterAddress: Address;
-  priceId: Hex;
-  pythPrice?: string;
-  pythExpo?: number;
-  fallbackPrice: number;
-  volatility: number;
-}): Promise<TickResponse> {
+// The server resolves adapter + priceId + freshest Pyth quote itself from the
+// symbol — caller-supplied prices are never trusted (see /api/keeper/tick).
+async function postTick(payload: { symbol: string }): Promise<TickResponse> {
   try {
     const res = await fetch("/api/keeper/tick", {
       method: "POST",
@@ -135,7 +128,6 @@ async function postTick(payload: {
 
 export function usePriceKeeper({
   intervalMs = 12_000,
-  volatility = 0.005, // 0.5% per tick — fallback only
   verbose = false,
 }: PriceKeeperOptions = {}): { active: boolean; signerAddress: Address | null } {
   const [serverEnabled, setServerEnabled] = useState<boolean | null>(null);
@@ -196,15 +188,11 @@ export function usePriceKeeper({
         sym: string;
         addr: Address;
         priceId: Hex;
-        price: number;
-        volatility: number;
       }>;
     const out: Array<{
       sym: string;
       addr: Address;
       priceId: Hex;
-      price: number;
-      volatility: number;
     }> = [];
     let cursor = 0;
     for (let i = 0; i < liveSymbols.length; i++) {
@@ -216,25 +204,16 @@ export function usePriceKeeper({
         sym: liveSymbols[i].sym,
         addr,
         priceId: r.result as Hex,
-        price: liveSymbols[i].price,
-        volatility: liveSymbols[i].volatility,
       });
     }
     return out;
   }, [priceIdReads, adapterAddrs, liveSymbols]);
 
-  const lastPriceRef = useRef<Record<string, number>>({});
   const cursorRef = useRef(0);
   const inflightRef = useRef(false);
 
   useEffect(() => {
     if (adapters.length === 0) return;
-
-    for (const a of adapters) {
-      if (lastPriceRef.current[a.sym] === undefined) {
-        lastPriceRef.current[a.sym] = a.price;
-      }
-    }
 
     const tick = async () => {
       if (inflightRef.current) return;
@@ -243,27 +222,14 @@ export function usePriceKeeper({
         const a = adapters[cursorRef.current % adapters.length];
         cursorRef.current++;
 
-        const quote = await fetchPythPrice(a.sym, a.priceId);
-        const lastPrice = lastPriceRef.current[a.sym] ?? a.price;
+        // fetchPythPrice runs only to surface activeSession in the verbose log
+        // — the server fetches its own authoritative quote from Hermes.
+        const quote = verbose ? await fetchPythPrice(a.sym, a.priceId) : null;
 
-        const res = await postTick({
-          // Adapter's registered priceId — what goes INTO the MockPyth payload
-          // so getPriceNoOlderThan(priceId, maxAge) can read it back.
-          adapterAddress: a.addr,
-          priceId: a.priceId,
-          // Price VALUES from whichever session is currently fresh (may be
-          // overnight/pre/post — keeper doesn't care, MockPyth verifies nothing).
-          pythPrice: quote?.price,
-          pythExpo: quote?.expo,
-          fallbackPrice: lastPrice,
-          volatility: volatility * a.volatility,
-        });
+        const res = await postTick({ symbol: a.sym });
 
         if (res.ok) {
           setServerEnabled(true);
-          if (typeof res.price === "number") {
-            lastPriceRef.current[a.sym] = res.price;
-          }
           if (verbose) {
             const session = quote?.activeSession ?? res.source;
             console.log(
@@ -291,7 +257,7 @@ export function usePriceKeeper({
       clearTimeout(initial);
       clearInterval(id);
     };
-  }, [adapters, intervalMs, volatility, verbose]);
+  }, [adapters, intervalMs, verbose]);
 
   return {
     active: serverEnabled === true && adapters.length > 0,

@@ -1,5 +1,9 @@
 import { NextResponse } from "next/server";
-import { PYTH_PRICE_IDS_BY_SESSION, type PythSession } from "@/lib/web3/pyth";
+import {
+  PYTH_PRICE_IDS,
+  PYTH_PRICE_IDS_BY_SESSION,
+  type PythSession,
+} from "@/lib/web3/pyth";
 import { ApiError, withErrorHandler } from "@/lib/api/handler";
 import {
   fetchWithTimeout,
@@ -25,10 +29,16 @@ export const GET = withErrorHandler(async (req: Request, ctx: Params) => {
   const upper = sym.toUpperCase();
   if (!SYM_RE.test(upper)) throw new ApiError(400, "invalid_symbol");
 
+  // Multi-session table only covers tickers with pre/post/overnight feed IDs
+  // filled in (TSLA, AMZN, PLTR, NFLX, AMD). For everything else (AAPL, NVDA,
+  // SPY, GOOGL, MSFT, META) fall back to the single regular-session feed.
   const sessions = PYTH_PRICE_IDS_BY_SESSION[upper];
-  if (!sessions) throw new ApiError(404, "unknown_symbol");
+  const singleId = PYTH_PRICE_IDS[upper];
+  if (!sessions && !singleId) throw new ApiError(404, "unknown_symbol");
 
-  const entries = Object.entries(sessions) as Array<[PythSession, `0x${string}`]>;
+  const entries: Array<[PythSession, `0x${string}`]> = sessions
+    ? (Object.entries(sessions) as Array<[PythSession, `0x${string}`]>)
+    : [["regular", singleId as `0x${string}`]];
   const idsQS = entries.map(([, id]) => `ids[]=${id}`).join("&");
   const url = `${HERMES}/v2/updates/price/latest?${idsQS}&parsed=true`;
 
