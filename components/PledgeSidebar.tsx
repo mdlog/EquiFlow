@@ -695,7 +695,7 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
         {/* Errors */}
         {writeError && (
           <div className="mx-5 mb-2 text-down font-mono rounded-[2px]" style={{ fontSize: 10, padding: "6px 10px", background: "var(--down-soft)", border: "1px solid var(--down)" }}>
-            {friendlyError(writeError).slice(0, 160)}
+            {friendlyError(writeError)?.slice(0, 160)}
           </div>
         )}
         {aaError && (

@@ -16,8 +16,14 @@ export function toMessage(err: unknown): string {
 /// string. Distinguishes wallet-rejected, contract revert (with errorName),
 /// and unknown failures. Safe to render to the user — does NOT include
 /// RPC URLs or stack traces.
-export function friendlyError(err: unknown): string {
-  if (err == null) return "Unknown error";
+///
+/// Returns `null` for a null/undefined input so render-site `<TxError>` can
+/// suppress the row entirely on first render (when `useWriteContract().error`
+/// is still null). Catch-handler call sites pass a thrown value and always
+/// receive a string; if they want a fallback for an unknown-but-non-null
+/// thrown value, append `?? "Unknown error"` at the call site.
+export function friendlyError(err: unknown): string | null {
+  if (err == null) return null;
   if (err instanceof BaseError) {
     if (err.walk((e) => e instanceof UserRejectedRequestError)) {
       return "Cancelled in wallet";
