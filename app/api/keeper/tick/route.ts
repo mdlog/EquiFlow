@@ -149,6 +149,57 @@ export const POST = withErrorHandler(async (req: Request) => {
   });
   const source: "pyth" = "pyth";
 
+  // ── Pre-flight: decide updatePrice vs forceUpdatePrice ──
+  // The H-02 audit fix added a 5% per-update deviation cap. After deploy (or
+  // any extended outage), the cached adapter price may diverge from the live
+  // Pyth quote by far more than 5%, and every `updatePrice` would revert.
+  // `forceUpdatePrice` is the keeper escape hatch — bypasses the cap, but only
+  // when the cached price has aged past `DEVIATION_OVERRIDE_DELAY` (30 min).
+  const DEVIATION_OVERRIDE_DELAY_S = 1800;
+  let useForce = false;
+  try {
+    const [cached, maxDevBps] = await Promise.all([
+      publicClient.readContract({
+        abi: PYTH_ADAPTER_ABI,
+        address: adapter,
+        functionName: "latestRoundData",
+      }) as Promise<readonly [bigint, bigint, bigint, bigint, bigint]>,
+      publicClient.readContract({
+        abi: PYTH_ADAPTER_ABI,
+        address: adapter,
+        functionName: "maxDeviationBps",
+      }) as Promise<bigint>,
+    ]);
+    const cachedE8 = cached[1];
+    const cachedUpdatedAt = cached[3];
+    // Compute newE8 the same way the contract does in _toE8(). Pyth equity
+    // feeds are expo = -8 in the common case, so the result is just `price`.
+    let newE8: bigint;
+    if (quote.expo === -8) newE8 = BigInt(quote.price);
+    else if (quote.expo < -8) newE8 = BigInt(quote.price) / 10n ** BigInt(-quote.expo - 8);
+    else newE8 = BigInt(quote.price) * 10n ** BigInt(quote.expo + 8);
+
+    if (cachedE8 > 0n && maxDevBps > 0n) {
+      const dev = newE8 > cachedE8 ? newE8 - cachedE8 : cachedE8 - newE8;
+      const devBps = (dev * 10_000n) / cachedE8;
+      if (devBps > maxDevBps) {
+        const age = BigInt(nowSec) - cachedUpdatedAt;
+        if (age >= BigInt(DEVIATION_OVERRIDE_DELAY_S)) {
+          useForce = true;
+        } else {
+          // Within the override cooldown — refuse rather than burn a guaranteed
+          // revert. The client can retry once the cooldown elapses.
+          throw new ApiError(503, "deviation_cooldown_active");
+        }
+      }
+    }
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    // If the pre-flight reads fail, fall through to normal updatePrice — worst
+    // case is the cap reverts and we see it in submit_failed below.
+    console.warn("[keeper/tick] preflight_failed:", (err as Error).message);
+  }
+
   let txHash: Hex;
   try {
     const account = privateKeyToAccount(pkEnv as Hex);
@@ -161,7 +212,7 @@ export const POST = withErrorHandler(async (req: Request) => {
     txHash = await walletClient.writeContract({
       abi: PYTH_ADAPTER_ABI,
       address: adapter,
-      functionName: "updatePrice",
+      functionName: useForce ? "forceUpdatePrice" : "updatePrice",
       args: [[updateBytes]],
       nonce,
     });
