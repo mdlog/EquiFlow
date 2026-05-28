@@ -141,7 +141,127 @@ cloud.walletconnect.com → your project → Settings → Allowed Origins.
 
 ---
 
-## 7. Pre-launch checklist
+## 7. Rotate the interest rate model (IRM)
+
+The borrow rate is no longer a flat owner-set value — it's computed by a
+deployed `KinkedRateModel` (or any future contract implementing
+`IInterestRateModel`). Swapping models is a 24h-timelocked operation that
+affects every borrower's accrual going forward.
+
+### When to rotate
+
+- **Market regime change**: collateral volatility shifts, or the
+  protocol wants steeper slopes after a stress event.
+- **Curve correction**: telemetry shows utilization persistently above
+  U_opt (rate stuck high) or far below (rate stuck low).
+- **Bug found in the active model**: redeploy with the fix.
+- **Never rotate "casually"**: every rotation is a public commitment
+  change visible to borrowers. The 24h timelock exists so they can
+  reposition if the new curve is less favourable.
+
+### Pre-rotation sanity
+
+```bash
+# Read live curve params:
+cast call $ACTIVE_IRM "name()(string)"
+cast call $ACTIVE_IRM "baseBps()(uint256)"
+cast call $ACTIVE_IRM "slope1Bps()(uint256)"
+cast call $ACTIVE_IRM "slope2Bps()(uint256)"
+cast call $ACTIVE_IRM "optimalUtilBps()(uint256)"
+
+# Compare rate at current utilization:
+U=$(cast call $VAULT "utilizationBps()(uint256)")
+cast call $ACTIVE_IRM "getBorrowRate(uint256)(uint256)" $U
+cast call $VAULT  "borrowApyBps()(uint256)"     # clamped output
+```
+
+### Procedure (production multisig)
+
+```bash
+# Step 1 — Deploy the new model.
+forge script script/DeployIrm.s.sol \
+  --rpc-url $RBN \
+  --private-key $DEPLOYER_PK \
+  --broadcast
+# → KinkedRateModel: 0xNEW
+
+# Step 2 — Probe the new curve at the boundaries BEFORE scheduling.
+# Must match what governance approved.
+cast call 0xNEW "getBorrowRate(uint256)(uint256)" 0       # base
+cast call 0xNEW "getBorrowRate(uint256)(uint256)" 8500    # at kink
+cast call 0xNEW "getBorrowRate(uint256)(uint256)" 10000   # max
+
+# Step 3 — Schedule via multisig (24h delay starts now).
+# Gnosis Safe tx:
+#   target: $VAULT
+#   data:   scheduleIrm(0xNEW)
+#
+# Verify the event:
+cast logs --address $VAULT --from-block latest \
+  "IrmScheduled(address,uint256)"
+
+# Step 4 — WAIT OWNER_WITHDRAW_DELAY (24h, currently).
+# During the wait, post the rotation diff publicly (forum + discord +
+# UI banner) so borrowers can choose to reduce exposure.
+
+# Step 5 — Execute.
+# Gnosis Safe tx:
+#   target: $VAULT
+#   data:   executeIrm()
+#
+# `_accrueInterest()` runs at the OLD curve first, then the storage
+# pointer swaps. The new curve applies to all subsequent accrual.
+cast logs --address $VAULT --from-block latest \
+  "IrmExecuted(address,address)"
+```
+
+### Verifying the swap
+
+```bash
+# After executeIrm:
+cast call $VAULT "irm()(address)"                       # → 0xNEW
+cast call $VAULT "borrowApyBps()(uint256)"              # current rate
+
+# A sample LP's accrual should now grow at the new rate. To confirm:
+cast call $VAULT "borrowedOf(address)(uint256)" $ALICE
+# wait 1 hour
+cast call $VAULT "borrowedOf(address)(uint256)" $ALICE
+# delta should match the new rate × dt × principal
+```
+
+### Cancelling a scheduled rotation
+
+If the new curve was misconfigured or governance changes its mind:
+
+```bash
+# Gnosis Safe tx:
+#   target: $VAULT
+#   data:   cancelIrm()
+# Clears pendingIrm. The 24h timer resets if you scheduleIrm again later.
+```
+
+### Frontend / off-chain sync
+
+`lib/web3/irm.ts:DEFAULT_RATE_CONFIG` is the SSR / first-paint fallback.
+After every successful `executeIrm`, update this constant so the SSR
+curve matches the on-chain model. The UI already calls
+`vault.borrowApyBps()` at runtime for the headline figure (which reads
+directly from the on-chain IRM and respects the vault's clamp), but
+chart sampling without an RPC roundtrip relies on the fallback.
+
+### Invariants the IRM rotation must preserve
+
+- **Never retro-apply rates.** `executeIrm` settles `_accrueInterest()`
+  first — verified by `test_irm_swapSettlesAtOldModelFirst`.
+- **Never exceed the clamp.** `_currentBorrowRateBps()` always caps at
+  `MAX_BORROW_RATE_BPS = 5_000` (50% APR). A buggy IRM cannot drive
+  the protocol above this.
+- **Never silently set address(0).** `scheduleIrm` rejects zero and
+  probes `getBorrowRate(0)` once at schedule time.
+
+---
+
+## 8. Pre-launch checklist
 
 Before promoting to mainnet, confirm:
 
@@ -166,10 +286,18 @@ Before promoting to mainnet, confirm:
 - [ ] CSP header tested in Lighthouse (no inline-script violations).
 - [ ] External penetration test completed (Spearbit / Trail of Bits /
       OpenZeppelin) — DO NOT launch to mainnet without one.
+- [ ] `KinkedRateModel` deployed, scheduled via `vault.scheduleIrm`,
+      and **executed** via `vault.executeIrm` after the 24h delay.
+      Verify `vault.irm()` returns the live model, not address(0).
+- [ ] `vault.borrowApyBps()` matches the IRM's `getBorrowRate(U)` for
+      the current `vault.utilizationBps()` (subject to the
+      `MAX_BORROW_RATE_BPS` clamp).
+- [ ] Frontend `lib/web3/irm.ts:DEFAULT_RATE_CONFIG` matches the
+      on-chain `KinkedRateModel` curve params.
 
 ---
 
-## 8. Incident response — keeper key compromise
+## 9. Incident response — keeper key compromise
 
 If you suspect `KEEPER_PRIVATE_KEY` has leaked:
 
@@ -187,7 +315,7 @@ If you suspect `KEEPER_PRIVATE_KEY` has leaked:
 
 ---
 
-## 9. Audit-fix changelog (2026-05-28)
+## 10. Audit-fix changelog (2026-05-28)
 
 For traceability — see git history for full diffs.
 
