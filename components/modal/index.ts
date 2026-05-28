@@ -7,4 +7,5 @@ export {
   SealedMessage,
   ModalActions,
   ModalFootnote,
+  ContractTrustLine,
 } from "./ModalFooter";

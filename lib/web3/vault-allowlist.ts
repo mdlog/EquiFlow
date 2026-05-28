@@ -8,10 +8,14 @@ import { STOCK_TOKEN_ADDRESSES } from "@/lib/contracts";
 /// /api/keeper/tick to refuse caller-supplied destinations that the keeper
 /// has no business touching.
 
-interface CacheEntry {
+export interface CacheEntry {
   adapters: Set<string>; // lowercased adapter addresses
   priceIds: Set<string>; // lowercased priceIds (regular + per-session)
   fetchedAtMs: number;
+  /// True when EQUIFLOW_VAULT_ADDRESS was unset at refresh time — the cache
+  /// is otherwise empty for a legitimate reason (no vault deployed) and the
+  /// caller should fail with vault_not_configured rather than vault_empty.
+  vaultMissing: boolean;
 }
 
 const CACHE_TTL_MS = 60_000;
@@ -34,7 +38,7 @@ async function refresh(client: PublicClient): Promise<CacheEntry> {
   }
 
   if (!EQUIFLOW_VAULT_ADDRESS) {
-    return { adapters, priceIds, fetchedAtMs: Date.now() };
+    return { adapters, priceIds, fetchedAtMs: Date.now(), vaultMissing: true };
   }
   const vault: Address = EQUIFLOW_VAULT_ADDRESS;
   const tokens = (await client.readContract({
@@ -62,7 +66,7 @@ async function refresh(client: PublicClient): Promise<CacheEntry> {
     }),
   );
 
-  return { adapters, priceIds, fetchedAtMs: Date.now() };
+  return { adapters, priceIds, fetchedAtMs: Date.now(), vaultMissing: false };
 }
 
 export async function getVaultAllowlist(client: PublicClient): Promise<CacheEntry> {

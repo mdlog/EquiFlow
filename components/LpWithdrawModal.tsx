@@ -1,12 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { type Address, type Hex, encodeFunctionData, parseUnits } from "viem";
+import { useEffect, useId, useState } from "react";
+import { type Address, type Hex, encodeFunctionData } from "viem";
 import {
   useReadContract,
   useWaitForTransactionReceipt,
   useWriteContract,
 } from "wagmi";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ERC20_ABI,
   EQUIFLOW_VAULT_ABI,
@@ -18,7 +19,16 @@ import { useActiveWallet } from "@/lib/hooks/use-active-wallet";
 import { useSmartWallet } from "@/lib/aa/use-smart-wallet";
 import { sendUserOp } from "@/lib/aa/send-userop";
 import { AA_CONFIGURED } from "@/lib/web3/alchemy";
+import { parseAmount } from "@/lib/utils/bigint";
+import { friendlyError } from "@/lib/utils/error";
 import {
+  txErrorToast,
+  txPendingToast,
+  txSealedToast,
+} from "@/lib/utils/tx-toast";
+import { qkMatches } from "@/lib/hooks/query-keys";
+import {
+  ContractTrustLine,
   ModalActions,
   ModalShell,
   PreviewRow,
@@ -46,7 +56,14 @@ export function LpWithdrawModal({ open, onClose }: Props) {
   const { address, isConnected } = useActiveWallet();
   const { mode: aaMode, smartAccount, prepareForSubmit } = useSmartWallet();
   const aaActive = aaMode !== "off" && smartAccount != null;
+  const queryClient = useQueryClient();
+
+  const sharesId = useId();
+  const helperId = useId();
+  const errorId = useId();
+
   const [sharesStr, setSharesStr] = useState("");
+  const [toastId, setToastId] = useState<string | number | null>(null);
 
   const { data: stableDecimalsRaw } = useReadContract({
     abi: ERC20_ABI,
@@ -107,6 +124,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
   const [aaError, setAaError] = useState<string | null>(null);
   const [aaBusy, setAaBusy] = useState(false);
   const sealed = eoaSealed || aaTxHash != null;
+  const busy = isPending || mining || aaBusy;
 
   useEffect(() => {
     if (!open) {
@@ -114,21 +132,54 @@ export function LpWithdrawModal({ open, onClose }: Props) {
       setAaTxHash(null);
       setAaError(null);
       setAaBusy(false);
+      setToastId(null);
       reset();
     }
   }, [open, reset]);
 
   useEffect(() => {
     if (!sealed) return;
+    if (toastId !== null) {
+      txSealedToast(toastId, {
+        action: `Withdraw ${fmt.usd(usdgOut, 2)} ${tokenSymbol}`,
+        txHash: aaTxHash ?? txHash,
+      });
+    }
+    queryClient.invalidateQueries({
+      predicate: (q) => qkMatches.postTx(q.queryKey),
+    });
+    queryClient.invalidateQueries({ queryKey: ["wagmi"] });
     const t = setTimeout(() => onClose(), 2000);
     return () => clearTimeout(t);
-  }, [sealed, onClose]);
+  }, [
+    sealed,
+    onClose,
+    toastId,
+    usdgOut,
+    tokenSymbol,
+    aaTxHash,
+    txHash,
+    queryClient,
+  ]);
+
+  useEffect(() => {
+    if (!error) return;
+    if (toastId !== null) txErrorToast(toastId, error);
+  }, [error, toastId]);
 
   function handleWithdraw() {
     if (!VAULT_ADDR) return;
-    const raw = parseUnits(shares.toFixed(18), 18);
+    const raw =
+      sharesStr.trim().length > 0
+        ? parseAmount(sharesStr, 18)
+        : 0n;
+    if (raw <= 0n) return;
+    const id = txPendingToast({
+      action: `Burn ${shares.toFixed(4)} LP shares${aaActive ? " (sponsored)" : ""}`,
+    });
+    setToastId(id);
     if (aaActive && smartAccount && AA_CONFIGURED) {
-      void handleBundle(raw);
+      void handleBundle(raw, id);
       return;
     }
     writeContract({
@@ -140,7 +191,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
     });
   }
 
-  async function handleBundle(raw: bigint) {
+  async function handleBundle(raw: bigint, id: string | number) {
     if (!VAULT_ADDR || !smartAccount) return;
     setAaError(null);
     setAaBusy(true);
@@ -163,7 +214,8 @@ export function LpWithdrawModal({ open, onClose }: Props) {
       setAaTxHash(hash);
     } catch (err) {
       console.error("[LpWithdrawModal] UserOp failed:", err);
-      setAaError(err instanceof Error ? err.message : String(err));
+      setAaError(friendlyError(err));
+      txErrorToast(id, err);
     } finally {
       setAaBusy(false);
     }
@@ -175,9 +227,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
     shares > 0 &&
     !overShares &&
     !insufficientIdle &&
-    !isPending &&
-    !mining &&
-    !aaBusy &&
+    !busy &&
     !sealed;
 
   let ctaLabel: string;
@@ -188,6 +238,8 @@ export function LpWithdrawModal({ open, onClose }: Props) {
   else if (aaActive) ctaLabel = `Burn ${shares > 0 ? shares.toFixed(4) : "0"} shares (sponsored)`;
   else ctaLabel = `Burn ${shares > 0 ? shares.toFixed(4) : "0"} shares`;
 
+  const hasInputError = overShares || insufficientIdle;
+
   return (
     <ModalShell
       open={open}
@@ -197,7 +249,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
       footer={
         <>
           {overShares && (
-            <ValidationError>Exceeds your share balance.</ValidationError>
+            <ValidationError id={errorId}>Exceeds your share balance.</ValidationError>
           )}
           {insufficientIdle && shares > 0 && (
             <ValidationError>
@@ -206,7 +258,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
               repay first.
             </ValidationError>
           )}
-          <TxError message={aaError ?? error?.message} />
+          <TxError message={aaError ?? friendlyError(error)} />
           <TxLink hash={aaTxHash ?? txHash} />
           {sealed && (
             <SealedMessage>
@@ -220,8 +272,10 @@ export function LpWithdrawModal({ open, onClose }: Props) {
               label: ctaLabel,
               onClick: handleWithdraw,
               disabled: !canWithdraw,
+              busy,
             }}
           />
+          <ContractTrustLine address={VAULT_ADDR} />
         </>
       }
     >
@@ -250,8 +304,11 @@ export function LpWithdrawModal({ open, onClose }: Props) {
           className="flex justify-between items-baseline"
           style={{ marginBottom: 8 }}
         >
-          <span className="eyebrow">Shares to burn</span>
+          <label htmlFor={sharesId} className="eyebrow">
+            Shares to burn
+          </label>
           <span
+            id={helperId}
             className="font-mono text-ink-mute tabular"
             style={{ fontSize: 10 }}
           >
@@ -266,6 +323,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
           }}
         >
           <input
+            id={sharesId}
             type="number"
             step="any"
             min="0"
@@ -274,6 +332,8 @@ export function LpWithdrawModal({ open, onClose }: Props) {
             onChange={(e) => setSharesStr(e.target.value)}
             disabled={!isConnected || mining || isPending}
             placeholder="0"
+            aria-describedby={`${helperId} ${errorId}`}
+            aria-invalid={hasInputError || undefined}
             className="font-serif font-medium tabular bg-transparent border-0 outline-none flex-1 w-full min-w-0"
             style={{ fontSize: 22, letterSpacing: "-0.02em" }}
           />

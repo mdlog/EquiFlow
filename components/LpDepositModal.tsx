@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { encodeFunctionData, parseUnits, type Address, type Hex } from "viem";
 import {
   useAccount,
@@ -9,6 +9,7 @@ import {
   useWaitForTransactionReceipt,
   useWriteContract,
 } from "wagmi";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ERC20_ABI,
   EQUIFLOW_VAULT_ABI,
@@ -19,7 +20,16 @@ import { useSmartWallet } from "@/lib/aa/use-smart-wallet";
 import { sendUserOp } from "@/lib/aa/send-userop";
 import { AA_CONFIGURED } from "@/lib/web3/alchemy";
 import { useVaultContext } from "@/lib/hooks/use-vault-context";
+import { parseAmount } from "@/lib/utils/bigint";
+import { friendlyError } from "@/lib/utils/error";
 import {
+  txErrorToast,
+  txPendingToast,
+  txSealedToast,
+} from "@/lib/utils/tx-toast";
+import { qkMatches } from "@/lib/hooks/query-keys";
+import {
+  ContractTrustLine,
   ModalActions,
   ModalFootnote,
   ModalShell,
@@ -70,10 +80,15 @@ export function LpDepositModal({ open, onClose }: Props) {
   const address = (aaActive && smartAddress ? smartAddress : eoaAddress) as
     | Address
     | undefined;
+  const queryClient = useQueryClient();
+  const amountId = useId();
+  const helperId = useId();
+  const errorId = useId();
   const [aaError, setAaError] = useState<string | null>(null);
   const [aaTxHash, setAaTxHash] = useState<Hex | null>(null);
   const [amountStr, setAmountStr] = useState("");
   const [step, setStep] = useState<Step>("idle");
+  const [toastId, setToastId] = useState<string | number | null>(null);
 
   const { data: stableDecimalsRaw } = useReadContract({
     abi: ERC20_ABI,
@@ -251,24 +266,46 @@ export function LpDepositModal({ open, onClose }: Props) {
     if (!open) {
       setAmountStr("");
       setStep("idle");
+      setToastId(null);
       reset();
     }
   }, [open, reset]);
 
   useEffect(() => {
     if (step !== "sealed") return;
+    if (toastId !== null) {
+      txSealedToast(toastId, {
+        action: `Deposit ${fmtBal(amount)}`,
+        txHash: aaTxHash ?? txHash,
+      });
+    }
+    queryClient.invalidateQueries({
+      predicate: (q) => qkMatches.postTx(q.queryKey),
+    });
+    queryClient.invalidateQueries({ queryKey: ["wagmi"] });
     const t = setTimeout(() => onClose(), 2000);
     return () => clearTimeout(t);
-  }, [step, onClose]);
+  }, [step, onClose, toastId, amount, aaTxHash, txHash, queryClient]);
+
+  useEffect(() => {
+    if (!error) return;
+    if (toastId !== null) txErrorToast(toastId, error);
+  }, [error, toastId]);
 
   function handleStart() {
     if (!TOKEN_ADDR || !VAULT_ADDR) return;
+    const id = txPendingToast({
+      action: `Deposit ${fmtBal(amount)}${aaActive ? " (sponsored)" : ""}`,
+    });
+    setToastId(id);
     if (aaActive && smartAccount && AA_CONFIGURED) {
-      void handleBundle();
+      void handleBundle(id);
       return;
     }
     if (needsWrap) {
       setStep("wrapping");
+      // wrapAmount derives from `amount - walletWeth`; parse via the user's
+      // entered string when possible to avoid float drift, otherwise fall back.
       const wrapRaw = parseUnits(wrapAmount.toFixed(stableDec), stableDec);
       writeContract({
         abi: [{ type: "function", name: "deposit", inputs: [], outputs: [], stateMutability: "payable" }],
@@ -280,7 +317,10 @@ export function LpDepositModal({ open, onClose }: Props) {
       return;
     }
     setStep("announcing");
-    const raw = parseUnits(amount.toFixed(stableDec), stableDec);
+    const raw =
+      amountStr.trim().length > 0
+        ? parseAmount(amountStr, stableDec)
+        : parseUnits(amount.toFixed(stableDec), stableDec);
     writeContract({
       abi: EQUIFLOW_VAULT_ABI,
       address: VAULT_ADDR,
@@ -293,13 +333,16 @@ export function LpDepositModal({ open, onClose }: Props) {
   const needsWrap = isWeth && amount > walletWeth && nativeEth > 0;
   const wrapAmount = needsWrap ? amount - walletWeth : 0;
 
-  async function handleBundle() {
+  async function handleBundle(id: string | number) {
     if (!TOKEN_ADDR || !VAULT_ADDR || !smartAccount) return;
     setAaError(null);
     setStep("transferring");
     try {
       await prepareForSubmit();
-      const raw = parseUnits(amount.toFixed(stableDec), stableDec);
+      const raw =
+        amountStr.trim().length > 0
+          ? parseAmount(amountStr, stableDec)
+          : parseUnits(amount.toFixed(stableDec), stableDec);
       const calls: { to: Address; data: Hex; value?: bigint }[] = [];
 
       if (needsWrap) {
@@ -352,7 +395,8 @@ export function LpDepositModal({ open, onClose }: Props) {
       refetchNative();
     } catch (err) {
       console.error("[LpDepositModal] UserOp failed:", err);
-      setAaError(err instanceof Error ? err.message : String(err));
+      setAaError(friendlyError(err));
+      txErrorToast(id, err);
       setStep("idle");
     }
   }
@@ -402,11 +446,11 @@ export function LpDepositModal({ open, onClose }: Props) {
       footer={
         <>
           {overBalance && (
-            <ValidationError>
+            <ValidationError id={errorId}>
               Exceeds your {tokenSymbol} balance. Claim from faucet or reduce amount.
             </ValidationError>
           )}
-          <TxError message={error?.message} />
+          <TxError message={friendlyError(error)} />
           {aaError && <TxError message={`UserOp: ${aaError}`} />}
           <TxLink hash={txHash} />
           <TxLink hash={aaTxHash} label="UserOp tx" />
@@ -422,8 +466,10 @@ export function LpDepositModal({ open, onClose }: Props) {
               label: ctaLabel,
               onClick: handleStart,
               disabled: !canStart,
+              busy,
             }}
           />
+          <ContractTrustLine address={VAULT_ADDR} />
           <ModalFootnote>
             Step 1: <span className="font-mono">vault.announceDeposit()</span> ·
             Step 2: <span className="font-mono">{tokenSymbol}.transfer(vault)</span> ·
@@ -459,8 +505,11 @@ export function LpDepositModal({ open, onClose }: Props) {
           className="flex justify-between items-baseline"
           style={{ marginBottom: 8 }}
         >
-          <span className="eyebrow">Amount to deposit</span>
+          <label htmlFor={amountId} className="eyebrow">
+            Amount to deposit
+          </label>
           <span
+            id={helperId}
             className="font-mono text-ink-mute tabular"
             style={{ fontSize: 10 }}
             title={
@@ -494,6 +543,7 @@ export function LpDepositModal({ open, onClose }: Props) {
             </span>
           )}
           <input
+            id={amountId}
             type="number"
             step={vault.id === "weth" ? "0.0001" : "0.01"}
             min="0"
@@ -502,6 +552,8 @@ export function LpDepositModal({ open, onClose }: Props) {
             onChange={(e) => setAmountStr(e.target.value)}
             disabled={!isConnected || busy}
             placeholder="0.00"
+            aria-describedby={`${helperId} ${errorId}`}
+            aria-invalid={overBalance || undefined}
             className="font-serif font-medium tabular bg-transparent border-0 outline-none flex-1 w-full min-w-0"
             style={{ fontSize: 22, letterSpacing: "-0.02em" }}
           />

@@ -82,9 +82,27 @@ forge script script/Deploy.s.sol --rpc-url $RBN_RPC_URL --broadcast --private-ke
 ## Architecture
 
 - **Oracle**: Pyth Network (MockPyth on testnet) — browser keeper fetches Hermes prices and pushes on-chain via `/api/keeper/tick`
-- **Interest Rate**: Kinked two-slope IRM (Aave V3 style) — `R_base` 1%, `R_slope1` 5%, `R_slope2` 70%, `U_optimal` 85%
-- **Account Abstraction**: ERC-4337 v0.7 + EIP-7702 via Alchemy — smart wallets, gas sponsorship, batched UserOps
+- **Interest Rate**: Kinked two-slope IRM (Aave V3 style) — `R_base` 1%, `R_slope1` 5%, `R_slope2` 49%, `U_optimal` 85%. Borrow APR is hard-clamped at `MAX_BORROW_RATE_BPS = 50%` regardless of utilisation. Rotate via `scheduleIrm` / `executeIrm` (see `docs/SECURITY_RUNBOOK.md` §7).
+- **Account Abstraction**: ERC-4337 v0.7 + EIP-7702 via Alchemy — smart wallets, gas sponsorship, batched UserOps. Gas modes: `sponsored` (default, project-funded) and `usdg` (ERC20 paymaster).
 - **Chain**: Robinhood Chain Testnet (chainId `46630`, Arbitrum Orbit L3)
+
+---
+
+## Other routes
+
+These routes ship with the app but aren't part of the primary trading flow:
+
+| Route | Purpose |
+|---|---|
+| `/faucet` | Claim testnet stock tokens & USDG |
+| `/governance` | Protocol governance & rate-rotation log |
+| `/audits` | Audit reports, security posture |
+| `/bug-bounty` | Bounty program scope & history |
+| `/api-reference` | Public REST surface (`/api/markets/*`, `/api/pyth/*`) |
+| `/sdk` | TypeScript SDK + viem call snippets |
+| `/tokenomics` | USDG supply, LP yield split |
+| `/contracts` | Deployed addresses by network |
+| `/docs` | Long-form protocol docs |
 
 ---
 

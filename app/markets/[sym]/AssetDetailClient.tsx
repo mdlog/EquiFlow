@@ -15,6 +15,7 @@ import { StockBalanceCell } from "@/components/StockBalanceCell";
 import { LtvBreakdown } from "@/components/LtvBreakdown";
 import { PledgeSidebar } from "@/components/PledgeSidebar";
 import { findStock, stockAddress, isLive } from "@/lib/config/stocks";
+import { LIQ_LTV_CUSHION_BPS } from "@/lib/config/constants";
 import { fmt } from "@/lib/format";
 import { useLiveAdapterTick, useStockPrice } from "@/lib/hooks/use-adapter-price";
 import { useLiveTick } from "@/lib/hooks/use-live-tick";
@@ -81,7 +82,10 @@ export function AssetDetailClient({ sym }: Props) {
   const maxBorrow = calcUsd * effectiveLtv;
   const yearlySpread =
     (maxBorrow * (derivedVaultApr - derivedBorrowApr)) / 100;
-  const liqLtv = effectiveLtv * 100 + 8;
+  // Fallback heuristic — replace with `protocolStats.liqLtvByToken[addr]`
+  // once that field surfaces in `use-protocol-stats`. Cushion lives in
+  // `lib/config/constants.ts`.
+  const liqLtv = effectiveLtv * 100 + LIQ_LTV_CUSHION_BPS / 100;
 
   /// Risk + KPI rows — derived once so the JSX stays declarative.
   const riskRows = useMemo<Array<[string, string]>>(

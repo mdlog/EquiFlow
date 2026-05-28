@@ -7,7 +7,7 @@ import {
   type Address,
   type Hex,
 } from "viem";
-import { writeConfig, readConfig } from "@/lib/web3/defender-store";
+import { readConfig, withWalletMutex, writeConfig } from "@/lib/web3/defender-store";
 import { robinhoodChainTestnet } from "@/lib/config/chain";
 import { EQUIFLOW_VAULT_ADDRESS } from "@/lib/contracts";
 import { ApiError, withErrorHandler } from "@/lib/api/handler";
@@ -152,23 +152,28 @@ export const POST = withErrorHandler(async (req: Request) => {
   if (!ok) throw new ApiError(401, "signature_invalid");
 
   // ── Persist (preserve weekUsed/weekStart across re-registers) ────────
-  const existing = await readConfig(wallet);
+  // The read-modify-write must be serialized per-wallet: two concurrent
+  // registers with different nonces would both read the same `existing` and
+  // race on the write — losing the policy from whichever lost the race.
   const installUserOpHash =
     typeof body.installUserOpHash === "string" && isHex(body.installUserOpHash, 66)
       ? body.installUserOpHash
       : undefined;
 
-  await writeConfig({
-    wallet,
-    sessionKey,
-    threshold: threshold.toString(),
-    weeklyLimit: weeklyLimit.toString(),
-    weekUsed: existing?.weekUsed ?? "0",
-    weekStart: existing?.weekStart ?? now,
-    expiresAt,
-    collateralTokens: dedupedCollateral,
-    installUserOpHash,
-    createdAt: existing?.createdAt ?? now,
+  await withWalletMutex(wallet, async () => {
+    const existing = await readConfig(wallet);
+    await writeConfig({
+      wallet,
+      sessionKey,
+      threshold: threshold.toString(),
+      weeklyLimit: weeklyLimit.toString(),
+      weekUsed: existing?.weekUsed ?? "0",
+      weekStart: existing?.weekStart ?? now,
+      expiresAt,
+      collateralTokens: dedupedCollateral,
+      installUserOpHash,
+      createdAt: existing?.createdAt ?? now,
+    });
   });
 
   return NextResponse.json({ ok: true });

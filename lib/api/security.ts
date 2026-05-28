@@ -59,18 +59,36 @@ function constEqString(a: string, b: string): boolean {
   return timingSafeEqual(aBuf, bBuf);
 }
 
+/// Returns the bearer token part of an Authorization header, or null if the
+/// header is missing or doesn't use the Bearer scheme. The scheme comparison
+/// is case-insensitive (RFC 6750 §2.1), the token returned as-is for
+/// timing-safe comparison.
+function extractBearerToken(header: string | null): string | null {
+  if (!header) return null;
+  const sp = header.indexOf(" ");
+  if (sp < 0) return null;
+  const scheme = header.slice(0, sp);
+  if (scheme.toLowerCase() !== "bearer") return null;
+  return header.slice(sp + 1);
+}
+
 export function requireBearerSecret(req: Request, envVar: string): void {
   const expected = process.env[envVar];
   if (!expected) {
+    // Fail closed whenever a privileged signer key is also configured. Without
+    // CRON_SECRET, anyone reaching the dev server can burn keeper gas — even
+    // in NODE_ENV=development. Documented in .env.example.
+    if (process.env.KEEPER_PRIVATE_KEY) {
+      throw new ApiError(503, "cron_secret_required");
+    }
     if (process.env.NODE_ENV === "production") {
-      // Fail closed in prod — never silently accept all requests.
       throw new ApiError(503, "secret_not_configured");
     }
-    return; // dev convenience
+    return; // dev convenience, only when no signing key is configured
   }
-  const header = req.headers.get("authorization") ?? "";
-  const ok = constEqString(header, `Bearer ${expected}`);
-  if (!ok) throw new ApiError(401, "unauthorized");
+  const token = extractBearerToken(req.headers.get("authorization"));
+  if (!token) throw new ApiError(401, "unauthorized");
+  if (!constEqString(token, expected)) throw new ApiError(401, "unauthorized");
 }
 
 // ─── EIP-712 signature verification ────────────────────────────────────────
@@ -171,6 +189,30 @@ export const DEFENDER_REVOKE_TYPES = {
     { name: "nonce", type: "uint256" },
   ],
 } as const;
+
+// Used by /api/defender/status to authenticate the wallet owner so the route
+// can return the FULL payload (sessionKey, collateralTokens, installUserOpHash).
+// Without this proof the endpoint returns only the public policy summary.
+export const DEFENDER_STATUS_AUTH_TYPES = {
+  DefenderStatusAuth: [
+    { name: "wallet", type: "address" },
+    { name: "expiresAt", type: "uint256" },
+  ],
+} as const;
+
+export function hashStatusAuthPayload(args: {
+  chainId: number;
+  verifyingContract: Address;
+  wallet: Address;
+  expiresAt: bigint;
+}): Hex {
+  return hashTypedData({
+    domain: defenderDomain(args.chainId, args.verifyingContract),
+    types: DEFENDER_STATUS_AUTH_TYPES,
+    primaryType: "DefenderStatusAuth",
+    message: { wallet: args.wallet, expiresAt: args.expiresAt },
+  });
+}
 
 export function hashRegisterPayload(args: {
   chainId: number;
@@ -320,6 +362,10 @@ function clientKey(req: Request): string {
   // Prefer x-forwarded-for (Vercel sets this). Fall back to a constant — at
   // worst rate limits become per-process global, still strictly safer than
   // no limit. We do NOT trust the header for any auth purpose.
+  //
+  // WARNING: bare-Node deploys must strip/overwrite XFF at the reverse proxy
+  // (nginx `set_real_ip_from`, Caddy `trusted_proxies`) — otherwise an
+  // attacker can spoof their bucket per request.
   const xff = req.headers.get("x-forwarded-for");
   if (xff) return xff.split(",")[0].trim();
   return req.headers.get("x-real-ip") ?? "anon";
@@ -333,7 +379,13 @@ export async function requireRateLimit(req: Request, opts: RateLimitOpts): Promi
     if (upstream > opts.max) throw new ApiError(429, "rate_limited");
     return;
   }
-  // Fallback: in-memory token bucket.
+  // Upstash unavailable. In production, hard-fail rather than degrade to a
+  // per-process bucket — across Vercel lambdas an attacker just rotates
+  // instances and pretends the limit doesn't exist.
+  if (UPSTASH_URL && process.env.NODE_ENV === "production") {
+    throw new ApiError(503, "rate_limit_store_unavailable");
+  }
+  // Fallback: in-memory token bucket. Dev or unconfigured-Upstash only.
   const now = Date.now();
   const refillPerMs = opts.max / (opts.windowSeconds * 1000);
   const memKey = `${opts.bucket}:${ip}`;
@@ -385,7 +437,12 @@ const REPLAY_TTL_SECONDS = 15 * 60;
 export async function consumeReplayNonce(nonce: Hex, scope: string): Promise<void> {
   if (!isHex(nonce, 66)) throw new ApiError(400, "invalid_nonce");
   if (!UPSTASH_URL || !UPSTASH_TOKEN) {
-    // In-memory fallback. Per-process scope. Best-effort anti-replay.
+    // Upstash not configured. In production this means our anti-replay would
+    // be per-process — a multi-instance attacker just rotates lambdas. Block.
+    if (process.env.NODE_ENV === "production") {
+      throw new ApiError(503, "replay_store_unavailable");
+    }
+    // Dev only: in-memory fallback. Per-process scope. Best-effort.
     const g = globalThis as unknown as { __equiflowReplay?: Map<string, number> };
     if (!g.__equiflowReplay) g.__equiflowReplay = new Map();
     const key = `${scope}:${nonce}`;
@@ -421,4 +478,59 @@ export async function consumeReplayNonce(nonce: Hex, scope: string): Promise<voi
 
 export function generateNonce(): Hex {
   return `0x${randomBytes(32).toString("hex")}` as Hex;
+}
+
+// ─── Generic Upstash REST helpers ──────────────────────────────────────────
+//
+// Lightweight wrappers used by keeper-nonce (and future call sites) for atomic
+// counters. They share the same fail-modes as the rate-limit helpers above:
+// when UPSTASH_* env vars are missing, the helper returns `null` so the caller
+// can fall back to in-process state (development convenience). In production
+// callers MUST hard-fail when null is returned and UPSTASH_URL is configured.
+
+export const UPSTASH_REST_CONFIGURED = !!(UPSTASH_URL && UPSTASH_TOKEN);
+
+async function upstashCall<T>(cmd: (string | number)[]): Promise<T | null> {
+  if (!UPSTASH_URL || !UPSTASH_TOKEN) return null;
+  try {
+    const res = await fetchWithTimeout(UPSTASH_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${UPSTASH_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(cmd),
+      timeoutMs: 1500,
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { result?: T; error?: string };
+    if (json.error) return null;
+    return (json.result ?? null) as T | null;
+  } catch {
+    return null;
+  }
+}
+
+/// SET key val NX EX ttl. Returns true when the key was created, false when
+/// it already existed, null on transport failure / not-configured.
+export async function upstashSetNx(
+  key: string,
+  value: string,
+  ttlSeconds: number,
+): Promise<boolean | null> {
+  const r = await upstashCall<string | null>(["SET", key, value, "NX", "EX", ttlSeconds]);
+  if (r === null) return UPSTASH_REST_CONFIGURED ? null : null;
+  return r === "OK";
+}
+
+/// INCR key → integer. null on transport failure / not-configured.
+export async function upstashIncrement(key: string): Promise<number | null> {
+  const r = await upstashCall<number | string>(["INCR", key]);
+  if (r === null) return null;
+  return typeof r === "number" ? r : Number(r);
+}
+
+/// DEL key → integer (number of keys removed). null on transport failure.
+export async function upstashDel(key: string): Promise<number | null> {
+  return upstashCall<number>(["DEL", key]);
 }

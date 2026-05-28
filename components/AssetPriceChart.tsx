@@ -183,7 +183,16 @@ export function AssetPriceChart({ symbol, fallbackPrice }: Props) {
             style={{ minHeight: 240 }}
             onMouseMove={onMove}
             onMouseLeave={() => setHoverIdx(null)}
+            role="img"
+            aria-label={
+              series
+                ? `${symbol} price chart, ${tf} window, ${series.t.length} bars. Low ${series.min.toFixed(2)}, high ${series.max.toFixed(2)}, last ${(lastClose ?? 0).toFixed(2)}, change ${totalChange?.toFixed(2) ?? "0"}%.`
+                : `${symbol} price chart, no data for ${tf}`
+            }
           >
+            {series && (
+              <title>{`${symbol} ${tf} price chart`}</title>
+            )}
             {/* Background gridlines (horizontal halves/quarters) */}
             {series && (
               <g>

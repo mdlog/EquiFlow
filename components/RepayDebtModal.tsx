@@ -1,24 +1,36 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { encodeFunctionData, maxUint256, parseUnits, type Address, type Hex } from "viem";
+import { useEffect, useId, useState } from "react";
+import { encodeFunctionData, type Address, type Hex } from "viem";
 import {
   useAccount,
   useReadContract,
   useWaitForTransactionReceipt,
   useWriteContract,
 } from "wagmi";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ERC20_ABI,
   EQUIFLOW_VAULT_ABI,
 } from "@/lib/contracts";
 import { useVaultContext } from "@/lib/hooks/use-vault-context";
+import { usePosition } from "@/lib/hooks/use-position";
 import { ROBINHOOD_CHAIN_TESTNET_ID } from "@/lib/config/chain";
 import { fmt } from "@/lib/format";
 import { useSmartWallet } from "@/lib/aa/use-smart-wallet";
 import { sendUserOp } from "@/lib/aa/send-userop";
 import { AA_CONFIGURED } from "@/lib/web3/alchemy";
+import { parseAmount } from "@/lib/utils/bigint";
+import { friendlyError } from "@/lib/utils/error";
 import {
+  txErrorToast,
+  txPendingToast,
+  txSealedToast,
+} from "@/lib/utils/tx-toast";
+import { qkMatches } from "@/lib/hooks/query-keys";
+import { HealthFactorMeter } from "@/components/HealthFactorMeter";
+import {
+  ContractTrustLine,
   ModalActions,
   ModalFootnote,
   ModalShell,
@@ -76,18 +88,29 @@ export function RepayDebtModal({
   const address = (aaActive && smartAddress ? smartAddress : eoaAddress) as
     | Address
     | undefined;
+  const pos = usePosition();
+  const queryClient = useQueryClient();
+
+  const amountId = useId();
+  const helperId = useId();
+  const errorId = useId();
 
   const [amountStr, setAmountStr] = useState("");
   const [useMax, setUseMax] = useState(false);
   const [stage, setStage] = useState<Stage>("idle");
   const [aaError, setAaError] = useState<string | null>(null);
   const [aaTxHash, setAaTxHash] = useState<Hex | null>(null);
+  const [toastId, setToastId] = useState<string | number | null>(null);
 
   const amount = useMax ? borrowedUsd : Math.max(0, Number(amountStr) || 0);
   const overDebt = amount > borrowedUsd + 0.001;
   const newDebt = Math.max(0, borrowedUsd - amount);
   const newLtv = collateralUsd > 0 ? (newDebt / collateralUsd) * 100 : 0;
   const newHf = newLtv > 0 ? liqLtv / newLtv : Number.POSITIVE_INFINITY;
+  const currentHf =
+    borrowedUsd > 0 && collateralUsd > 0
+      ? liqLtv / ((borrowedUsd / collateralUsd) * 100)
+      : Number.POSITIVE_INFINITY;
 
   const { data: stableDecimalsRaw } = useReadContract({
     abi: ERC20_ABI,
@@ -121,8 +144,10 @@ export function RepayDebtModal({
     },
   });
 
+  // String-first parsing to avoid `Number(amountStr).toFixed(stableDec)` drift.
+  const amountSource = useMax ? borrowedUsd.toFixed(stableDec) : amountStr;
   const usdgExact =
-    amount > 0 ? parseUnits(amount.toFixed(stableDec), stableDec) : 0n;
+    amount > 0 ? parseAmount(amountSource, stableDec) : 0n;
   const amountUsd18 =
     stableDec < 18
       ? usdgExact * 10n ** BigInt(18 - stableDec)
@@ -167,7 +192,15 @@ export function RepayDebtModal({
     } else if (stage === "repay-mining") {
       setStage("sealed");
     }
-  }, [receiptSuccess, stage, useMax, amount, writeContract, refetchAllowance]);
+  }, [
+    receiptSuccess,
+    stage,
+    useMax,
+    amountUsd18,
+    VAULT_ADDR,
+    writeContract,
+    refetchAllowance,
+  ]);
 
   useEffect(() => {
     if (mining && stage === "approving") setStage("approve-mining");
@@ -179,29 +212,65 @@ export function RepayDebtModal({
       setAmountStr("");
       setUseMax(false);
       setStage("idle");
+      setToastId(null);
       reset();
     }
   }, [open, reset]);
 
   useEffect(() => {
     if (stage !== "sealed") return;
+    if (toastId !== null) {
+      txSealedToast(toastId, {
+        action: `Repay ${fmt.usd(useMax ? borrowedUsd : amount, 2)}`,
+        txHash: aaTxHash ?? txHash,
+      });
+    }
+    queryClient.invalidateQueries({
+      predicate: (q) => qkMatches.postTx(q.queryKey),
+    });
+    queryClient.invalidateQueries({ queryKey: ["wagmi"] });
     const t = setTimeout(() => onClose(), 2000);
     return () => clearTimeout(t);
-  }, [stage, onClose]);
+  }, [
+    stage,
+    onClose,
+    toastId,
+    useMax,
+    amount,
+    borrowedUsd,
+    aaTxHash,
+    txHash,
+    queryClient,
+  ]);
+
+  useEffect(() => {
+    if (!error) return;
+    if (toastId !== null) txErrorToast(toastId, error);
+  }, [error, toastId]);
+
+  const oracleStale = pos.oracleStale;
 
   function handleClick() {
     if (!VAULT_ADDR || !TOKEN_ADDR) return;
+    const id = txPendingToast({
+      action: useMax
+        ? `Repay max (${fmt.usd(borrowedUsd, 2)})`
+        : `Repay ${fmt.usd(amount, 2)}`,
+    });
+    setToastId(id);
     if (aaActive && smartAccount && AA_CONFIGURED) {
-      void handleBundle();
+      void handleBundle(id);
       return;
     }
     if (allowance < usdgNeeded) {
       setStage("approving");
+      // Exact-amount approval — drop maxUint256 to avoid leaving a persistent
+      // unlimited allowance against the vault.
       writeContract({
         abi: ERC20_ABI,
         address: TOKEN_ADDR,
         functionName: "approve",
-        args: [VAULT_ADDR, maxUint256],
+        args: [VAULT_ADDR, usdgNeeded],
         chainId: ROBINHOOD_CHAIN_TESTNET_ID,
       });
     } else {
@@ -226,7 +295,7 @@ export function RepayDebtModal({
     }
   }
 
-  async function handleBundle() {
+  async function handleBundle(id: string | number) {
     if (!VAULT_ADDR || !TOKEN_ADDR || !smartAccount) return;
     setAaError(null);
     setStage("repaying");
@@ -239,7 +308,7 @@ export function RepayDebtModal({
           data: encodeFunctionData({
             abi: ERC20_ABI,
             functionName: "approve",
-            args: [VAULT_ADDR, maxUint256],
+            args: [VAULT_ADDR, usdgNeeded],
           }),
         });
       }
@@ -272,7 +341,8 @@ export function RepayDebtModal({
       refetchAllowance();
     } catch (err) {
       console.error("[RepayDebtModal] UserOp failed:", err);
-      setAaError(err instanceof Error ? err.message : String(err));
+      setAaError(friendlyError(err));
+      txErrorToast(id, err);
       setStage("idle");
     }
   }
@@ -292,6 +362,7 @@ export function RepayDebtModal({
     amount > 0 &&
     !overDebt &&
     !insufficient &&
+    !oracleStale &&
     !busy &&
     !sealed;
 
@@ -299,6 +370,7 @@ export function RepayDebtModal({
   if (!isConnected) ctaLabel = "Connect wallet";
   else if (!VAULT_ADDR || !TOKEN_ADDR)
     ctaLabel = "Vault not configured";
+  else if (oracleStale) ctaLabel = "Wait for next keeper tick";
   else if (insufficient) ctaLabel = `Insufficient ${tokenSymbol} balance`;
   else if (aaActive && stage === "repaying") ctaLabel = "Bundling UserOp…";
   else if (stage === "approving" || stage === "approve-mining")
@@ -318,6 +390,7 @@ export function RepayDebtModal({
       : `Sign repay · ${fmt.usd(amount, 2)}`;
 
   const walletUsdg = Number(userBalance) / 10 ** stableDec;
+  const hasInputError = overDebt || (insufficient && amount > 0) || oracleStale;
 
   return (
     <ModalShell
@@ -328,7 +401,7 @@ export function RepayDebtModal({
       footer={
         <>
           {overDebt && (
-            <ValidationError>
+            <ValidationError id={errorId}>
               Exceeds outstanding debt. Reduce amount.
             </ValidationError>
           )}
@@ -338,7 +411,12 @@ export function RepayDebtModal({
               {fmt.usd(amount, 2)} needed. Claim from faucet or reduce amount.
             </ValidationError>
           )}
-          <TxError message={error?.message} />
+          {oracleStale && (
+            <ValidationError>
+              Oracle price is stale — wait for the next keeper tick.
+            </ValidationError>
+          )}
+          <TxError message={friendlyError(error)} />
           {aaError && <TxError message={`UserOp: ${aaError}`} />}
           <TxLink hash={txHash} />
           <TxLink hash={aaTxHash} label="UserOp tx" />
@@ -355,8 +433,10 @@ export function RepayDebtModal({
               label: ctaLabel,
               onClick: handleClick,
               disabled: !canRepay,
+              busy,
             }}
           />
+          <ContractTrustLine address={VAULT_ADDR} />
           <ModalFootnote>
             Calls{" "}
             <span className="font-mono">
@@ -403,7 +483,9 @@ export function RepayDebtModal({
           className="flex justify-between items-baseline"
           style={{ marginBottom: 8 }}
         >
-          <span className="eyebrow">Amount to repay</span>
+          <label htmlFor={amountId} className="eyebrow">
+            Amount to repay
+          </label>
           <button
             type="button"
             onClick={() => {
@@ -418,6 +500,7 @@ export function RepayDebtModal({
               color: useMax ? "var(--paper)" : "var(--ink-soft)",
               borderColor: useMax ? "var(--ink)" : "var(--hairline)",
             }}
+            aria-pressed={useMax}
           >
             MAX · {fmt.usd(borrowedUsd, 2)}
           </button>
@@ -434,6 +517,7 @@ export function RepayDebtModal({
             $
           </span>
           <input
+            id={amountId}
             type="number"
             step="0.01"
             min="0"
@@ -445,12 +529,21 @@ export function RepayDebtModal({
             }}
             disabled={!isConnected || busy || useMax}
             placeholder="0.00"
+            aria-describedby={`${helperId} ${errorId}`}
+            aria-invalid={hasInputError || undefined}
             className="font-serif font-medium tabular bg-transparent border-0 outline-none flex-1 w-full min-w-0"
             style={{ fontSize: 22, letterSpacing: "-0.02em" }}
           />
           <span className="font-mono text-ink-soft" style={{ fontSize: 13 }}>
             {tokenSymbol}
           </span>
+        </div>
+        <div
+          id={helperId}
+          className="font-mono text-ink-mute"
+          style={{ fontSize: 10, marginTop: 6 }}
+        >
+          Repay up to {fmt.usd(borrowedUsd, 2)} of outstanding {tokenSymbol} debt.
         </div>
         <div className="flex gap-1.5 mt-2.5">
           {[0.25, 0.5, 0.75].map((frac) => (
@@ -493,17 +586,9 @@ export function RepayDebtModal({
           }
           color="var(--ink)"
         />
-        <PreviewRow
-          k="Health factor"
-          v={newHf === Number.POSITIVE_INFINITY ? "∞" : newHf.toFixed(2)}
-          color={
-            newHf > 2.5
-              ? "var(--up)"
-              : newHf > 1.5
-                ? "var(--amber)"
-                : "var(--down)"
-          }
-        />
+        <div style={{ marginTop: 10 }}>
+          <HealthFactorMeter before={currentHf} after={newHf} />
+        </div>
       </div>
     </ModalShell>
   );

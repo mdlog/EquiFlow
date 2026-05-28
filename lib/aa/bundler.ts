@@ -22,8 +22,16 @@ import {
 /// same ERC-7677 paymaster RPC.
 
 let _bundlerClient: ReturnType<typeof createBundlerClient> | null = null;
-let _paymasterClient: ReturnType<typeof createPimlicoClient> | null = null;
 let _publicClient: PublicClient | null = null;
+
+/// Paymaster clients are cached per policyId. Two distinct policies
+/// (sponsored vs. ERC20-USDG paymaster) point at different Alchemy URLs
+/// and must NOT share a client — a single-slot cache would silently
+/// return the wrong policy after a user toggles gas mode.
+const _paymasterClients = new Map<
+  string,
+  ReturnType<typeof createPimlicoClient>
+>();
 
 export function getPublicClient(): PublicClient {
   if (_publicClient) return _publicClient;
@@ -47,19 +55,22 @@ export function getBundlerClient() {
 /// should check this before adding `paymaster` to a UserOp — without it,
 /// the bundler will reject the op as missing sponsorship.
 export function getPaymasterClient(policyId: string = GAS_POLICY_ID) {
-  if (!policyId || !alchemyPaymasterUrl(policyId)) return null;
-  if (_paymasterClient) return _paymasterClient;
-  _paymasterClient = createPimlicoClient({
+  const url = alchemyPaymasterUrl(policyId);
+  if (!policyId || !url) return null;
+  const cached = _paymasterClients.get(policyId);
+  if (cached) return cached;
+  const client = createPimlicoClient({
     chain: robinhoodChainTestnet,
-    transport: http(alchemyPaymasterUrl(policyId)),
+    transport: http(url),
     entryPoint: { address: ENTRY_POINT_07, version: "0.7" },
   });
-  return _paymasterClient;
+  _paymasterClients.set(policyId, client);
+  return client;
 }
 
 /// Reset cached clients — used when the user changes networks or API key.
 export function resetAAClients() {
   _bundlerClient = null;
-  _paymasterClient = null;
   _publicClient = null;
+  _paymasterClients.clear();
 }

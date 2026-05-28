@@ -28,6 +28,7 @@ import {
 } from "@/lib/contracts";
 import { AssetLogo } from "@/components/AssetLogo";
 import { ROBINHOOD_CHAIN_TESTNET_ID } from "@/lib/config/chain";
+import { LIQ_LTV_CUSHION_BPS } from "@/lib/config/constants";
 import { usePosition, type LiveCollateralLine } from "@/lib/hooks/use-position";
 import { usePositionEvents } from "@/lib/hooks/use-position-events";
 import { useActiveWallet } from "@/lib/hooks/use-active-wallet";
@@ -88,7 +89,7 @@ export default function PositionsPage() {
 
       {pos.oracleStale && <StaleOracleBanner />}
 
-      <div className="w-full flex-1 flex flex-col">
+      <main id="main-content" className="w-full flex-1 flex flex-col">
         {/* Position selector bar */}
         <PositionSelectorBar
           assetCount={lines.length}
@@ -269,7 +270,7 @@ export default function PositionsPage() {
             </div>
           </section>
         )}
-      </div>
+      </main>
 
       <SiteFooter />
     </div>
@@ -1559,9 +1560,12 @@ function blendedLtv(lines: LiveCollateralLine[]): number {
   }
   return total > 0 ? weighted / total : 7_500;
 }
-// TODO: read per-asset liqLtvBps from vault instead of assuming +800bps
+// Fallback when on-chain `vault.assets(token).liqLtvBps` is unavailable: add
+// the cushion defined in `lib/config/constants.ts`. Once the protocol-stats
+// hook surfaces liqLtvBps per asset, replace this with a weighted blend over
+// `lines.map((l) => protocolStats.liqLtvByToken[stockAddress(l.sym)])`.
 function blendedLiq(lines: LiveCollateralLine[]): number {
-  return blendedLtv(lines) + 800;
+  return blendedLtv(lines) + LIQ_LTV_CUSHION_BPS;
 }
 
 

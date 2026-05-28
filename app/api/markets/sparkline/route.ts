@@ -36,16 +36,30 @@ export const GET = withErrorHandler(async (req: Request) => {
 
   if (symsDedup.length === 0) throw new ApiError(400, "missing_syms");
 
+  // Use allSettled so one symbol's Upstash hiccup doesn't 500 the whole batch.
+  // Failures land as an empty array — clients can detect the difference via
+  // the `failed` list and decide whether to retry or fall back to seeded data.
   const series: Record<string, number[]> = {};
-  await Promise.all(
-    symsDedup.map(async (sym) => {
-      const raw = await readSeries(sym);
-      series[sym] = downsample(raw, points);
-    }),
+  const failed: string[] = [];
+  const settled = await Promise.allSettled(
+    symsDedup.map(async (sym) => ({ sym, raw: await readSeries(sym) })),
   );
+  for (const r of settled) {
+    if (r.status === "fulfilled") {
+      series[r.value.sym] = downsample(r.value.raw, points);
+    } else {
+      console.warn("[sparkline] readSeries failed:", r.reason);
+    }
+  }
+  for (const sym of symsDedup) {
+    if (!(sym in series)) {
+      series[sym] = [];
+      failed.push(sym);
+    }
+  }
 
   return NextResponse.json(
-    { enabled: true, series },
+    { enabled: true, series, failed },
     { headers: { "Cache-Control": "public, max-age=15, s-maxage=15" } },
   );
 });

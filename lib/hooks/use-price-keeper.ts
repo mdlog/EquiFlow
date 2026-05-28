@@ -216,10 +216,15 @@ export function usePriceKeeper({
     if (adapters.length === 0) return;
 
     const tick = async () => {
+      // Skip ticks while the tab is hidden — Page Visibility API.
+      // Background tabs running the keeper drain battery, RPC quota, and
+      // create duplicate UserOps across windows for no UX benefit.
+      if (typeof document !== "undefined" && document.hidden) return;
       if (inflightRef.current) return;
       inflightRef.current = true;
       try {
         const a = adapters[cursorRef.current % adapters.length];
+        if (!a) return;
         cursorRef.current++;
 
         // fetchPythPrice runs only to surface activeSession in the verbose log

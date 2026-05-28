@@ -6,6 +6,12 @@ import type { Address } from "viem";
 /// Polls /api/defender/status for the given wallet. Returns null when no
 /// defender is active. Re-fetches every 15s and exposes `refresh()` for
 /// post-mutation refetches.
+///
+/// The endpoint returns the FULL payload (sessionKey, collateralTokens,
+/// installUserOpHash) only when an EIP-712-signed proof of wallet ownership
+/// is included. Without the proof the response is the public summary —
+/// the hook stores whichever shape comes back. Callers that need sensitive
+/// fields can pass `auth` after asking the user to sign once per session.
 
 export interface DefenderStatus {
   enabled: boolean;
@@ -20,7 +26,17 @@ export interface DefenderStatus {
   installUserOpHash?: string | null;
 }
 
-export function useDefenderStatus(wallet: Address | undefined): {
+export interface DefenderStatusAuth {
+  /// EIP-712 signature over (wallet, exp) by the wallet owner.
+  sig: `0x${string}`;
+  /// Expiry timestamp (unix seconds) that the signature commits to.
+  exp: number;
+}
+
+export function useDefenderStatus(
+  wallet: Address | undefined,
+  auth?: DefenderStatusAuth,
+): {
   status: DefenderStatus | null;
   isLoading: boolean;
   refresh: () => Promise<void>;
@@ -35,10 +51,14 @@ export function useDefenderStatus(wallet: Address | undefined): {
     }
     setIsLoading(true);
     try {
-      const res = await fetch(
-        `/api/defender/status?wallet=${wallet}`,
-        { cache: "no-store" },
-      );
+      const qs = new URLSearchParams({ wallet });
+      if (auth && auth.exp * 1000 > Date.now()) {
+        qs.set("sig", auth.sig);
+        qs.set("exp", String(auth.exp));
+      }
+      const res = await fetch(`/api/defender/status?${qs.toString()}`, {
+        cache: "no-store",
+      });
       if (!res.ok) {
         setStatus(null);
         return;
@@ -50,7 +70,7 @@ export function useDefenderStatus(wallet: Address | undefined): {
     } finally {
       setIsLoading(false);
     }
-  }, [wallet]);
+  }, [wallet, auth]);
 
   useEffect(() => {
     fetchOnce();

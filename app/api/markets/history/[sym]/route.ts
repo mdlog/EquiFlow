@@ -86,8 +86,11 @@ export const GET = withErrorHandler(async (req: Request, { params }: Params) => 
   try {
     const res = await fetchWithTimeout(target, { cache: "no-store", timeoutMs: 8_000 });
     if (!res.ok) {
+      // Log the upstream status server-side, but expose only a stable code
+      // to the client so we don't reflect Benchmarks' rate-limit / 5xx text.
+      console.warn(`[history] benchmarks http ${res.status} sym=${upper}`);
       return NextResponse.json(
-        { s: "error", errmsg: `benchmarks_http_${res.status}` },
+        { s: "error", errmsg: "upstream_unavailable" },
         { status: 502 },
       );
     }
@@ -108,7 +111,14 @@ export const GET = withErrorHandler(async (req: Request, { params }: Params) => 
       const nowTs = Math.floor(Date.now() / 1000);
       const gapSeconds = nowTs - (t.length > 0 ? t[t.length - 1] : from);
       if (gapSeconds > bucketSize) {
-        const ticks = await readSeries(upper, keeperFrom);
+        // Upstash gap-fill is best-effort. A transient store failure must NOT
+        // mask the Benchmarks bars we already have — degrade gracefully.
+        let ticks: HistoryPoint[] = [];
+        try {
+          ticks = await readSeries(upper, keeperFrom);
+        } catch (err) {
+          console.warn(`[history] readSeries failed sym=${upper}:`, err);
+        }
         if (ticks.length > 0) {
           const bars = ticksToOhlcv(ticks, bucketSize);
           for (const bar of bars) {

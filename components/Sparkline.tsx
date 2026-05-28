@@ -5,6 +5,9 @@ type Props = {
   color?: string;
   fill?: boolean;
   points?: number;
+  /// Accessible label — typically `"${sym} 7-day trend"`. If omitted, the
+  /// sparkline is treated as decorative and hidden from assistive tech.
+  ariaLabel?: string;
 };
 
 export function Sparkline({
@@ -14,6 +17,7 @@ export function Sparkline({
   color = "var(--ink)",
   fill = false,
   points = 48,
+  ariaLabel,
 }: Props) {
   const series = data && data.length >= 2 ? data : Array(points).fill(50);
 
@@ -30,8 +34,24 @@ export function Sparkline({
     })
     .join(" ");
   const area = path + ` L${w},${h} L0,${h} Z`;
+
+  // Direction summary for screen readers — derived from first→last sample.
+  const first = series[0] ?? 0;
+  const last = series[series.length - 1] ?? 0;
+  const direction = last > first ? "up" : last < first ? "down" : "flat";
+  const summary = ariaLabel ?? "";
+
   return (
-    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="block">
+    <svg
+      width={w}
+      height={h}
+      viewBox={`0 0 ${w} ${h}`}
+      className="block"
+      role={ariaLabel ? "img" : undefined}
+      aria-label={ariaLabel ? `${summary}, trend ${direction}` : undefined}
+      aria-hidden={ariaLabel ? undefined : true}
+    >
+      {ariaLabel && <title>{`${summary}, trend ${direction}`}</title>}
       {fill && <path d={area} fill={color} opacity="0.08" />}
       <path d={path} stroke={color} strokeWidth="1.2" fill="none" />
     </svg>

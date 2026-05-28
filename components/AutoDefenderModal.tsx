@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import type { Address } from "viem";
 import { fmt } from "@/lib/format";
 import { useActiveWallet } from "@/lib/hooks/use-active-wallet";
@@ -9,6 +9,12 @@ import {
   registerSessionKey,
   type SessionPermissions,
 } from "@/lib/aa/session-key";
+import { friendlyError } from "@/lib/utils/error";
+import {
+  txErrorToast,
+  txPendingToast,
+  txSealedToast,
+} from "@/lib/utils/tx-toast";
 import {
   ModalActions,
   ModalFootnote,
@@ -55,12 +61,17 @@ export function AutoDefenderModal({
   const [stage, setStage] = useState<Stage>("idle");
   const [error, setError] = useState<string | null>(null);
   const [opHash, setOpHash] = useState<string | null>(null);
+  const [toastId, setToastId] = useState<string | number | null>(null);
+  const thresholdId = useId();
+  const weeklyId = useId();
+  const expiryId = useId();
 
   useEffect(() => {
     if (!open) {
       setStage("idle");
       setError(null);
       setOpHash(null);
+      setToastId(null);
     }
   }, [open]);
 
@@ -84,6 +95,10 @@ export function AutoDefenderModal({
     if (!smartAccount || !address) return;
     setError(null);
     setStage("signing");
+    const id = txPendingToast({
+      action: `Authorize keeper for ${expiryDays}d`,
+    });
+    setToastId(id);
     try {
       const permissions: SessionPermissions = {
         weeklyLimitUsdg: BigInt(Math.round(weeklyLimit * 1_000_000)),
@@ -99,9 +114,14 @@ export function AutoDefenderModal({
       });
       setOpHash(stored.installUserOpHash ?? null);
       setStage("sealed");
+      txSealedToast(id, {
+        action: "Auto-Defender authorized",
+        txHash: stored.installUserOpHash ?? null,
+      });
       onSuccess?.();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(friendlyError(err));
+      txErrorToast(id, err);
       setStage("error");
     }
   }
@@ -139,7 +159,12 @@ export function AutoDefenderModal({
           <ModalActions
             onClose={onClose}
             sealed={sealed}
-            cta={{ label: cta, onClick: handleSign, disabled: !canSign || busy }}
+            cta={{
+              label: cta,
+              onClick: handleSign,
+              disabled: !canSign || busy,
+              busy,
+            }}
           />
           <ModalFootnote>
             Calls <span className="font-mono">installValidation()</span> via
@@ -190,6 +215,7 @@ export function AutoDefenderModal({
       {/* Sliders */}
       <div style={{ padding: "20px 24px 4px" }}>
         <SliderRow
+          id={thresholdId}
           label="Health-factor trigger"
           valueLabel={`HF < ${threshold.toFixed(2)}`}
           sub={
@@ -207,6 +233,7 @@ export function AutoDefenderModal({
           disabled={busy || sealed}
         />
         <SliderRow
+          id={weeklyId}
           label="Max weekly repay"
           valueLabel={fmt.usd(weeklyLimit, 0)}
           sub={`per rolling 7-day window · resets ${new Date(Date.now() + 7 * DAYS * 1000).toISOString().slice(0, 10)}`}
@@ -219,6 +246,7 @@ export function AutoDefenderModal({
           unit="USDG"
         />
         <SliderRow
+          id={expiryId}
           label="Expires after"
           valueLabel={`${expiryDays}d`}
           sub={`Auto-revokes ${expiryLabel}`}
@@ -270,6 +298,7 @@ export function AutoDefenderModal({
 }
 
 function SliderRow({
+  id,
   label,
   valueLabel,
   sub,
@@ -281,6 +310,7 @@ function SliderRow({
   disabled,
   unit,
 }: {
+  id: string;
   label: string;
   valueLabel: string;
   sub: string;
@@ -298,7 +328,9 @@ function SliderRow({
         className="flex justify-between items-baseline"
         style={{ marginBottom: 6 }}
       >
-        <span className="eyebrow">{label}</span>
+        <label htmlFor={id} className="eyebrow">
+          {label}
+        </label>
         <span
           className="font-mono tabular font-semibold"
           style={{ fontSize: 13 }}
@@ -313,6 +345,7 @@ function SliderRow({
         </span>
       </div>
       <input
+        id={id}
         type="range"
         min={min}
         max={max}
@@ -320,6 +353,7 @@ function SliderRow({
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
         disabled={disabled}
+        aria-describedby={`${id}-sub`}
         className="w-full"
         style={{
           accentColor: "var(--ink)",
@@ -327,6 +361,7 @@ function SliderRow({
         }}
       />
       <div
+        id={`${id}-sub`}
         className="font-mono text-ink-mute"
         style={{ fontSize: 10, marginTop: 4 }}
       >

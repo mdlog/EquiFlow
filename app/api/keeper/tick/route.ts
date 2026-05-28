@@ -10,7 +10,7 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { robinhoodChainTestnet } from "@/lib/config/chain";
 import { PYTH_ADAPTER_ABI, craftMockPythUpdate } from "@/lib/web3/pyth";
-import { fetchFreshestPyth } from "@/lib/web3/hermes";
+import { fetchFreshestPyth, validatePythQuote } from "@/lib/web3/hermes";
 import { recordPrice } from "@/lib/web3/price-history";
 import {
   EQUIFLOW_VAULT_ABI,
@@ -74,6 +74,9 @@ export const POST = withErrorHandler(async (req: Request) => {
 
   // Resolve adapter + priceId from on-chain config — never from the caller.
   const allowlist = await getVaultAllowlist(publicClient);
+  if (allowlist.vaultMissing) {
+    throw new ApiError(503, "vault_not_configured");
+  }
   if (allowlist.adapters.size === 0) {
     throw new ApiError(503, "vault_empty");
   }
@@ -111,28 +114,40 @@ export const POST = withErrorHandler(async (req: Request) => {
   const quote = await fetchFreshestPyth(symbol);
   const nowSec = Math.floor(Date.now() / 1000);
 
-  let priceForLog: number;
-  let updateBytes: Hex;
-  let source: "pyth" | "mock";
-  let publishTime: number;
-
-  if (quote) {
-    priceForLog = Number(quote.price) / 10 ** -quote.expo;
-    publishTime = nowSec;
-    const { priceIdRegular } = await resolveRegularPriceId(publicClient, adapter);
-    updateBytes = craftMockPythUpdate({
-      priceId: priceIdRegular,
-      price: quote.price,
-      expo: quote.expo,
-      publishTime,
-      conf: quote.conf,
-    });
-    source = "pyth";
-  } else {
-    // Hermes unavailable — we DO NOT fall back to caller-supplied prices.
-    // Refuse to sign rather than push attacker-chosen numbers.
+  if (!quote) {
+    // Hermes unavailable — we DO NOT fall back to mock prices. Refuse to
+    // sign rather than push attacker-chosen or fabricated numbers.
     throw new ApiError(503, "hermes_unavailable");
   }
+
+  // Quality gate: reject stale or low-confidence quotes. Without this, an
+  // operator outage that returns cached pre-outage prices would be silently
+  // forwarded with a fresh server timestamp.
+  const validation = validatePythQuote(quote, nowSec);
+  if (!validation.ok) {
+    console.warn(
+      `[keeper/tick] quote_rejected sym=${symbol} reason=${validation.reason} ` +
+        `age=${validation.ageSeconds}s conf=${validation.confBps}bps`,
+    );
+    throw new ApiError(503, `quote_${validation.reason}`);
+  }
+
+  const priceForLog = Number(quote.price) / 10 ** -quote.expo;
+  // On-chain publishTime is the server's "I attest this submission is fresh"
+  // timestamp, gated by validatePythQuote() above: the underlying Hermes
+  // publish_time was within MAX_PUBLISH_AGE_SECONDS of now. Using nowSec
+  // keeps the adapter staleAfter check passing even when the adapter has a
+  // tighter window than Hermes' publish cadence.
+  const publishTime = nowSec;
+  const { priceIdRegular } = await resolveRegularPriceId(publicClient, adapter);
+  const updateBytes: Hex = craftMockPythUpdate({
+    priceId: priceIdRegular,
+    price: quote.price,
+    expo: quote.expo,
+    publishTime,
+    conf: quote.conf,
+  });
+  const source: "pyth" = "pyth";
 
   let txHash: Hex;
   try {

@@ -10,10 +10,10 @@
 /// vars are missing the module degrades to a silent no-op — the frontend
 /// then falls back to the static STOCKS.changePct + seeded sparkline.
 
-const URL = process.env.UPSTASH_REDIS_REST_URL;
-const TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL;
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 
-export const HISTORY_ENABLED = !!(URL && TOKEN);
+export const HISTORY_ENABLED = !!(UPSTASH_URL && UPSTASH_TOKEN);
 
 const DAY = 86400;
 /// Keep a small safety margin past 24h so a late reader can still bracket the
@@ -24,10 +24,10 @@ type Cmd = (string | number)[];
 
 async function pipeline(cmds: Cmd[]): Promise<unknown[]> {
   if (!HISTORY_ENABLED) return [];
-  const res = await fetch(`${URL}/pipeline`, {
+  const res = await fetch(`${UPSTASH_URL}/pipeline`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${TOKEN}`,
+      Authorization: `Bearer ${UPSTASH_TOKEN}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(cmds),
@@ -72,6 +72,10 @@ export interface HistoryPoint {
 
 /// Read raw points for a symbol from `fromTs` to now (default: last 24h).
 /// Returns [] when Redis is not configured or the set is empty.
+///
+/// Throws on Upstash transport failure so callers can distinguish "no data"
+/// (empty array) from "store unavailable" (exception). Wrap with try/catch
+/// or `Promise.allSettled` at the call site if partial failure is acceptable.
 export async function readSeries(
   symbol: string,
   fromTs?: number,
@@ -80,15 +84,8 @@ export async function readSeries(
   const key = `px:${symbol.toUpperCase()}`;
   const now = Math.floor(Date.now() / 1000);
   const min = fromTs ?? now - DAY;
-  let raw: unknown;
-  try {
-    const out = await pipeline([
-      ["ZRANGEBYSCORE", key, min, now],
-    ]);
-    raw = out[0];
-  } catch {
-    return [];
-  }
+  const out = await pipeline([["ZRANGEBYSCORE", key, min, now]]);
+  const raw = out[0];
   if (!Array.isArray(raw)) return [];
   const points: HistoryPoint[] = [];
   for (const v of raw) {

@@ -6,23 +6,53 @@ import { Providers } from "./providers";
 const geist = Geist({
   variable: "--font-geist",
   subsets: ["latin"],
+  display: "swap",
 });
 
 const jetbrainsMono = JetBrains_Mono({
   variable: "--font-jetbrains-mono",
   subsets: ["latin"],
+  display: "swap",
+  // Mono is only used in numeric/data cells — defer until needed.
+  preload: false,
 });
 
 const sourceSerif = Source_Serif_4({
   variable: "--font-source-serif",
   subsets: ["latin"],
   style: ["normal", "italic"],
+  display: "swap",
 });
 
+const siteUrl =
+  process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") ??
+  "https://equiflow.app";
+
 export const metadata: Metadata = {
-  title: "EquiFlow · Yield-Generating Stock Collateralization · Robinhood Chain",
+  metadataBase: new URL(siteUrl),
+  title: {
+    default:
+      "EquiFlow · Yield-Generating Stock Collateralization · Robinhood Chain",
+    template: "%s · EquiFlow",
+  },
   description:
     "Pledge tokenized US equities as collateral on Robinhood Chain, borrow regulated stablecoins, and route them into Aave V3 yield. One signature, sponsored gas, no taxable sale.",
+  applicationName: "EquiFlow",
+  authors: [{ name: "EquiFlow" }],
+  openGraph: {
+    type: "website",
+    siteName: "EquiFlow",
+    title: "EquiFlow — Yield-generating stock collateralization",
+    description:
+      "Pledge tokenized US equities, borrow USDG, route into yield. No taxable sale.",
+    url: siteUrl,
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "EquiFlow — Yield-generating stock collateralization",
+    description:
+      "Pledge tokenized US equities, borrow USDG, route into yield. No taxable sale.",
+  },
 };
 
 export default function RootLayout({
@@ -36,7 +66,10 @@ export default function RootLayout({
       className={`${geist.variable} ${jetbrainsMono.variable} ${sourceSerif.variable}`}
       suppressHydrationWarning
     >
-      <body className="min-h-screen bg-paper text-ink" suppressHydrationWarning>
+      <body className="min-h-screen bg-paper text-ink">
+        <a href="#main-content" className="skip-link">
+          Skip to main content
+        </a>
         <Providers>{children}</Providers>
       </body>
     </html>
