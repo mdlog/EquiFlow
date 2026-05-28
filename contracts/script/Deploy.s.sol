@@ -8,6 +8,7 @@ import {MockStockToken} from "../src/mocks/MockStockToken.sol";
 import {MockPyth} from "@pythnetwork/pyth-sdk-solidity/MockPyth.sol";
 import {IPyth} from "@pythnetwork/pyth-sdk-solidity/IPyth.sol";
 import {PythPriceAdapter} from "../src/oracle/PythPriceAdapter.sol";
+import {PythAdapterRegistry} from "../src/oracle/PythAdapterRegistry.sol";
 import {KinkedRateModel} from "../src/interest/KinkedRateModel.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
@@ -158,6 +159,13 @@ contract DeployScript is Script {
         console2.log("  reserveFactorBps:", reserveFactorBps);
         console2.log("  treasury:", treasury);
 
+        // ─── 3b. PythAdapterRegistry (T-4 fix — pass 5) ─────────────────
+        // Deploy a fresh registry per deploy run so the WETH-vault deploy
+        // can later resolve adapters by priceId. Address goes into the
+        // exported env block at the bottom of this script.
+        PythAdapterRegistry adapterRegistry = new PythAdapterRegistry(deployer);
+        console2.log("PythAdapterRegistry deployed:", address(adapterRegistry));
+
         // ─── 4. Per-asset: token + Pyth adapter + listing ────────────────
         for (uint256 i; i < specs.length; ++i) {
             AssetSpec memory s = specs[i];
@@ -193,6 +201,10 @@ contract DeployScript is Script {
             // constructor now defaults to 500 bps. Belt-and-suspenders so a
             // future constructor refactor cannot regress the protection.
             adapter.setMaxDeviation(500);
+            // T-4 fix (pass 5): register so the WETH-vault deploy reuses
+            // this exact adapter (one adapter per priceId, one keeper push
+            // per priceId, no duplication).
+            adapterRegistry.register(priceId, address(adapter));
             console2.log(string.concat("PythAdapter ", s.symbol, ":"), address(adapter));
 
             vault.listAsset(
@@ -272,6 +284,10 @@ contract DeployScript is Script {
         console2.log("NEXT_PUBLIC_USDC_ADDRESS=", usdcAddr);
         console2.log("NEXT_PUBLIC_PYTH_ADDRESS=", address(pyth));
         console2.log("NEXT_PUBLIC_IRM_ADDRESS=", address(kinkedIrm));
+        console2.log("NEXT_PUBLIC_ADAPTER_REGISTRY=", address(adapterRegistry));
+        console2.log("");
+        console2.log("Pass to DeployWethVault.s.sol as:");
+        console2.log("  ADAPTER_REGISTRY=", address(adapterRegistry));
     }
 
     function _envAddrOr(string memory key, address fallback_) internal view returns (address) {

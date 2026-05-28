@@ -3,9 +3,7 @@ pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
 import {EquiFlowVault} from "../src/EquiFlowVault.sol";
-import {MockPyth} from "@pythnetwork/pyth-sdk-solidity/MockPyth.sol";
-import {IPyth} from "@pythnetwork/pyth-sdk-solidity/IPyth.sol";
-import {PythPriceAdapter} from "../src/oracle/PythPriceAdapter.sol";
+import {PythAdapterRegistry} from "../src/oracle/PythAdapterRegistry.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @notice Deploy a second EquiFlowVault with WETH as the borrowable asset.
@@ -17,14 +15,21 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 /// Required env:
 ///   DEPLOYER_PK              — deployer private key
 ///   WETH_ADDRESS              — L2 WETH (0x7943e237c7F95DA44E0301572D358911207852Fa on RBN)
-///   PYTH_ADDRESS              — existing Pyth/MockPyth deployment (reuse from USDG deploy)
+///   ADAPTER_REGISTRY          — T-4 fix (2026-05 pass 5): `PythAdapterRegistry`
+///                                deployed by `Deploy.s.sol`. Each listed
+///                                asset's adapter is looked up by priceId
+///                                so this script CANNOT silently fall back
+///                                to deploying duplicate adapters. The
+///                                registry guarantees one adapter per
+///                                priceId across all vault deployments —
+///                                the keeper pushes once and both vaults
+///                                see the fresh price atomically.
 ///
 /// Optional env:
 ///   WETH_BORROW_RATE_BPS      — borrow rate (default 800 = 8%)
 ///   WETH_RESERVE_FACTOR_BPS   — reserve factor (default 1500 = 15%)
 ///   TREASURY_ADDRESS           — treasury recipient (default deployer)
 ///   TOKEN_<SYM>=<addr>         — live RBN stock token addresses
-///   PRICE_ID_ETH               — Pyth ETH/USD priceId override
 ///
 /// Usage:
 ///   source .env && forge script script/DeployWethVault.s.sol \
@@ -94,11 +99,11 @@ contract DeployWethVaultScript is Script {
         console2.log("WETH address:", wethAddr);
         console2.log("  decimals:", uint256(wethDec));
 
-        // ─── 2. Reuse existing Pyth deployment ──────────────────────────
-        address pythAddr = vm.envAddress("PYTH_ADDRESS");
-        require(pythAddr != address(0), "PYTH_ADDRESS required");
-        IPyth pyth = IPyth(pythAddr);
-        console2.log("Pyth address:", pythAddr);
+        // ─── 2. Adapter registry from the USDG-vault deploy ────────────
+        address registryAddr = vm.envAddress("ADAPTER_REGISTRY");
+        require(registryAddr != address(0), "ADAPTER_REGISTRY required");
+        PythAdapterRegistry adapterRegistry = PythAdapterRegistry(registryAddr);
+        console2.log("Adapter registry:", registryAddr);
 
         // ─── 3. Deploy WETH Vault ───────────────────────────────────────
         uint256 borrowRateBps = vm.envOr("WETH_BORROW_RATE_BPS", uint256(800));
@@ -117,7 +122,7 @@ contract DeployWethVaultScript is Script {
         console2.log("  borrowRateBps:", borrowRateBps);
         console2.log("  reserveFactorBps:", reserveFactorBps);
 
-        // ─── 4. Per-asset: reuse stock tokens + deploy new adapters ─────
+        // ─── 4. Per-asset: reuse stock tokens + adapter (or deploy new) ──
         for (uint256 i; i < specs.length; ++i) {
             AssetSpec memory s = specs[i];
 
@@ -126,25 +131,29 @@ contract DeployWethVaultScript is Script {
             require(tokenAddr != address(0), string.concat("Missing ", tokenKey));
             console2.log(string.concat("Stock ", s.symbol, ":"), tokenAddr);
 
+            // T-4 fix (2026-05 pass 5): resolve the canonical adapter via
+            // the registry. There is no fallback — if the registry has no
+            // entry for this priceId, the deploy reverts. Forces the
+            // operator to register the adapter first (via the USDG-vault
+            // deploy or a manual `registry.register(...)` call).
             bytes32 priceId = _envBytes32Or(
                 string.concat("PRICE_ID_", s.symbol),
                 s.priceId
             );
-
-            PythPriceAdapter adapter = new PythPriceAdapter(
-                pyth,
-                priceId,
-                string.concat(s.symbol, "/USD"),
-                s.initialPriceE8,
-                1 hours,
-                deployer
+            address adapterAddr = adapterRegistry.adapterOf(priceId);
+            require(
+                adapterAddr != address(0),
+                string.concat(
+                    "Adapter not registered for ",
+                    s.symbol,
+                    " - run Deploy.s.sol first or call registry.register()"
+                )
             );
-            adapter.setKeeper(deployer, true);
-            console2.log(string.concat("  Adapter ", s.symbol, ":"), address(adapter));
+            console2.log(string.concat("  Adapter ", s.symbol, ":"), adapterAddr);
 
             wethVault.listAsset(
                 tokenAddr,
-                address(adapter),
+                adapterAddr,
                 s.ltvBps,
                 s.liqThresholdBps,
                 1 hours

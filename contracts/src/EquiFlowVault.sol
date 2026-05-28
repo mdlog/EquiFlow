@@ -5,12 +5,18 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {IInterestRateModel} from "./interest/IInterestRateModel.sol";
 
 interface IConfidenceOracle {
     function confidence() external view returns (uint64);
+    /// @notice M-03 fix (2026-05 pass 6): freshness stamp for the cached
+    ///         confidence value. The vault enforces this so a stale-tolerant
+    ///         price-read path cannot leave `_enforceConfidence` reading
+    ///         authoritative-looking but stale defense-layer data.
+    function confidenceUpdatedAt() external view returns (uint256);
 }
 
 /// @title EquiFlowVault — pledge tokenized stocks, borrow USDC against them
@@ -26,7 +32,10 @@ interface IConfidenceOracle {
 ///         (PYUSD-grade regulated stablecoin) gates transferFrom on a registry
 ///         the vault isn't whitelisted in. LP transfers USDG to vault via
 ///         their wallet first, then calls register(amount) to mint shares.
-contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
+/// @notice L-01 fix (2026-05 pass 4): inherits `Ownable2Step` so ownership
+///         rotation requires the new owner to actively `acceptOwnership`.
+///         A single-key compromise cannot instantly hand the protocol off.
+contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
     // ─── Constants ───────────────────────────────────────────────────────
@@ -43,6 +52,33 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
     uint256 public constant MAX_BORROW_RATE_BPS = 5_000; // 50% APR
     /// @notice Hard ceiling on protocol's interest cut. Aave/Compound typically 10-30%.
     uint256 public constant MAX_RESERVE_FACTOR_BPS = 5_000; // 50%
+    /// @notice N-1 fix (2026-05 deep-dive): hard gas cap on every external
+    ///         `irm.getBorrowRate` call. Solidity's try/catch only catches
+    ///         reverts — it does NOT bound the gas forwarded to the callee.
+    ///         A grief IRM that infinite-loops would OOG ~63/64 of the
+    ///         parent transaction's gas without this cap. KinkedRateModel
+    ///         uses ~2k gas; 100k is comfortable headroom for any sane IRM.
+    uint256 public constant IRM_CALL_GAS_LIMIT = 100_000;
+    /// @notice N-3 fix (2026-05 deep-dive): `executeWriteOffBadDebt` permits
+    ///         total collateral value below this threshold so a borrower
+    ///         cannot DoS the write-off by front-running with a 1-wei pledge.
+    ///         $0.01 (1e16 in 1e18 USD scale) is small enough to ignore yet
+    ///         large enough to prevent rounding from accidentally allowing
+    ///         meaningful collateral through.
+    uint256 public constant WRITEOFF_COLLATERAL_DUST_USD = 1e16;
+    /// @notice N-6 fix (2026-05 deep-dive): floor on closeFactorBps so a
+    ///         compromised owner key cannot grief liquidations by setting
+    ///         the close factor to e.g. 1 bps (0.01%) — clearing a $1000
+    ///         underwater position would otherwise require 10,000
+    ///         sequential liquidate calls and the market would die.
+    ///         10% matches the lower bound seen in Aave / Compound.
+    uint256 public constant MIN_CLOSE_FACTOR_BPS = 1_000;
+    /// @notice T-1 fix (2026-05 pass 3): floor on liquidationBonusBps so a
+    ///         compromised owner key cannot grind it to 0, leaving external
+    ///         liquidators net-negative on gas and halting the liquidation
+    ///         market. Symmetric with `MIN_CLOSE_FACTOR_BPS`. 1% comfortably
+    ///         covers Arbitrum L2 gas at any realistic position size.
+    uint256 public constant MIN_LIQUIDATION_BONUS_BPS = 100;
 
     // ─── Types ───────────────────────────────────────────────────────────
     struct Asset {
@@ -166,6 +202,30 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
     /// @notice Delay between scheduleWithdrawLiquidity and executeWithdrawLiquidity.
     uint256 public constant OWNER_WITHDRAW_DELAY = 24 hours;
 
+    // ── Bad-debt write-off timelock (M-05, 2026-05 audit) ──
+    /// @notice M-05 fix: socialising bad debt to LPs now requires a
+    ///         scheduled + 24h-delayed execution so a compromised owner
+    ///         key cannot instantly cancel a confederate borrower's debt.
+    struct PendingBadDebt {
+        address user;
+        uint256 readyAt;
+    }
+    PendingBadDebt public pendingBadDebt;
+
+    // ── LP-economics widening timelocks (N-7, 2026-05 deep-dive) ──
+    /// @notice N-7 fix: parameter changes that EXPAND LP risk or fees go
+    ///         through the same 24h queue as `OWNER_WITHDRAW_DELAY`. The
+    ///         direct setters now only allow NARROWING (lower fees / smaller
+    ///         caps / tighter bonus). This matches the long-standing
+    ///         `updateAssetRiskParams` / `scheduleAssetWiden` split.
+    struct PendingParam {
+        uint256 value;
+        uint256 readyAt;
+    }
+    PendingParam public pendingReserveFactor;
+    PendingParam public pendingLiquidationBonus;
+    mapping(address token => PendingParam) public pendingBorrowCap;
+
     // ── Asset listing protection (H-3) ──
     /// @notice Once an asset is listed, only narrowing edits (lower LTV, lower
     ///         liqThreshold, longer staleAfter) are permitted via
@@ -191,6 +251,7 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
         uint64 staleAfter
     );
     event AssetDisabled(address indexed token);
+    event AssetDelisted(address indexed token);
     event Pledged(
         address indexed user,
         address indexed token,
@@ -225,9 +286,23 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
     event DepositIntentCreated(address indexed lp, uint256 amount, uint256 deadline);
     event DepositIntentCancelled(address indexed lp);
     event BadDebtWrittenOff(address indexed user, uint256 debtUsd, uint256 fromReserves, uint256 fromLp);
+    event BadDebtWriteOffScheduled(address indexed user, uint256 readyAt);
+    event BadDebtWriteOffCancelled(address indexed user);
+    event ReserveFactorScheduled(uint256 newBps, uint256 readyAt);
+    /// @notice T-2 fix (2026-05 pass 3): event carries the cancelled pending
+    ///         value so indexers do not need to remember the scheduled value.
+    event ReserveFactorCancelled(uint256 cancelledBps);
+    event LiquidationBonusScheduled(uint256 newBps, uint256 readyAt);
+    event LiquidationBonusCancelled(uint256 cancelledBps);
+    event BorrowCapScheduled(address indexed token, uint256 newCap, uint256 readyAt);
+    event BorrowCapCancelled(address indexed token, uint256 cancelledCap);
     event IrmScheduled(address indexed irm, uint256 readyAt);
     event IrmExecuted(address indexed previous, address indexed current);
     event IrmCancelled();
+    /// @notice T-3 fix (2026-05 pass 3): distinct event for the emergency
+    ///         `forceClearIrm` rescue path so indexers / monitoring can
+    ///         distinguish it from the timelocked `executeIrm` swap.
+    event IrmForceCleared(address indexed previous);
     event OwnerWithdrawScheduled(uint256 amount, address indexed to, uint256 readyAt);
     event OwnerWithdrawExecuted(uint256 amount, address indexed to);
     event OwnerWithdrawCancelled();
@@ -282,6 +357,22 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
     error WithdrawNotReady();
     error IrmNotReady();
     error IrmInvalid();
+    error BadDebtNotReady();
+    error CloseFactorTooLow();
+    error LiquidationBonusTooLow();
+    error ReserveFactorNotReady();
+    error LiquidationBonusNotReady();
+    error BorrowCapNotReady();
+    /// @notice M-04 fix (2026-05 pass 4): liquidator must pay at least 1
+    ///         USDG unit. Without this, dust `debtUsdToRepay` rounds the
+    ///         USDG charge to zero while still seizing non-zero collateral.
+    error LiquidationDust();
+    /// @notice N-8 fix (2026-05 pass 6): `delistAsset` requires the asset
+    ///         to be disabled first.
+    error AssetNotDisabled();
+    /// @notice N-8 fix (2026-05 pass 6): cannot delist an asset that still
+    ///         backs outstanding LP exposure.
+    error HasOutstandingDebt(uint256 amount);
 
     // ─── Constructor ─────────────────────────────────────────────────────
     constructor(
@@ -407,6 +498,53 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
         emit AssetDisabled(token);
     }
 
+    /// @notice N-8 fix (2026-05 pass 6): permanently remove an asset from
+    ///         `assetList` via swap-and-pop. Necessary because the M-01
+    ///         fix added O(n) loops to `_accrueInterest` and
+    ///         `_snapshotUserDebt`; without delist, `assetList` is
+    ///         monotonically growing and a sloppy owner could spam
+    ///         `listAsset` to bloat per-tx gas.
+    ///
+    ///         Safety guards:
+    ///           1. Asset must have been disabled first (`disableAsset`).
+    ///              Forces an explicit two-step intent.
+    ///           2. `totalBorrowedByAsset[token] == 0` — no outstanding LP
+    ///              exposure attributed to this asset. Index-scaled by
+    ///              M-01 so this includes accrued interest, not just
+    ///              principal.
+    ///
+    ///         After delist, `assets[token]` is fully reset so the slot
+    ///         can be re-used by a future `listAsset` call.
+    ///
+    ///         The asset's `borrowCapUsd` mapping is cleared. The
+    ///         `tokenDecimals` cache is left in place — it's a pure-data
+    ///         optimisation and a re-list would just overwrite it.
+    function delistAsset(address token) external onlyOwner {
+        Asset memory a = assets[token];
+        if (address(a.priceFeed) == address(0)) revert AssetNotEnabled();
+        if (a.enabled) revert AssetNotDisabled();
+        uint256 outstanding = totalBorrowedByAsset[token];
+        if (outstanding != 0) revert HasOutstandingDebt(outstanding);
+
+        // Swap-and-pop from assetList.
+        uint256 n = assetList.length;
+        for (uint256 i; i < n; ++i) {
+            if (assetList[i] == token) {
+                if (i != n - 1) {
+                    assetList[i] = assetList[n - 1];
+                }
+                assetList.pop();
+                break;
+            }
+        }
+
+        // Reset slot so the asset can be re-listed cleanly.
+        delete assets[token];
+        delete borrowCapUsd[token];
+
+        emit AssetDelisted(token);
+    }
+
     /// @notice Update annual borrow rate. Accrues pending interest at the old
     ///         rate first so the change is forward-looking only.
     ///
@@ -427,12 +565,22 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
     ///         risk-affecting parameter changes so borrowers can observe
     ///         and react before the new curve goes live.
     ///
-    ///         The proposed model is sanity-called once (getBorrowRate(0))
-    ///         at schedule time to reject obviously-broken deploys early.
+    ///         M-02 fix (2026-05 audit): probes the candidate IRM across
+    ///         five utilisation buckets (0, 25%, 50%, 85%, 100%), not just
+    ///         u=0. A malicious model that only behaves at u=0 could
+    ///         otherwise install and brick every subsequent accrual. Each
+    ///         returned rate is also bounded against `2 × MAX_BORROW_RATE_BPS`
+    ///         to reject obviously absurd values before commit.
     function scheduleIrm(address newIrm) external onlyOwner {
         if (newIrm == address(0)) revert IrmInvalid();
-        // Sanity probe: any conforming model must accept utilization=0.
-        IInterestRateModel(newIrm).getBorrowRate(0);
+        uint256[5] memory testU = [uint256(0), 2_500, 5_000, 8_500, 10_000];
+        for (uint256 i; i < 5; ++i) {
+            // N-1 fix: same gas cap as the runtime call, so a grief IRM
+            // that infinite-loops cannot install by tricking the owner into
+            // burning hundreds of millions of gas on schedule.
+            uint256 r = IInterestRateModel(newIrm).getBorrowRate{gas: IRM_CALL_GAS_LIMIT}(testU[i]);
+            require(r <= MAX_BORROW_RATE_BPS * 2, "irm rate insane");
+        }
         pendingIrm = PendingIrm({
             irm: newIrm,
             readyAt: block.timestamp + OWNER_WITHDRAW_DELAY
@@ -458,24 +606,81 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
         emit IrmCancelled();
     }
 
+    /// @notice M-02 fix (2026-05 audit): emergency rescue when an installed
+    ///         IRM bricks `_accrueInterest`. Clears `irm` to address(0)
+    ///         WITHOUT calling `_accrueInterest` first, so a misbehaving
+    ///         model cannot block its own removal. The vault falls back to
+    ///         the legacy flat `borrowRateBps` until a new IRM is scheduled
+    ///         and executed.
+    function forceClearIrm() external onlyOwner {
+        address prev = address(irm);
+        irm = IInterestRateModel(address(0));
+        delete pendingIrm;
+        emit IrmForceCleared(prev);
+    }
+
     /// @dev Resolves the rate to use for the current accrual step.
     ///      When an IRM is wired in, this delegates to it and clamps the
     ///      result against MAX_BORROW_RATE_BPS regardless of what the
     ///      model returns (defense in depth — a buggy IRM cannot push
     ///      rates above the protocol cap).
+    ///
+    ///      M-02 fix (2026-05 audit): wrapped in try/catch so a revert from
+    ///      a misbehaving IRM falls back to the legacy `borrowRateBps`
+    ///      instead of bricking the vault. The `forceClearIrm` rescue
+    ///      remains as a hard-clear path for operations.
     function _currentBorrowRateBps() internal view returns (uint256) {
         if (address(irm) == address(0)) return borrowRateBps;
-        uint256 raw = irm.getBorrowRate(utilizationBps());
-        return raw > MAX_BORROW_RATE_BPS ? MAX_BORROW_RATE_BPS : raw;
+        // N-1 fix (2026-05 deep-dive): cap forwarded gas so a grief IRM
+        // that infinite-loops to OOG cannot also consume the parent tx's
+        // 63/64 leftover. try/catch returns the legacy rate; the outer tx
+        // keeps ~all its gas.
+        try irm.getBorrowRate{gas: IRM_CALL_GAS_LIMIT}(utilizationBps()) returns (uint256 raw) {
+            return raw > MAX_BORROW_RATE_BPS ? MAX_BORROW_RATE_BPS : raw;
+        } catch {
+            return borrowRateBps;
+        }
     }
 
     /// @notice Update protocol's interest cut. Accrues at the old factor first.
+    ///         N-7 fix (2026-05 deep-dive): direct path is narrow-only —
+    ///         the new factor must be ≤ the current one. Widening (raising
+    ///         the protocol's cut) traverses `scheduleReserveFactorBps` →
+    ///         24h → `executeReserveFactorBps` so LPs can exit first.
     function setReserveFactorBps(uint256 newBps) external onlyOwner {
-        if (newBps > MAX_RESERVE_FACTOR_BPS) revert ReserveFactorTooHigh();
+        if (newBps > reserveFactorBps) revert NarrowOnly();
         _accrueInterest();
         uint256 old = reserveFactorBps;
         reserveFactorBps = newBps;
         emit ReserveFactorSet(old, newBps);
+    }
+
+    /// @notice Schedule a widening of the reserve factor (raises the
+    ///         protocol's cut of interest). 24h delay so LPs see the change
+    ///         and can withdraw before it takes effect.
+    function scheduleReserveFactorBps(uint256 newBps) external onlyOwner {
+        if (newBps > MAX_RESERVE_FACTOR_BPS) revert ReserveFactorTooHigh();
+        pendingReserveFactor = PendingParam({
+            value: newBps,
+            readyAt: block.timestamp + OWNER_WITHDRAW_DELAY
+        });
+        emit ReserveFactorScheduled(newBps, block.timestamp + OWNER_WITHDRAW_DELAY);
+    }
+
+    function cancelReserveFactorBps() external onlyOwner {
+        uint256 cancelled = pendingReserveFactor.value;
+        delete pendingReserveFactor;
+        emit ReserveFactorCancelled(cancelled);
+    }
+
+    function executeReserveFactorBps() external onlyOwner {
+        PendingParam memory p = pendingReserveFactor;
+        if (p.readyAt == 0 || block.timestamp < p.readyAt) revert ReserveFactorNotReady();
+        _accrueInterest();
+        uint256 old = reserveFactorBps;
+        reserveFactorBps = p.value;
+        delete pendingReserveFactor;
+        emit ReserveFactorSet(old, p.value);
     }
 
     function setTreasury(address newTreasury) external onlyOwner {
@@ -496,10 +701,46 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
 
     /// @notice Set the maximum total USD borrowable against a given collateral
     ///         token. 0 = unlimited. Units: 1e18 USD.
+    ///         N-7 fix (2026-05 deep-dive): direct path is narrowing-only.
+    ///         "Narrowing" means moving toward a stricter cap:
+    ///           - from 0 (unlimited) → any positive cap is narrowing
+    ///           - from a positive cap → a strictly smaller positive cap
+    ///         Widening (raising the cap, or relaxing to unlimited) must
+    ///         go through `scheduleBorrowCap`.
     function setBorrowCap(address token, uint256 capUsd) external onlyOwner {
         uint256 old = borrowCapUsd[token];
+        if (old == 0) {
+            // Currently unlimited; only a positive cap is a narrowing change.
+            if (capUsd == 0) revert AmountZero();
+        } else {
+            // Currently capped; only a STRICTLY tighter positive cap is allowed.
+            if (capUsd == 0 || capUsd >= old) revert NarrowOnly();
+        }
         borrowCapUsd[token] = capUsd;
         emit BorrowCapSet(token, old, capUsd);
+    }
+
+    function scheduleBorrowCap(address token, uint256 capUsd) external onlyOwner {
+        pendingBorrowCap[token] = PendingParam({
+            value: capUsd,
+            readyAt: block.timestamp + OWNER_WITHDRAW_DELAY
+        });
+        emit BorrowCapScheduled(token, capUsd, block.timestamp + OWNER_WITHDRAW_DELAY);
+    }
+
+    function cancelBorrowCap(address token) external onlyOwner {
+        uint256 cancelled = pendingBorrowCap[token].value;
+        delete pendingBorrowCap[token];
+        emit BorrowCapCancelled(token, cancelled);
+    }
+
+    function executeBorrowCap(address token) external onlyOwner {
+        PendingParam memory p = pendingBorrowCap[token];
+        if (p.readyAt == 0 || block.timestamp < p.readyAt) revert BorrowCapNotReady();
+        uint256 old = borrowCapUsd[token];
+        borrowCapUsd[token] = p.value;
+        delete pendingBorrowCap[token];
+        emit BorrowCapSet(token, old, p.value);
     }
 
     function pause() external onlyOwner {
@@ -510,15 +751,50 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
         _unpause();
     }
 
+    /// @notice N-7 fix (2026-05 deep-dive): direct path is narrow-only —
+    ///         decreases (less punitive bonus) are immediate; increases go
+    ///         through `scheduleLiquidationBonus` so liquidatees can see
+    ///         the change before it hits.
+    ///         T-1 fix (2026-05 pass 3): floor at MIN_LIQUIDATION_BONUS_BPS
+    ///         so a compromised owner cannot grind the bonus to 0 and brick
+    ///         external liquidators.
     function setLiquidationBonus(uint256 newBps) external onlyOwner {
-        require(newBps <= 2_000, "bonus>20%");
+        if (newBps < MIN_LIQUIDATION_BONUS_BPS) revert LiquidationBonusTooLow();
+        if (newBps > liquidationBonusBps) revert NarrowOnly();
         uint256 old = liquidationBonusBps;
         liquidationBonusBps = newBps;
         emit LiquidationBonusSet(old, newBps);
     }
 
+    function scheduleLiquidationBonus(uint256 newBps) external onlyOwner {
+        if (newBps < MIN_LIQUIDATION_BONUS_BPS) revert LiquidationBonusTooLow();
+        require(newBps <= 2_000, "bonus>20%");
+        pendingLiquidationBonus = PendingParam({
+            value: newBps,
+            readyAt: block.timestamp + OWNER_WITHDRAW_DELAY
+        });
+        emit LiquidationBonusScheduled(newBps, block.timestamp + OWNER_WITHDRAW_DELAY);
+    }
+
+    function cancelLiquidationBonus() external onlyOwner {
+        uint256 cancelled = pendingLiquidationBonus.value;
+        delete pendingLiquidationBonus;
+        emit LiquidationBonusCancelled(cancelled);
+    }
+
+    function executeLiquidationBonus() external onlyOwner {
+        PendingParam memory p = pendingLiquidationBonus;
+        if (p.readyAt == 0 || block.timestamp < p.readyAt) revert LiquidationBonusNotReady();
+        uint256 old = liquidationBonusBps;
+        liquidationBonusBps = p.value;
+        delete pendingLiquidationBonus;
+        emit LiquidationBonusSet(old, p.value);
+    }
+
     function setCloseFactor(uint256 newBps) external onlyOwner {
-        require(newBps > 0 && newBps <= BPS, "bad close factor");
+        // N-6 fix: enforce a sensible floor so liquidations remain economic.
+        if (newBps < MIN_CLOSE_FACTOR_BPS) revert CloseFactorTooLow();
+        require(newBps <= BPS, "bad close factor");
         uint256 old = closeFactorBps;
         closeFactorBps = newBps;
         emit CloseFactorSet(old, newBps);
@@ -542,32 +818,64 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
         emit ReservesClaimed(treasury, amountUsdg, amountUsd);
     }
 
-    /// @notice CRIT-11 fix: write off uncollectible debt for a user whose
-    ///         collateral is zero across all assets. Charges
-    ///         `protocolReserves` first (so the protocol's cut takes the hit
-    ///         before LPs), then socializes any remainder to LP share value
-    ///         via `socializedBadDebtUsd`.
+    /// @notice M-05 fix (2026-05 audit): schedule a bad-debt write-off.
+    ///         The actual loss-socialisation runs after `OWNER_WITHDRAW_DELAY`
+    ///         so LPs can observe and react before being made whole at
+    ///         their own expense.
+    function scheduleWriteOffBadDebt(address user) external onlyOwner {
+        if (user == address(0)) revert ZeroAddress();
+        pendingBadDebt = PendingBadDebt({
+            user: user,
+            readyAt: block.timestamp + OWNER_WITHDRAW_DELAY
+        });
+        emit BadDebtWriteOffScheduled(user, block.timestamp + OWNER_WITHDRAW_DELAY);
+    }
+
+    function cancelWriteOffBadDebt() external onlyOwner {
+        address user = pendingBadDebt.user;
+        delete pendingBadDebt;
+        emit BadDebtWriteOffCancelled(user);
+    }
+
+    /// @notice M-05 fix (2026-05 audit): execute a previously-scheduled bad
+    ///         debt write-off. `user` is passed explicitly so the operator
+    ///         signs intent against a specific borrower (defense in depth
+    ///         against a confused-deputy reschedule + execute race).
+    ///
+    ///         CRIT-11 path (unchanged): charges `protocolReserves` first,
+    ///         then socializes any remainder to LP share value via
+    ///         `socializedBadDebtUsd`.
     ///
     ///         Sequence:
-    ///           1. Accrue interest so the write-off includes any pending
+    ///           1. Validate the timelock — `pendingBadDebt` matches `user`
+    ///              and `readyAt` has elapsed.
+    ///           2. Accrue interest so the write-off includes any pending
     ///              accumulation.
-    ///           2. Snapshot the user so we see their current debt.
-    ///           3. Require all collateral mappings == 0 (no asset they
+    ///           3. Snapshot the user so we see their current debt.
+    ///           4. Require all collateral mappings == 0 (no asset they
     ///              still backstop is left to seize).
-    ///           4. Subtract the user's debt from totalBorrowedUsd and
+    ///           5. Subtract the user's debt from totalBorrowedUsd and
     ///              clear it from the user's Position.
-    ///           5. Charge reserves first, then bump socializedBadDebtUsd.
-    function writeOffBadDebt(address user) external onlyOwner nonReentrant {
+    ///           6. Charge reserves first, then bump socializedBadDebtUsd.
+    function executeWriteOffBadDebt(address user) external onlyOwner nonReentrant {
+        PendingBadDebt memory p = pendingBadDebt;
+        if (p.user == address(0) || p.user != user || block.timestamp < p.readyAt) {
+            revert BadDebtNotReady();
+        }
+        delete pendingBadDebt;
+
         _accrueInterest();
         _snapshotUserDebt(user);
 
         uint256 debt = positions[user].borrowed;
         if (debt == 0) revert NotBorrower();
 
-        uint256 n = assetList.length;
-        for (uint256 i; i < n; ++i) {
-            if (collateral[user][assetList[i]] != 0) revert NoCollateral();
-        }
+        // N-3 fix (2026-05 deep-dive): allow dust-level collateral so a
+        // borrower cannot front-run a scheduled write-off by pledging 1 wei
+        // to flip a single per-asset slot non-zero. Sums are taken via
+        // `collateralValueUsd` which uses `_safePriceOrZero` — consistent
+        // with how every other LTV/HF helper values collateral.
+        if (collateralValueUsd(user) >= WRITEOFF_COLLATERAL_DUST_USD) revert NoCollateral();
 
         // Clear debt from global and per-asset counters before charging.
         positions[user].borrowed = 0;
@@ -696,10 +1004,15 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
     }
 
     /// @notice Step 3 of LP deposit (after announceDeposit + USDG transfer).
-    ///         With the CRIT-6 serialisation in `announceDeposit`, the
-    ///         snapshot-delta check below is now unambiguous: only one LP
-    ///         can have an open intent at any moment, so the increase in the
-    ///         vault's USDG balance since announce can only be from this LP.
+    ///         H-01 fix (2026-05 audit): requires `intent.amount == amount`
+    ///         (exact, no over-announcement). The original `<` check let an
+    ///         attacker park a huge intent and claim a victim's smaller
+    ///         direct transfer. Exact-match means an attacker would have to
+    ///         transfer the announced amount themselves to clear the
+    ///         snapshot delta — eliminating the over-announce theft path.
+    ///         The residual case (attacker announces EXACTLY a coincidental
+    ///         victim transfer amount) is the acknowledged audit tradeoff;
+    ///         the only full fix is a permit/whitelist flow on USDG.
     function register(uint256 amount) external nonReentrant whenNotPaused {
         _accrueInterest();
         if (amount == 0) revert AmountZero();
@@ -707,7 +1020,7 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
         DepositIntent memory intent = depositIntents[msg.sender];
         if (intent.amount == 0) revert NoDepositIntent();
         if (block.timestamp > intent.deadline) revert DepositIntentExpired();
-        if (intent.amount < amount) revert DepositIntentAmountMismatch(intent.amount, amount);
+        if (intent.amount != amount) revert DepositIntentAmountMismatch(intent.amount, amount);
 
         uint256 actualBalance = usdc.balanceOf(address(this));
         uint256 deltaSinceAnnounce = actualBalance > intent.snapshotBalance
@@ -995,6 +1308,9 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
         collateral[user][token] -= tokenAmount;
 
         uint256 usdcIn = _usdToUsdc(debtUsdToRepay);
+        // M-04 fix (2026-05 pass 4): refuse the call rather than let a
+        // liquidator seize collateral while paying 0 USDG due to rounding.
+        if (usdcIn == 0) revert LiquidationDust();
         // M-5 fix: balance-delta accounting for fee-on-transfer safety.
         uint256 before = usdc.balanceOf(address(this));
         usdc.safeTransferFrom(msg.sender, address(this), usdcIn);
@@ -1277,11 +1593,23 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
         uint64 maxWidth = maxConfWidthBps[token];
         if (maxWidth == 0) return;
         Asset memory a = assets[token];
-        uint64 conf = IConfidenceOracle(address(a.priceFeed)).confidence();
+        IConfidenceOracle confOracle = IConfidenceOracle(address(a.priceFeed));
+        uint64 conf = confOracle.confidence();
+        // M-03 fix (2026-05 pass 6): require the cached confidence value
+        // itself to be fresh. Defense-in-depth — independent of whatever
+        // freshness the price-read path enforces.
+        uint256 confUpdatedAt = confOracle.confidenceUpdatedAt();
+        if (block.timestamp > confUpdatedAt && block.timestamp - confUpdatedAt > a.staleAfter) {
+            revert StalePrice();
+        }
         (, int256 answer, , , ) = a.priceFeed.latestRoundData();
         if (answer <= 0) revert InvalidPrice();
-        uint64 actualBps = uint64((uint256(conf) * BPS) / uint256(answer));
-        if (actualBps > maxWidth) revert OracleConfidenceTooWide(actualBps, maxWidth);
+        // Q-1 fix (2026-05 pass 4): compute the ratio in uint256 so an
+        // extreme (conf, answer) pair cannot truncate modulo 2^64 and
+        // mask a wide-confidence read. The error param keeps the uint64
+        // shape for ABI stability; the comparison uses full precision.
+        uint256 actualBps = (uint256(conf) * BPS) / uint256(answer);
+        if (actualBps > maxWidth) revert OracleConfidenceTooWide(uint64(actualBps), maxWidth);
     }
 
     /// @dev Release per-asset borrow cap counters when a user repays or is
@@ -1339,6 +1667,21 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
             borrowIndex += indexDelta;
             totalBorrowedUsd += interest;
             protocolReserves += reserveCut;
+
+            // M-01 fix (2026-05 pass 5): scale per-asset cap counter by the
+            // same growth factor so `borrowCapUsd[t]` becomes a real
+            // debt-inclusive bound, not a principal-only bound. Without
+            // this, a fully-utilised cap silently floats back below the
+            // limit as interest accrues — second borrowers slip in even
+            // while the asset is effectively over-exposed.
+            uint256 n = assetList.length;
+            for (uint256 i; i < n; ++i) {
+                address t = assetList[i];
+                uint256 byAsset = totalBorrowedByAsset[t];
+                if (byAsset == 0) continue;
+                totalBorrowedByAsset[t] = byAsset + (byAsset * growthFactor) / INDEX_DECIMALS;
+            }
+
             emit InterestAccrued(interest, reserveCut, borrowIndex, totalBorrowedUsd);
         }
         lastAccruedAt = block.timestamp;
@@ -1379,6 +1722,20 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
         uint256 snap = borrowSnapshotIndex[user];
         if (snap != 0 && snap != borrowIndex) {
             p.borrowed = (p.borrowed * borrowIndex) / snap;
+
+            // M-01 fix (2026-05 pass 5): scale per-user per-asset
+            // attribution by the same index ratio so the sum across the
+            // user's assets stays consistent with `positions[user].borrowed`.
+            // Without this, `_releaseAssetBorrows` clamps each release to a
+            // stale principal-only userAmt and the per-user counter drifts
+            // upward (cap appears overused) on the global side.
+            uint256 n = assetList.length;
+            for (uint256 i; i < n; ++i) {
+                address t = assetList[i];
+                uint256 userAmt = userBorrowByAsset[user][t];
+                if (userAmt == 0) continue;
+                userBorrowByAsset[user][t] = (userAmt * borrowIndex) / snap;
+            }
         }
         borrowSnapshotIndex[user] = borrowIndex;
     }

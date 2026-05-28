@@ -677,9 +677,11 @@ contract EquiFlowVaultTest is Test {
     }
 
     function test_setLiquidationBonus_rejectsAbove20Pct() public {
+        // N-7 fix: liquidation bonus widening goes through the timelocked
+        // schedule path, and the 20% hard ceiling is enforced there.
         vm.prank(owner);
         vm.expectRevert(bytes("bonus>20%"));
-        vault.setLiquidationBonus(2_001);
+        vault.scheduleLiquidationBonus(2_001);
     }
 
     // ─── L-07: Poke Rate Limiter ────────────────────────────────────────
@@ -1125,12 +1127,16 @@ contract EquiFlowVaultTest is Test {
         vm.prank(bob);
         vault.liquidate(alice, address(tsla), 10e18);
 
-        // If any debt remains and collateral is now 0, owner writes off.
+        // If any debt remains and collateral is now 0, owner writes off via
+        // the M-05 schedule/execute pattern (24h timelock).
         (, uint256 borrowed, ) = vault.positionOf(alice);
         if (borrowed > 0 && vault.collateral(alice, address(tsla)) == 0) {
             uint256 reservesBefore = vault.protocolReserves();
             vm.prank(owner);
-            vault.writeOffBadDebt(alice);
+            vault.scheduleWriteOffBadDebt(alice);
+            vm.warp(block.timestamp + vault.OWNER_WITHDRAW_DELAY());
+            vm.prank(owner);
+            vault.executeWriteOffBadDebt(alice);
             (, uint256 after_, ) = vault.positionOf(alice);
             assertEq(after_, 0, "debt cleared after write-off");
             assertLe(vault.protocolReserves(), reservesBefore);
@@ -1411,4 +1417,935 @@ contract EquiFlowVaultTest is Test {
         assertEq(address(vault.irm()), address(0));
         assertEq(vault.borrowApyBps(), 500);
     }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Audit 2026-05 fixes — H-01, H-02, M-02, M-05
+    // ───────────────────────────────────────────────────────────────────
+
+    /// H-01: an LP holding an "over-announced" intent must NOT be able to
+    /// claim a foreign direct USDG transfer to the vault. The exact-amount
+    /// invariant in `register` rejects the size mismatch.
+    function test_audit_h01_blocksHugeAnnounceSmallRegisterAttack() public {
+        address victim = address(0xC0DEDEAD);
+        usdc.mint(victim, 1_000e6);
+
+        // Attacker (bob) parks a huge intent on the global slot — no transfer.
+        vm.prank(bob);
+        vault.announceDeposit(1_000_000e6);
+
+        // Victim makes a mistaken direct transfer to the vault.
+        vm.prank(victim);
+        usdc.transfer(address(vault), 1_000e6);
+
+        // Attacker tries to claim the victim's 1,000 USDG. With the H-01 fix
+        // (exact intent.amount == requested amount), this reverts.
+        vm.prank(bob);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EquiFlowVault.DepositIntentAmountMismatch.selector,
+                1_000_000e6,
+                1_000e6
+            )
+        );
+        vault.register(1_000e6);
+
+        assertEq(vault.sharesOf(bob), 0, "attacker must not be credited");
+    }
+
+    /// H-01: a pre-announce direct transfer is already neutralised by the
+    /// per-intent snapshot check (snapshot is taken AFTER the foreign
+    /// transfer, so the attacker's later register sees zero delta).
+    /// This regression test pins that property.
+    function test_audit_h01_priorForeignTransferRejectedBySnapshotCheck() public {
+        address victim = address(0xC0DEDEAD);
+        usdc.mint(victim, 1_000e6);
+
+        // Foreign transfer lands BEFORE attacker announces.
+        vm.prank(victim);
+        usdc.transfer(address(vault), 1_000e6);
+
+        // Attacker announces; snapshot captures the post-transfer balance.
+        vm.prank(bob);
+        vault.announceDeposit(1_000e6);
+
+        // Attacker tries to register without funding anything themselves.
+        // Snapshot delta = 0 → revert.
+        vm.prank(bob);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EquiFlowVault.InsufficientTransfer.selector,
+                1_000e6,
+                0
+            )
+        );
+        vault.register(1_000e6);
+    }
+
+/// H-02: a >5% legitimate gap move must NOT permanently freeze positions.
+    /// After DEVIATION_OVERRIDE_DELAY the keeper can push the new price via
+    /// forceUpdatePrice, even if the deviation guard would otherwise reject.
+    function test_audit_h02_forceUpdatePriceBypassesDeviationAfterDelay() public {
+        bytes32 priceId = bytes32(uint256(0xBEEF));
+        PythPriceAdapter feed = new PythPriceAdapter(
+            IPyth(address(pyth)),
+            priceId,
+            "TEST/USD",
+            100_00000000,
+            1 hours,
+            owner
+        );
+        vm.startPrank(owner);
+        feed.setKeeper(owner, true);
+
+        // A +20% gap move (well above the 5% default cap) is rejected.
+        vm.warp(block.timestamp + 1);
+        bytes[] memory data = new bytes[](1);
+        data[0] = _craft(priceId, 120_00000000);
+        vm.expectRevert(bytes("price deviation too large"));
+        feed.updatePrice(data);
+
+        // Calling forceUpdatePrice too soon must also revert — the bypass
+        // requires the previous price to have aged past the override delay
+        // so a key-compromised keeper cannot just instantly skip the cap.
+        bytes[] memory data2 = new bytes[](1);
+        data2[0] = _craft(priceId, 120_00000000);
+        vm.expectRevert(bytes("override too soon"));
+        feed.forceUpdatePrice(data2);
+
+        // After DEVIATION_OVERRIDE_DELAY: forceUpdatePrice succeeds.
+        vm.warp(block.timestamp + feed.DEVIATION_OVERRIDE_DELAY() + 1);
+        bytes[] memory data3 = new bytes[](1);
+        data3[0] = _craft(priceId, 120_00000000);
+        feed.forceUpdatePrice(data3);
+        vm.stopPrank();
+
+        (, int256 answer, , , ) = feed.latestRoundData();
+        assertEq(answer, 120_00000000);
+    }
+
+    /// H-02: forceUpdatePrice must still be keeper-gated.
+    function test_audit_h02_forceUpdatePriceOnlyKeeper() public {
+        bytes32 priceId = bytes32(uint256(0xBEEF));
+        PythPriceAdapter feed = new PythPriceAdapter(
+            IPyth(address(pyth)),
+            priceId,
+            "TEST/USD",
+            100_00000000,
+            1 hours,
+            owner
+        );
+        vm.warp(block.timestamp + 1 hours);
+        bytes[] memory data = new bytes[](1);
+        data[0] = _craft(priceId, 120_00000000);
+        vm.prank(alice);
+        vm.expectRevert(PythPriceAdapter.NotAuthorizedKeeper.selector);
+        feed.forceUpdatePrice(data);
+    }
+
+    /// M-02: scheduleIrm must reject an IRM that reverts at non-zero
+    /// utilisation, because a single-point u=0 probe is bypassable.
+    function test_audit_m02_scheduleIrmRejectsBrickAtNonZeroUtilisation() public {
+        BrickIrm evil = new BrickIrm();
+        vm.prank(owner);
+        vm.expectRevert(bytes("bricked"));
+        vault.scheduleIrm(address(evil));
+    }
+
+    /// M-02: scheduleIrm must reject an IRM that returns an absurd rate at
+    /// some utilisation point.
+    function test_audit_m02_scheduleIrmRejectsInsaneRate() public {
+        InsaneRateIrm bad = new InsaneRateIrm();
+        vm.prank(owner);
+        vm.expectRevert(bytes("irm rate insane"));
+        vault.scheduleIrm(address(bad));
+    }
+
+    /// M-02: even if a stateful IRM passes the multi-point probe and later
+    /// mutates to revert (arm()), the vault must remain operational by
+    /// falling back to the legacy `borrowRateBps`.
+    function test_audit_m02_runtimeFallbackOnIrmRevert() public {
+        StatefulBrickIrm bad = new StatefulBrickIrm();
+        vm.prank(owner);
+        vault.scheduleIrm(address(bad));
+        vm.warp(block.timestamp + vault.OWNER_WITHDRAW_DELAY());
+        _push(tslaFeed, TSLA_PRICE_ID, 348_51000000);
+        _push(aaplFeed, AAPL_PRICE_ID, 217_84000000);
+        vm.prank(owner);
+        vault.executeIrm();
+
+        // IRM now bricks — every getBorrowRate call reverts.
+        bad.arm();
+
+        // Vault must continue functioning by falling back to the legacy rate.
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 5_000e18);
+        (, uint256 borrowed,) = vault.positionOf(alice);
+        assertEq(borrowed, 5_000e18);
+
+        // View-side fallback too.
+        assertEq(vault.borrowApyBps(), vault.borrowRateBps());
+    }
+
+    /// M-02: forceClearIrm provides a final rescue path that does not call
+    /// _accrueInterest, so a bricked IRM can always be removed.
+    function test_audit_m02_forceClearIrmRescuesAfterBrick() public {
+        StatefulBrickIrm bad = new StatefulBrickIrm();
+        vm.prank(owner);
+        vault.scheduleIrm(address(bad));
+        vm.warp(block.timestamp + vault.OWNER_WITHDRAW_DELAY());
+        _push(tslaFeed, TSLA_PRICE_ID, 348_51000000);
+        _push(aaplFeed, AAPL_PRICE_ID, 217_84000000);
+        vm.prank(owner);
+        vault.executeIrm();
+        bad.arm();
+
+        vm.prank(owner);
+        vault.forceClearIrm();
+        assertEq(address(vault.irm()), address(0));
+        // Vault is fully back on the legacy rate.
+        assertEq(vault.borrowApyBps(), vault.borrowRateBps());
+    }
+
+    /// M-05: writeOffBadDebt must traverse the 24h timelock so a compromised
+    /// owner key cannot instantly socialise loss to LPs.
+    function test_audit_m05_writeOffBadDebt_requiresTimelock() public {
+        // Drive alice into bad debt by crashing TSLA and full-liquidating.
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 1e18, 10e18);
+        _push(tslaFeed, TSLA_PRICE_ID, 1_00000000);
+        vm.prank(bob);
+        vault.liquidate(alice, address(tsla), 10e18);
+        // Confirm precondition: alice has debt but zero collateral.
+        assertEq(vault.collateral(alice, address(tsla)), 0);
+
+        // Cannot execute without a prior schedule.
+        vm.prank(owner);
+        vm.expectRevert(EquiFlowVault.BadDebtNotReady.selector);
+        vault.executeWriteOffBadDebt(alice);
+
+        // Schedule the write-off.
+        vm.prank(owner);
+        vault.scheduleWriteOffBadDebt(alice);
+
+        // Cannot execute before the delay.
+        vm.prank(owner);
+        vm.expectRevert(EquiFlowVault.BadDebtNotReady.selector);
+        vault.executeWriteOffBadDebt(alice);
+
+        // After the timelock elapses, the execution succeeds.
+        vm.warp(block.timestamp + vault.OWNER_WITHDRAW_DELAY());
+        vm.prank(owner);
+        vault.executeWriteOffBadDebt(alice);
+        (, uint256 borrowedAfter,) = vault.positionOf(alice);
+        assertEq(borrowedAfter, 0);
+    }
+
+    /// M-05: a scheduled write-off can be cancelled by the owner before the
+    /// timelock elapses (mirrors `cancelWithdrawLiquidity`).
+    function test_audit_m05_writeOffBadDebt_cancellable() public {
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 1e18, 10e18);
+        _push(tslaFeed, TSLA_PRICE_ID, 1_00000000);
+        vm.prank(bob);
+        vault.liquidate(alice, address(tsla), 10e18);
+
+        vm.startPrank(owner);
+        vault.scheduleWriteOffBadDebt(alice);
+        vault.cancelWriteOffBadDebt();
+        vm.warp(block.timestamp + vault.OWNER_WITHDRAW_DELAY());
+        vm.expectRevert(EquiFlowVault.BadDebtNotReady.selector);
+        vault.executeWriteOffBadDebt(alice);
+        vm.stopPrank();
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Audit 2026-05 deep-dive — N-1, N-3, N-6, N-7
+    // ───────────────────────────────────────────────────────────────────
+
+    /// N-1: an IRM whose `getBorrowRate` infinite-loops to OOG must not be
+    /// able to brick the vault. The runtime gas cap on the IRM call lets
+    /// try/catch fall back to the legacy rate without consuming the parent
+    /// transaction's gas budget.
+    function test_audit_n01_runtimeGasCapStopsGrieferIrm() public {
+        StatefulGrieferIrm grief = new StatefulGrieferIrm();
+        vm.prank(owner);
+        vault.scheduleIrm(address(grief)); // well-behaved pre-arm — probes pass
+        vm.warp(block.timestamp + vault.OWNER_WITHDRAW_DELAY());
+        _push(tslaFeed, TSLA_PRICE_ID, 348_51000000);
+        _push(aaplFeed, AAPL_PRICE_ID, 217_84000000);
+        vm.prank(owner);
+        vault.executeIrm();
+
+        // Arm the grief loop. Now any IRM call would infinite-loop without a cap.
+        grief.arm();
+
+        // Normal user op must still succeed — runtime gas cap on the IRM call
+        // means OOG inside the IRM is bounded, try/catch returns legacy rate,
+        // and the outer tx preserves enough gas to finish.
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 5_000e18);
+        (, uint256 borrowed,) = vault.positionOf(alice);
+        assertEq(borrowed, 5_000e18);
+        // View also falls back to the legacy rate.
+        assertEq(vault.borrowApyBps(), vault.borrowRateBps());
+    }
+
+    /// N-1: the multi-point probe in scheduleIrm must also be gas-capped so
+    /// a grief IRM cannot be installed in the first place when the owner
+    /// supplies a normal gas budget. (An owner who deliberately passes
+    /// hundreds of M of gas is out of scope — that's the runtime fallback's
+    /// job above.)
+    function test_audit_n01_scheduleIrmGasCapRejectsGriefer() public {
+        GasGrieferIrm grief = new GasGrieferIrm();
+        vm.prank(owner);
+        vm.expectRevert(); // probe OOGs under the per-call gas cap
+        vault.scheduleIrm(address(grief));
+    }
+
+    /// N-3: a borrower must not be able to DoS executeWriteOffBadDebt by
+    /// front-running with a 1-wei pledge. Dust collateral (< $0.01 value)
+    /// is permitted and the write-off proceeds.
+    function test_audit_n03_executeWriteOffBadDebtAcceptsDustCollateral() public {
+        // Drive alice into bad debt.
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 1e18, 10e18);
+        _push(tslaFeed, TSLA_PRICE_ID, 1_00000000);
+        vm.prank(bob);
+        vault.liquidate(alice, address(tsla), 10e18);
+        assertEq(vault.collateral(alice, address(tsla)), 0);
+        assertGt(vault.borrowedOf(alice), 0);
+
+        // Owner schedules the write-off.
+        vm.prank(owner);
+        vault.scheduleWriteOffBadDebt(alice);
+
+        // Borrower front-runs with a 1-wei pledge to try and trip the
+        // strict-zero check.
+        tsla.mint(alice, 1);
+        vm.startPrank(alice);
+        tsla.approve(address(vault), type(uint256).max);
+        vault.pledgeAndBorrow(address(tsla), 1, 0);
+        vm.stopPrank();
+        assertEq(vault.collateral(alice, address(tsla)), 1);
+
+        // Warp through the timelock and execute. With the N-3 fix, dust
+        // collateral (value < $0.01) does not block the clean-up.
+        vm.warp(block.timestamp + vault.OWNER_WITHDRAW_DELAY());
+        vm.prank(owner);
+        vault.executeWriteOffBadDebt(alice);
+        (, uint256 borrowedAfter,) = vault.positionOf(alice);
+        assertEq(borrowedAfter, 0);
+    }
+
+    /// N-3: above the dust threshold, the writeoff still reverts so the
+    /// owner cannot socialise loss on a user who actually has value to seize.
+    function test_audit_n03_executeWriteOffBadDebtRejectsRealCollateral() public {
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 1e18, 10e18);
+        _push(tslaFeed, TSLA_PRICE_ID, 1_00000000);
+        vm.prank(bob);
+        vault.liquidate(alice, address(tsla), 10e18);
+
+        vm.prank(owner);
+        vault.scheduleWriteOffBadDebt(alice);
+
+        // Alice pledges meaningful collateral ($1 worth — well above $0.01 dust).
+        tsla.mint(alice, 1e18);
+        vm.startPrank(alice);
+        tsla.approve(address(vault), type(uint256).max);
+        vault.pledgeAndBorrow(address(tsla), 1e18, 0);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + vault.OWNER_WITHDRAW_DELAY());
+        // Refresh price so `collateralValueUsd` reads a non-zero value
+        // (stale-feed would have valued at 0 and bypassed the dust check).
+        _push(tslaFeed, TSLA_PRICE_ID, 1_00000000);
+        _push(aaplFeed, AAPL_PRICE_ID, 217_84000000);
+        vm.prank(owner);
+        vm.expectRevert(EquiFlowVault.NoCollateral.selector);
+        vault.executeWriteOffBadDebt(alice);
+    }
+
+    /// N-6: close factor cannot be set below MIN_CLOSE_FACTOR_BPS (10%).
+    /// Protects liquidations from gas-driven death-spiral via dust repays.
+    function test_audit_n06_setCloseFactorRejectsBelowMin() public {
+        vm.prank(owner);
+        vm.expectRevert(EquiFlowVault.CloseFactorTooLow.selector);
+        vault.setCloseFactor(999); // just under 10%
+    }
+
+    function test_audit_n06_setCloseFactorAcceptsAtMin() public {
+        vm.prank(owner);
+        vault.setCloseFactor(1_000);
+        assertEq(vault.closeFactorBps(), 1_000);
+    }
+
+    /// N-7: setReserveFactorBps direct path is narrow-only (decreases only).
+    function test_audit_n07_setReserveFactorBpsNarrowOnly() public {
+        // setUp left reserveFactorBps at 1000 (10%).
+        vm.prank(owner);
+        vm.expectRevert(EquiFlowVault.NarrowOnly.selector);
+        vault.setReserveFactorBps(2_000);
+
+        vm.prank(owner);
+        vault.setReserveFactorBps(500);
+        assertEq(vault.reserveFactorBps(), 500);
+    }
+
+    /// N-7: widening the reserve factor traverses the 24h timelock.
+    function test_audit_n07_reserveFactorBpsWidensViaTimelock() public {
+        vm.prank(owner);
+        vault.scheduleReserveFactorBps(2_500);
+
+        vm.prank(owner);
+        vm.expectRevert(EquiFlowVault.ReserveFactorNotReady.selector);
+        vault.executeReserveFactorBps();
+
+        vm.warp(block.timestamp + vault.OWNER_WITHDRAW_DELAY());
+        vm.prank(owner);
+        vault.executeReserveFactorBps();
+        assertEq(vault.reserveFactorBps(), 2_500);
+    }
+
+    /// N-7: scheduleReserveFactorBps enforces the absolute hard ceiling.
+    function test_audit_n07_scheduleReserveFactorBpsRespectsCeiling() public {
+        // Resolve the constant OUTSIDE the expectRevert block so the view
+        // call isn't what `vm.expectRevert` ends up consuming.
+        uint256 ceiling = vault.MAX_RESERVE_FACTOR_BPS();
+        vm.prank(owner);
+        vm.expectRevert(EquiFlowVault.ReserveFactorTooHigh.selector);
+        vault.scheduleReserveFactorBps(ceiling + 1);
+    }
+
+    /// N-7: setLiquidationBonus direct path is narrow-only.
+    function test_audit_n07_setLiquidationBonusNarrowOnly() public {
+        // setUp default: 500 bps (5%).
+        vm.prank(owner);
+        vm.expectRevert(EquiFlowVault.NarrowOnly.selector);
+        vault.setLiquidationBonus(700);
+
+        vm.prank(owner);
+        vault.setLiquidationBonus(200);
+        assertEq(vault.liquidationBonusBps(), 200);
+    }
+
+    /// N-7: widening the liquidation bonus traverses the 24h timelock.
+    function test_audit_n07_liquidationBonusWidensViaTimelock() public {
+        vm.prank(owner);
+        vault.scheduleLiquidationBonus(1_500);
+
+        vm.prank(owner);
+        vm.expectRevert(EquiFlowVault.LiquidationBonusNotReady.selector);
+        vault.executeLiquidationBonus();
+
+        vm.warp(block.timestamp + vault.OWNER_WITHDRAW_DELAY());
+        vm.prank(owner);
+        vault.executeLiquidationBonus();
+        assertEq(vault.liquidationBonusBps(), 1_500);
+    }
+
+    /// N-7: setBorrowCap allows tightening (raise from 0=unlimited to a
+    /// positive cap, or lower an existing positive cap).
+    function test_audit_n07_setBorrowCapNarrowingPath() public {
+        // 0 (unlimited) → 10k is a narrowing — allowed.
+        vm.prank(owner);
+        vault.setBorrowCap(address(tsla), 10_000e18);
+        assertEq(vault.borrowCapUsd(address(tsla)), 10_000e18);
+
+        // 10k → 5k is a further narrowing — allowed.
+        vm.prank(owner);
+        vault.setBorrowCap(address(tsla), 5_000e18);
+        assertEq(vault.borrowCapUsd(address(tsla)), 5_000e18);
+    }
+
+    /// N-7: setBorrowCap rejects widening (raise cap, or relax to unlimited).
+    function test_audit_n07_setBorrowCapRejectsWiden() public {
+        vm.prank(owner);
+        vault.setBorrowCap(address(tsla), 10_000e18);
+
+        // Raise existing cap — rejected.
+        vm.prank(owner);
+        vm.expectRevert(EquiFlowVault.NarrowOnly.selector);
+        vault.setBorrowCap(address(tsla), 20_000e18);
+
+        // Relax to unlimited (0) — rejected.
+        vm.prank(owner);
+        vm.expectRevert(EquiFlowVault.NarrowOnly.selector);
+        vault.setBorrowCap(address(tsla), 0);
+    }
+
+    /// N-7: widening a borrow cap traverses the 24h timelock.
+    function test_audit_n07_borrowCapWidensViaTimelock() public {
+        vm.prank(owner);
+        vault.setBorrowCap(address(tsla), 10_000e18);
+
+        vm.prank(owner);
+        vault.scheduleBorrowCap(address(tsla), 50_000e18);
+
+        vm.prank(owner);
+        vm.expectRevert(EquiFlowVault.BorrowCapNotReady.selector);
+        vault.executeBorrowCap(address(tsla));
+
+        vm.warp(block.timestamp + vault.OWNER_WITHDRAW_DELAY());
+        vm.prank(owner);
+        vault.executeBorrowCap(address(tsla));
+        assertEq(vault.borrowCapUsd(address(tsla)), 50_000e18);
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Audit 2026-05 pass 3 — T-1, T-2, T-3
+    // ───────────────────────────────────────────────────────────────────
+
+    /// T-1: setLiquidationBonus must reject values below MIN_LIQUIDATION_BONUS_BPS
+    /// (symmetric with N-6's setCloseFactor floor). Prevents owner-key compromise
+    /// from grinding the bonus to 0 and killing external liquidators.
+    function test_audit_t01_setLiquidationBonusRejectsBelowMin() public {
+        // Resolve constants OUTSIDE the expectRevert/prank windows so the
+        // view call doesn't consume the cheat-code state.
+        uint256 floor = vault.MIN_LIQUIDATION_BONUS_BPS();
+
+        vm.prank(owner);
+        vm.expectRevert(EquiFlowVault.LiquidationBonusTooLow.selector);
+        vault.setLiquidationBonus(0);
+
+        vm.prank(owner);
+        vm.expectRevert(EquiFlowVault.LiquidationBonusTooLow.selector);
+        vault.setLiquidationBonus(floor - 1);
+    }
+
+    /// T-1: setLiquidationBonus accepts the floor value.
+    function test_audit_t01_setLiquidationBonusAcceptsAtMin() public {
+        uint256 floor = vault.MIN_LIQUIDATION_BONUS_BPS();
+        vm.prank(owner);
+        vault.setLiquidationBonus(floor);
+        assertEq(vault.liquidationBonusBps(), floor);
+    }
+
+    /// T-1: scheduleLiquidationBonus must also reject values below the floor.
+    /// (A compromised key cannot use the timelock to detour around the floor.)
+    function test_audit_t01_scheduleLiquidationBonusRejectsBelowMin() public {
+        vm.prank(owner);
+        vm.expectRevert(EquiFlowVault.LiquidationBonusTooLow.selector);
+        vault.scheduleLiquidationBonus(0);
+    }
+
+    /// T-2: ReserveFactorCancelled event must carry the pending value so
+    /// indexers do not need state to know what was cancelled.
+    function test_audit_t02_reserveFactorCancelledCarriesPayload() public {
+        vm.prank(owner);
+        vault.scheduleReserveFactorBps(2_500);
+
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit EquiFlowVault.ReserveFactorCancelled(2_500);
+        vm.prank(owner);
+        vault.cancelReserveFactorBps();
+    }
+
+    /// T-2: LiquidationBonusCancelled event must carry the pending value.
+    function test_audit_t02_liquidationBonusCancelledCarriesPayload() public {
+        vm.prank(owner);
+        vault.scheduleLiquidationBonus(1_200);
+
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit EquiFlowVault.LiquidationBonusCancelled(1_200);
+        vm.prank(owner);
+        vault.cancelLiquidationBonus();
+    }
+
+    /// T-2: BorrowCapCancelled event must carry the pending cap value.
+    function test_audit_t02_borrowCapCancelledCarriesPayload() public {
+        vm.prank(owner);
+        vault.scheduleBorrowCap(address(tsla), 99_000e18);
+
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit EquiFlowVault.BorrowCapCancelled(address(tsla), 99_000e18);
+        vm.prank(owner);
+        vault.cancelBorrowCap(address(tsla));
+    }
+
+    /// T-3: forceClearIrm must emit a distinct IrmForceCleared event so
+    /// indexers can distinguish the emergency rescue from the timelocked
+    /// executeIrm path.
+    function test_audit_t03_forceClearIrmEmitsDistinctEvent() public {
+        // Wire a sane IRM first.
+        KinkedRateModel sane = new KinkedRateModel("sane", 100, 500, 4900, 8500);
+        vm.prank(owner);
+        vault.scheduleIrm(address(sane));
+        vm.warp(block.timestamp + vault.OWNER_WITHDRAW_DELAY());
+        _push(tslaFeed, TSLA_PRICE_ID, 348_51000000);
+        _push(aaplFeed, AAPL_PRICE_ID, 217_84000000);
+        vm.prank(owner);
+        vault.executeIrm();
+
+        // Now force-clear and assert the dedicated event fires (not IrmExecuted).
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit EquiFlowVault.IrmForceCleared(address(sane));
+        vm.prank(owner);
+        vault.forceClearIrm();
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Audit 2026-05 pass 4 — Q-1, M-04, L-01
+    // ───────────────────────────────────────────────────────────────────
+
+    /// M-04: liquidate must reject dust `debtUsdToRepay` that rounds usdcIn
+    /// to zero — otherwise an attacker pays nothing and receives a non-zero
+    /// tokenAmount of collateral.
+    function test_audit_m04_liquidateRejectsDust() public {
+        // Drive alice into liquidatable state.
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 19_000e18);
+        _push(tslaFeed, TSLA_PRICE_ID, 174_25500000);
+        assertFalse(vault.isHealthy(alice));
+
+        // 1e11 in 1e18-USD scale = $1e-7. _usdToUsdc(1e11) = 1e11 / 1e12 = 0
+        // for 6-decimal USDG. Pre-fix: liquidator gets free collateral.
+        // Post-M-04: revert with LiquidationDust.
+        vm.prank(bob);
+        vm.expectRevert(EquiFlowVault.LiquidationDust.selector);
+        vault.liquidate(alice, address(tsla), 1e11);
+    }
+
+    /// M-04: a healthy (non-dust) liquidation continues to work — pin
+    /// against accidental over-tightening.
+    function test_audit_m04_liquidateStillWorksAtNormalAmounts() public {
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 19_000e18);
+        _push(tslaFeed, TSLA_PRICE_ID, 174_25500000);
+
+        vm.prank(bob);
+        vault.liquidate(alice, address(tsla), 5_000e18);
+
+        (, uint256 borrowed,) = vault.positionOf(alice);
+        assertApproxEqAbs(borrowed, 14_000e18, 1e18);
+    }
+
+    /// L-01: ownership transfer must be two-step — the new owner has to
+    /// explicitly accept before the rotation takes effect.
+    function test_audit_l01_ownershipIsTwoStep() public {
+        address newOwner = address(0xCAFE);
+
+        vm.prank(owner);
+        vault.transferOwnership(newOwner);
+
+        // Owner has NOT changed yet — pendingOwner is set.
+        assertEq(vault.owner(), owner);
+        assertEq(vault.pendingOwner(), newOwner);
+
+        // New owner accepts.
+        vm.prank(newOwner);
+        vault.acceptOwnership();
+
+        assertEq(vault.owner(), newOwner);
+        assertEq(vault.pendingOwner(), address(0));
+    }
+
+    /// L-01: a random address cannot accept the pending transfer.
+    function test_audit_l01_onlyPendingOwnerCanAccept() public {
+        address newOwner = address(0xCAFE);
+
+        vm.prank(owner);
+        vault.transferOwnership(newOwner);
+
+        vm.prank(alice);
+        vm.expectRevert();
+        vault.acceptOwnership();
+
+        // Original owner still controls the vault.
+        assertEq(vault.owner(), owner);
+    }
+
+    /// L-01: same two-step pattern on the PythPriceAdapter.
+    function test_audit_l01_adapterOwnershipIsTwoStep() public {
+        address newOwner = address(0xDEAD);
+
+        vm.prank(owner);
+        tslaFeed.transferOwnership(newOwner);
+
+        assertEq(tslaFeed.owner(), owner);
+        assertEq(tslaFeed.pendingOwner(), newOwner);
+
+        vm.prank(newOwner);
+        tslaFeed.acceptOwnership();
+
+        assertEq(tslaFeed.owner(), newOwner);
+    }
+
+    /// Q-1: regression — the existing confidence-too-wide check still fires
+    /// correctly after switching the internal computation to uint256. This
+    /// is a basic invariant that the truncation change must not break.
+    /// We assert the full encoded error (200 bps actual, 100 bps cap) so
+    /// the uint256→uint64 cast for the error param is also verified.
+    function test_audit_q01_confidenceCheckStillFiresAfterUint256Switch() public {
+        vm.prank(owner);
+        vault.setMaxConfidenceWidth(address(tsla), 100); // 1%
+
+        // conf = 7e8 (= $7) on a $348 price → ~2% width, above the 1% cap.
+        _pushWithConf(tslaFeed, TSLA_PRICE_ID, 348_51000000, 7_00000000);
+
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EquiFlowVault.OracleConfidenceTooWide.selector,
+                uint64(200),
+                uint64(100)
+            )
+        );
+        vault.pledgeAndBorrow(address(tsla), 100e18, 10_000e18);
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Audit 2026-05 pass 5 — M-01 (per-asset cap accrual)
+    // ───────────────────────────────────────────────────────────────────
+
+    /// M-01: per-asset cap counter must grow with accrued interest, not
+    /// stay frozen at principal. Otherwise a fully-utilised cap silently
+    /// goes back below the limit as interest accumulates and the cap is
+    /// no longer a real risk bound.
+    function test_audit_m01_borrowCapTracksAccruedInterest() public {
+        vm.prank(owner);
+        vault.setBorrowCap(address(tsla), 10_000e18);
+
+        // Alice fills the cap at principal.
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 10_000e18);
+        (, uint256 usedAtBorrow) = vault.borrowCapInfo(address(tsla));
+        assertEq(usedAtBorrow, 10_000e18, "principal recorded");
+
+        // One year passes at the 5% flat rate from setUp. Accrued interest
+        // should push debt above $10k.
+        vm.warp(block.timestamp + 365 days);
+        _push(tslaFeed, TSLA_PRICE_ID, 348_51000000);
+        _push(aaplFeed, AAPL_PRICE_ID, 217_84000000);
+        vault.pokeInterest();
+
+        (, uint256 usedAfterAccrual) = vault.borrowCapInfo(address(tsla));
+        assertGt(
+            usedAfterAccrual,
+            10_000e18,
+            "cap counter must grow with interest"
+        );
+        // ~5% APR on $10k ≈ $500 (allowing some compound). Bound the upper
+        // side so the scaling factor isn't crazy off either.
+        assertLt(usedAfterAccrual, 11_000e18, "growth bounded by APR");
+    }
+
+    /// M-01: a second borrower CANNOT slip in under the cap after the cap
+    /// counter has grown past the cap via accrued interest.
+    function test_audit_m01_cappedAssetRejectsNewBorrowAfterInterest() public {
+        vm.prank(owner);
+        vault.setBorrowCap(address(tsla), 10_000e18);
+
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 10_000e18);
+
+        // Significant accrual to push debt above cap.
+        vm.warp(block.timestamp + 365 days);
+        _push(tslaFeed, TSLA_PRICE_ID, 348_51000000);
+        _push(aaplFeed, AAPL_PRICE_ID, 217_84000000);
+
+        tsla.mint(bob, 100e18);
+        vm.startPrank(bob);
+        tsla.approve(address(vault), type(uint256).max);
+        vm.expectRevert(); // BorrowCapExceeded — accrual + new borrow > cap
+        vault.pledgeAndBorrow(address(tsla), 100e18, MIN_BORROW_USD_HELPER());
+        vm.stopPrank();
+    }
+
+    /// Helper so the second-borrow test reads cleanly; MIN_BORROW_USD = $10
+    /// from the vault constants. Defined as a function to avoid `vm.prank`
+    /// being consumed by the view call to `vault.MIN_BORROW_USD()`.
+    function MIN_BORROW_USD_HELPER() internal pure returns (uint256) {
+        return 10e18;
+    }
+
+    /// M-01: full repay still drains the per-asset counter to zero, even
+    /// after interest has accrued — no leak.
+    function test_audit_m01_repayMaxStillFullyDrainsAfterAccrual() public {
+        vm.prank(owner);
+        vault.setBorrowCap(address(tsla), 10_000e18);
+
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 5_000e18);
+
+        vm.warp(block.timestamp + 90 days);
+        _push(tslaFeed, TSLA_PRICE_ID, 348_51000000);
+        _push(aaplFeed, AAPL_PRICE_ID, 217_84000000);
+
+        // Mint enough USDC to cover principal + accrued interest.
+        usdc.mint(alice, 1_000e6);
+
+        vm.prank(alice);
+        vault.repayMax();
+
+        (, uint256 usedAfter) = vault.borrowCapInfo(address(tsla));
+        assertEq(usedAfter, 0, "cap counter zeroed after full repay");
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // Audit 2026-05 pass 6 — M-03 (confidence freshness) + N-8 (delistAsset)
+    // ───────────────────────────────────────────────────────────────────
+
+    /// M-03: the adapter must expose `confidenceUpdatedAt()` so the vault's
+    /// `_enforceConfidence` can validate freshness of the cached confidence
+    /// value independently of the price-reading path.
+    function test_audit_m03_adapterExposesConfidenceUpdatedAt() public {
+        vm.warp(block.timestamp + 500);
+        uint256 pushTime = block.timestamp + 1; // _push warps +1 internally
+        _push(tslaFeed, TSLA_PRICE_ID, 348_51000000);
+
+        uint256 confTs = tslaFeed.confidenceUpdatedAt();
+        assertEq(confTs, pushTime, "confidenceUpdatedAt tracks publishTime");
+    }
+
+    /// M-03: regression — the existing confidence-cap check still rejects
+    /// wide confidence after switching to the timestamp-bearing interface.
+    function test_audit_m03_confidenceWideCheckStillRejects() public {
+        vm.prank(owner);
+        vault.setMaxConfidenceWidth(address(tsla), 100); // 1%
+
+        // conf = 7e8 (= $7) on a $348 price → ~2% width, above the 1% cap.
+        _pushWithConf(tslaFeed, TSLA_PRICE_ID, 348_51000000, 7_00000000);
+
+        vm.prank(alice);
+        vm.expectRevert(); // OracleConfidenceTooWide
+        vault.pledgeAndBorrow(address(tsla), 100e18, 10_000e18);
+    }
+
+    /// N-8: a disabled asset with no outstanding debt can be delisted —
+    /// `assetList` shrinks, O(n) iterators in `_accrueInterest` and
+    /// `_snapshotUserDebt` (added in M-01) see one fewer element.
+    function test_audit_n08_delistAssetRemovesFromList() public {
+        // Asset must be disabled first.
+        vm.prank(owner);
+        vault.disableAsset(address(aapl));
+
+        // No outstanding debt on AAPL (no borrows happened in setUp).
+        (, uint256 aaplDebt) = vault.borrowCapInfo(address(aapl));
+        assertEq(aaplDebt, 0);
+
+        address[] memory listBefore = vault.listedAssets();
+        assertEq(listBefore.length, 2);
+
+        vm.prank(owner);
+        vault.delistAsset(address(aapl));
+
+        address[] memory listAfter = vault.listedAssets();
+        assertEq(listAfter.length, 1);
+        assertEq(listAfter[0], address(tsla));
+    }
+
+    /// N-8: cannot delist an asset that is still enabled.
+    function test_audit_n08_delistAssetRevertsIfEnabled() public {
+        vm.prank(owner);
+        vm.expectRevert(EquiFlowVault.AssetNotDisabled.selector);
+        vault.delistAsset(address(tsla));
+    }
+
+    /// N-8: cannot delist an asset with outstanding debt — even when
+    /// disabled — because LP exposure would silently disappear from cap
+    /// counters.
+    function test_audit_n08_delistAssetRevertsIfHasDebt() public {
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(aapl), 100e18, 5_000e18);
+
+        vm.prank(owner);
+        vault.disableAsset(address(aapl));
+
+        vm.prank(owner);
+        vm.expectRevert(); // HasOutstandingDebt
+        vault.delistAsset(address(aapl));
+    }
+
+    /// N-8: only the owner can delist.
+    function test_audit_n08_delistAssetOnlyOwner() public {
+        vm.prank(owner);
+        vault.disableAsset(address(aapl));
+
+        vm.prank(alice);
+        vm.expectRevert();
+        vault.delistAsset(address(aapl));
+    }
+
+    /// N-8: a delisted asset can be re-listed (slot is empty again).
+    /// Documents that delist is fully reversible.
+    function test_audit_n08_delistedAssetCanBeReListed() public {
+        vm.prank(owner);
+        vault.disableAsset(address(aapl));
+        vm.prank(owner);
+        vault.delistAsset(address(aapl));
+
+        // Re-list with same parameters succeeds because `assets[aapl].priceFeed`
+        // was reset to address(0) by delist.
+        vm.prank(owner);
+        vault.listAsset(address(aapl), address(aaplFeed), AAPL_LTV, AAPL_LIQ, STALE_AFTER);
+
+        address[] memory list = vault.listedAssets();
+        assertEq(list.length, 2);
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Test-only IRMs for M-02 PoCs
+// ───────────────────────────────────────────────────────────────────
+
+/// @dev Returns a sane rate at u=0 (passes a naïve single-point probe) but
+///      reverts at any non-zero utilisation, bricking accrual.
+contract BrickIrm {
+    function getBorrowRate(uint256 u) external pure returns (uint256) {
+        if (u == 0) return 100;
+        revert("bricked");
+    }
+    function name() external pure returns (string memory) { return "brick"; }
+}
+
+/// @dev Returns rates far above MAX_BORROW_RATE_BPS at non-zero utilisation.
+///      Should be caught by the multi-point sanity probe's insane-rate check.
+contract InsaneRateIrm {
+    function getBorrowRate(uint256 u) external pure returns (uint256) {
+        if (u == 0) return 0;
+        return type(uint64).max;
+    }
+    function name() external pure returns (string memory) { return "insane"; }
+}
+
+/// @dev Well-behaved until armed, then bricks at any non-zero utilisation.
+///      Used to test the runtime try/catch fallback and forceClearIrm rescue.
+contract StatefulBrickIrm {
+    bool public armed;
+    function arm() external { armed = true; }
+    function getBorrowRate(uint256 u) external view returns (uint256) {
+        if (armed && u != 0) revert("armed brick");
+        return 100;
+    }
+    function name() external pure returns (string memory) { return "stateful brick"; }
+}
+
+/// @dev Consumes all forwarded gas in a tight assembly loop. Used to verify
+///      the N-1 gas-cap on scheduleIrm's multi-point probe.
+contract GasGrieferIrm {
+    function getBorrowRate(uint256) external pure returns (uint256) {
+        uint256 i;
+        assembly { for { } 1 { } { i := add(i, 1) } }
+        return i;
+    }
+    function name() external pure returns (string memory) { return "grief"; }
+}
+
+/// @dev Well-behaved until armed, then burns all forwarded gas. Used to
+///      verify the N-1 runtime fallback when the IRM was installed before
+///      it became hostile (matches the supply-chain / upgradable-IRM
+///      threat model).
+contract StatefulGrieferIrm {
+    bool public armed;
+    function arm() external { armed = true; }
+    function getBorrowRate(uint256) external view returns (uint256) {
+        if (armed) {
+            uint256 i;
+            assembly { for { } 1 { } { i := add(i, 1) } }
+            return i;
+        }
+        return 100;
+    }
+    function name() external pure returns (string memory) { return "stateful grief"; }
 }
