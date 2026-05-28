@@ -9,6 +9,7 @@ import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import {IInterestRateModel} from "./interest/IInterestRateModel.sol";
+import {VaultMath} from "./VaultMath.sol";
 
 interface IConfidenceOracle {
     function confidence() external view returns (uint64);
@@ -498,52 +499,11 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         emit AssetDisabled(token);
     }
 
-    /// @notice N-8 fix (2026-05 pass 6): permanently remove an asset from
-    ///         `assetList` via swap-and-pop. Necessary because the M-01
-    ///         fix added O(n) loops to `_accrueInterest` and
-    ///         `_snapshotUserDebt`; without delist, `assetList` is
-    ///         monotonically growing and a sloppy owner could spam
-    ///         `listAsset` to bloat per-tx gas.
-    ///
-    ///         Safety guards:
-    ///           1. Asset must have been disabled first (`disableAsset`).
-    ///              Forces an explicit two-step intent.
-    ///           2. `totalBorrowedByAsset[token] == 0` — no outstanding LP
-    ///              exposure attributed to this asset. Index-scaled by
-    ///              M-01 so this includes accrued interest, not just
-    ///              principal.
-    ///
-    ///         After delist, `assets[token]` is fully reset so the slot
-    ///         can be re-used by a future `listAsset` call.
-    ///
-    ///         The asset's `borrowCapUsd` mapping is cleared. The
-    ///         `tokenDecimals` cache is left in place — it's a pure-data
-    ///         optimisation and a re-list would just overwrite it.
-    function delistAsset(address token) external onlyOwner {
-        Asset memory a = assets[token];
-        if (address(a.priceFeed) == address(0)) revert AssetNotEnabled();
-        if (a.enabled) revert AssetNotDisabled();
-        uint256 outstanding = totalBorrowedByAsset[token];
-        if (outstanding != 0) revert HasOutstandingDebt(outstanding);
-
-        // Swap-and-pop from assetList.
-        uint256 n = assetList.length;
-        for (uint256 i; i < n; ++i) {
-            if (assetList[i] == token) {
-                if (i != n - 1) {
-                    assetList[i] = assetList[n - 1];
-                }
-                assetList.pop();
-                break;
-            }
-        }
-
-        // Reset slot so the asset can be re-listed cleanly.
-        delete assets[token];
-        delete borrowCapUsd[token];
-
-        emit AssetDelisted(token);
-    }
+    /// @notice N-8 fix (2026-05 pass 6) — DEFERRED to v2 deploy due to EIP-170
+    ///         bytecode budget. With current 5-asset deployment, `assetList`
+    ///         growth is bounded by owner discipline; per-tx O(n) overhead is
+    ///         negligible. Re-introduce in a future deploy when bytecode budget
+    ///         is freed (e.g. via further library extractions).
 
     /// @notice Update annual borrow rate. Accrues pending interest at the old
     ///         rate first so the change is forward-looking only.
@@ -1157,13 +1117,19 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         }
         require(totalCollUsd > 0, "no collateral");
 
+        // I-06 fix: hoist last-contributor lookup out of the loop (was O(n²)).
+        uint256 lastIdx;
+        for (uint256 i; i < n; ++i) {
+            if (collUsds[i] > 0) lastIdx = i;
+        }
+
         uint256 remaining = borrowUsd;
         for (uint256 i; i < n; ++i) {
             if (collUsds[i] == 0) continue;
             address t = assetList[i];
             uint256 share;
             // The last contributing token absorbs the rounding remainder.
-            if (i == _lastContributorIndex(collUsds, n)) {
+            if (i == lastIdx) {
                 share = remaining;
             } else {
                 share = (borrowUsd * collUsds[i]) / totalCollUsd;
@@ -1180,14 +1146,6 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         }
         // The `last contributor takes remainder` rule guarantees remaining==0.
         require(remaining == 0, "attribution underflow");
-    }
-
-    function _lastContributorIndex(uint256[] memory collUsds, uint256 n) internal pure returns (uint256) {
-        uint256 last;
-        for (uint256 i; i < n; ++i) {
-            if (collUsds[i] > 0) last = i;
-        }
-        return last;
     }
 
     function _enforceConfidenceForUser(address user) internal view {
@@ -1350,27 +1308,13 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         return (totalBorrowedUsd * BPS) / total;
     }
 
-    /// @notice Estimated LP APY in BPS. Equals borrowRate × utilization ×
-    ///         (1 − reserveFactor). Interest flows from borrowers to LPs net
-    ///         of the protocol's cut.
-    function lpApyBps() external view returns (uint256) {
-        uint256 rate = _currentBorrowRateBps();
-        uint256 gross = (rate * utilizationBps()) / BPS;
-        return (gross * (BPS - reserveFactorBps)) / BPS;
-    }
-
     /// @notice Gross borrow APY for borrowers (before LP/reserve split).
     ///         Reads from the active IRM (or legacy flat rate when IRM is
-    ///         unwired).
+    ///         unwired). Frontend computes LP/reserve splits off-chain from
+    ///         this + `utilizationBps()` + `reserveFactorBps` to save vault
+    ///         bytecode (EIP-170 size budget).
     function borrowApyBps() external view returns (uint256) {
         return _currentBorrowRateBps();
-    }
-
-    /// @notice Protocol's share of interest as APY (information only).
-    function reserveApyBps() external view returns (uint256) {
-        uint256 rate = _currentBorrowRateBps();
-        uint256 gross = (rate * utilizationBps()) / BPS;
-        return (gross * reserveFactorBps) / BPS;
     }
 
     /// @notice Borrow cap and current usage for a given collateral token.
@@ -1383,7 +1327,14 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
     ///         the others. Stale assets get priced at zero — conservative
     ///         for the protocol (lower HF, easier liquidation, restricted
     ///         withdraw/borrow), the safe direction.
-    function collateralValueUsd(address user) public view returns (uint256 total) {
+    /// @dev Single-pass loop computing total USD value and weighted LTV / threshold.
+    ///      Bytecode-size optimization: deduplicates the loop body that was previously
+    ///      open-coded across `collateralValueUsd`, `ltvCapBps`, `liquidationThresholdBps`.
+    function _collateralStats(address user)
+        internal
+        view
+        returns (uint256 totalUsd, uint256 weightedLtv, uint256 weightedThresh)
+    {
         uint256 n = assetList.length;
         for (uint256 i; i < n; ++i) {
             address t = assetList[i];
@@ -1391,47 +1342,28 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
             if (amt == 0) continue;
             uint256 price = _safePriceOrZero(t);
             if (price == 0) continue;
+            Asset memory a = assets[t];
             uint8 dec = _tokenDecimals(t);
-            total += (amt * price * 1e10) / (10 ** dec); // 1e18 USD
+            uint256 v = (amt * price * 1e10) / (10 ** dec);
+            totalUsd += v;
+            weightedLtv += v * a.ltvBps;
+            weightedThresh += v * a.liqThresholdBps;
         }
+    }
+
+    function collateralValueUsd(address user) public view returns (uint256) {
+        (uint256 total, , ) = _collateralStats(user);
+        return total;
     }
 
     function ltvCapBps(address user) public view returns (uint256) {
-        uint256 totalUsd;
-        uint256 weightedCap;
-        uint256 n = assetList.length;
-        for (uint256 i; i < n; ++i) {
-            address t = assetList[i];
-            uint256 amt = collateral[user][t];
-            if (amt == 0) continue;
-            uint256 price = _safePriceOrZero(t);
-            if (price == 0) continue;
-            Asset memory a = assets[t];
-            uint8 dec = _tokenDecimals(t);
-            uint256 v = (amt * price * 1e10) / (10 ** dec);
-            totalUsd += v;
-            weightedCap += v * a.ltvBps;
-        }
-        return totalUsd == 0 ? 0 : weightedCap / totalUsd;
+        (uint256 total, uint256 lv, ) = _collateralStats(user);
+        return total == 0 ? 0 : lv / total;
     }
 
     function liquidationThresholdBps(address user) public view returns (uint256) {
-        uint256 totalUsd;
-        uint256 weightedThresh;
-        uint256 n = assetList.length;
-        for (uint256 i; i < n; ++i) {
-            address t = assetList[i];
-            uint256 amt = collateral[user][t];
-            if (amt == 0) continue;
-            uint256 price = _safePriceOrZero(t);
-            if (price == 0) continue;
-            Asset memory a = assets[t];
-            uint8 dec = _tokenDecimals(t);
-            uint256 v = (amt * price * 1e10) / (10 ** dec);
-            totalUsd += v;
-            weightedThresh += v * a.liqThresholdBps;
-        }
-        return totalUsd == 0 ? 0 : weightedThresh / totalUsd;
+        (uint256 total, , uint256 th) = _collateralStats(user);
+        return total == 0 ? 0 : th / total;
     }
 
     /// @notice Current borrowed amount for a user (includes accrued interest
@@ -1612,30 +1544,16 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         if (actualBps > maxWidth) revert OracleConfidenceTooWide(uint64(actualBps), maxWidth);
     }
 
-    /// @dev Release per-asset borrow cap counters when a user repays or is
-    ///      liquidated. Uses the user's own per-token borrow attribution as
-    ///      weights so cap release matches where the borrow originated.
+    /// @dev Release per-asset borrow cap counters via the external VaultMath
+    ///      library (bytecode-size optimization for EIP-170 budget).
     function _releaseAssetBorrows(address user, uint256 repaidUsd) internal {
-        uint256 n = assetList.length;
-        if (n == 0) return;
-
-        uint256 userTotal;
-        for (uint256 i; i < n; ++i) {
-            userTotal += userBorrowByAsset[user][assetList[i]];
-        }
-        if (userTotal == 0) return;
-
-        for (uint256 i; i < n; ++i) {
-            address t = assetList[i];
-            uint256 userAmt = userBorrowByAsset[user][t];
-            if (userAmt == 0) continue;
-            uint256 release = (repaidUsd * userAmt) / userTotal;
-            if (release > userAmt) release = userAmt;
-            if (release > totalBorrowedByAsset[t]) release = totalBorrowedByAsset[t];
-            userBorrowByAsset[user][t] -= release;
-            totalBorrowedByAsset[t] -= release;
-            emit BorrowCapReleased(t, release, totalBorrowedByAsset[t]);
-        }
+        VaultMath.releaseAssetBorrows(
+            user,
+            repaidUsd,
+            assetList,
+            totalBorrowedByAsset,
+            userBorrowByAsset
+        );
     }
 
     function _enforceLtv(address user) internal view {
@@ -1669,18 +1587,8 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
             protocolReserves += reserveCut;
 
             // M-01 fix (2026-05 pass 5): scale per-asset cap counter by the
-            // same growth factor so `borrowCapUsd[t]` becomes a real
-            // debt-inclusive bound, not a principal-only bound. Without
-            // this, a fully-utilised cap silently floats back below the
-            // limit as interest accrues — second borrowers slip in even
-            // while the asset is effectively over-exposed.
-            uint256 n = assetList.length;
-            for (uint256 i; i < n; ++i) {
-                address t = assetList[i];
-                uint256 byAsset = totalBorrowedByAsset[t];
-                if (byAsset == 0) continue;
-                totalBorrowedByAsset[t] = byAsset + (byAsset * growthFactor) / INDEX_DECIMALS;
-            }
+            // same growth factor (extracted to VaultMath library for size).
+            VaultMath.scaleTotal(assetList, totalBorrowedByAsset, growthFactor);
 
             emit InterestAccrued(interest, reserveCut, borrowIndex, totalBorrowedUsd);
         }
@@ -1723,19 +1631,9 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         if (snap != 0 && snap != borrowIndex) {
             p.borrowed = (p.borrowed * borrowIndex) / snap;
 
-            // M-01 fix (2026-05 pass 5): scale per-user per-asset
-            // attribution by the same index ratio so the sum across the
-            // user's assets stays consistent with `positions[user].borrowed`.
-            // Without this, `_releaseAssetBorrows` clamps each release to a
-            // stale principal-only userAmt and the per-user counter drifts
-            // upward (cap appears overused) on the global side.
-            uint256 n = assetList.length;
-            for (uint256 i; i < n; ++i) {
-                address t = assetList[i];
-                uint256 userAmt = userBorrowByAsset[user][t];
-                if (userAmt == 0) continue;
-                userBorrowByAsset[user][t] = (userAmt * borrowIndex) / snap;
-            }
+            // M-01 fix (2026-05 pass 5): scale per-user per-asset attribution
+            // (extracted to VaultMath library for size).
+            VaultMath.scaleUser(user, assetList, userBorrowByAsset, borrowIndex, snap);
         }
         borrowSnapshotIndex[user] = borrowIndex;
     }
