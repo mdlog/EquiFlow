@@ -11,15 +11,16 @@ import { robinhoodChainTestnet } from "@/lib/config/chain";
 import {
   PYTH_ADAPTER_ABI,
   PYTH_PRICE_IDS,
-  PYTH_PRICE_IDS_BY_SESSION,
   craftMockPythUpdate,
-  type PythSession,
 } from "@/lib/web3/pyth";
+import { fetchFreshestPyth } from "@/lib/web3/hermes";
 import { EQUIFLOW_VAULT_ABI, EQUIFLOW_VAULT_ADDRESS } from "@/lib/contracts";
 import { STOCK_TOKEN_ADDRESSES } from "@/lib/contracts";
 import { STOCKS } from "@/lib/config/stocks";
 import { recordPrice } from "@/lib/web3/price-history";
 import { acquireNonce, resyncNonce } from "@/lib/web3/keeper-nonce";
+import { requireBearerSecret, sanitizeError } from "@/lib/api/security";
+import { ApiError, withErrorHandler } from "@/lib/api/handler";
 
 /// Cron-friendly keeper sweep.
 ///
@@ -46,7 +47,6 @@ import { acquireNonce, resyncNonce } from "@/lib/web3/keeper-nonce";
 ///     results: [{ symbol, adapter, source, price, txHash, error }]
 ///   }
 
-const HERMES = process.env.PYTH_HERMES_URL ?? "https://hermes.pyth.network";
 const PK_RE = /^0x[0-9a-fA-F]{64}$/;
 
 interface TickResult {
@@ -61,78 +61,6 @@ interface TickResult {
   skipped?: string;
 }
 
-interface ParsedFeed {
-  id: string;
-  price: { price: string; conf: string; expo: number; publish_time: number };
-}
-
-/// Fetch the freshest session feed for a symbol. Returns null on any error so
-/// the caller falls back to a mock random walk.
-async function fetchFreshestPyth(symbol: string): Promise<{
-  price: bigint;
-  expo: number;
-  publishTime: number;
-  session: PythSession;
-} | null> {
-  const sessions = PYTH_PRICE_IDS_BY_SESSION[symbol];
-  if (!sessions) {
-    const legacyId = PYTH_PRICE_IDS[symbol];
-    if (!legacyId) return null;
-    try {
-      const res = await fetch(
-        `${HERMES}/v2/updates/price/latest?ids[]=${legacyId}&parsed=true`,
-        { cache: "no-store" },
-      );
-      if (!res.ok) return null;
-      const data = (await res.json()) as { parsed: ParsedFeed[] };
-      const f = data.parsed?.[0];
-      if (!f) return null;
-      return {
-        price: BigInt(f.price.price),
-        expo: f.price.expo,
-        publishTime: f.price.publish_time,
-        session: "regular",
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  const entries = Object.entries(sessions) as Array<[PythSession, Hex]>;
-  const idsQS = entries.map(([, id]) => `ids[]=${id}`).join("&");
-  try {
-    const res = await fetch(
-      `${HERMES}/v2/updates/price/latest?${idsQS}&parsed=true`,
-      { cache: "no-store" },
-    );
-    if (!res.ok) return null;
-    const data = (await res.json()) as { parsed: ParsedFeed[] };
-    if (!data.parsed?.length) return null;
-
-    const idToSession = new Map<string, PythSession>();
-    for (const [session, id] of entries) {
-      idToSession.set(id.toLowerCase().replace(/^0x/, ""), session);
-    }
-    let best: { feed: ParsedFeed; session: PythSession } | null = null;
-    for (const f of data.parsed) {
-      const session = idToSession.get(f.id.toLowerCase().replace(/^0x/, ""));
-      if (!session) continue;
-      if (!best || f.price.publish_time > best.feed.price.publish_time) {
-        best = { feed: f, session };
-      }
-    }
-    if (!best) return null;
-    return {
-      price: BigInt(best.feed.price.price),
-      expo: best.feed.price.expo,
-      publishTime: best.feed.price.publish_time,
-      session: best.session,
-    };
-  } catch {
-    return null;
-  }
-}
-
 /// Reverse map token → symbol so we can derive the registered priceId from
 /// the on-chain asset list. Built once per worker.
 const TOKEN_TO_SYMBOL = new Map<string, string>();
@@ -142,33 +70,13 @@ for (const [sym, addr] of Object.entries(STOCK_TOKEN_ADDRESSES)) {
 
 const STOCK_BY_SYM = new Map(STOCKS.map((s) => [s.sym, s]));
 
-export async function GET(req: Request) {
-  // ── Auth ────────────────────────────────────────────────────────────────
-  const secret = process.env.CRON_SECRET;
-  if (secret) {
-    const header = req.headers.get("authorization") ?? "";
-    if (header !== `Bearer ${secret}`) {
-      return NextResponse.json(
-        { ok: false, error: "unauthorized" },
-        { status: 401 },
-      );
-    }
-  }
+export const GET = withErrorHandler(async (req: Request) => {
+  // Bearer auth — timing-safe compare, fail-closed in production.
+  requireBearerSecret(req, "CRON_SECRET");
 
-  // ── Keeper signer ───────────────────────────────────────────────────────
   const pk = process.env.KEEPER_PRIVATE_KEY;
-  if (!pk || !PK_RE.test(pk)) {
-    return NextResponse.json(
-      { ok: false, error: "keeper_disabled" },
-      { status: 503 },
-    );
-  }
-  if (!EQUIFLOW_VAULT_ADDRESS) {
-    return NextResponse.json(
-      { ok: false, error: "vault_not_configured" },
-      { status: 503 },
-    );
-  }
+  if (!pk || !PK_RE.test(pk)) throw new ApiError(503, "keeper_disabled");
+  if (!EQUIFLOW_VAULT_ADDRESS) throw new ApiError(503, "vault_not_configured");
   const vault = EQUIFLOW_VAULT_ADDRESS;
 
   const publicClient = createPublicClient({
@@ -191,14 +99,9 @@ export async function GET(req: Request) {
       functionName: "listedAssets",
     })) as readonly Address[];
   } catch (err) {
-    return NextResponse.json(
-      {
-        ok: false,
-        error: "listed_assets_failed",
-        detail: err instanceof Error ? err.message.slice(0, 240) : String(err),
-      },
-      { status: 502 },
-    );
+    const { code, logMessage } = sanitizeError(err);
+    console.error("[keeper/cron] listed_assets_failed:", logMessage);
+    throw new ApiError(502, code);
   }
 
   // ── 2. Resolve adapter per token ───────────────────────────────────────
@@ -345,8 +248,9 @@ export async function GET(req: Request) {
         txHash,
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (/nonce/i.test(msg)) resyncNonce();
+      const { code, logMessage } = sanitizeError(err);
+      if (code === "nonce_error") resyncNonce();
+      console.error(`[keeper/cron] write_failed sym=${symbol}:`, logMessage);
       results.push({
         symbol,
         token,
@@ -354,7 +258,7 @@ export async function GET(req: Request) {
         source,
         price: priceForLog,
         publishTime,
-        error: msg.slice(0, 240),
+        error: code,
       });
     }
   }
@@ -368,4 +272,4 @@ export async function GET(req: Request) {
     summary: { ticked, failed, skipped, total: results.length },
     results,
   });
-}
+});

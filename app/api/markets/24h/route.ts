@@ -1,5 +1,11 @@
 import { NextResponse } from "next/server";
 import { PYTH_PRICE_IDS } from "@/lib/web3/pyth";
+import { ApiError, withErrorHandler } from "@/lib/api/handler";
+import {
+  fetchWithTimeout,
+  requireRateLimit,
+  sanitizeError,
+} from "@/lib/api/security";
 
 /// Batched 24h change% endpoint.
 ///
@@ -53,9 +59,9 @@ function parsePythNumber(p: ParsedPrice["price"]): number {
 }
 
 async function fetchHermesLatest(idsQS: string): Promise<ParsedPrice[]> {
-  const res = await fetch(
+  const res = await fetchWithTimeout(
     `${HERMES}/v2/updates/price/latest?${idsQS}&parsed=true`,
-    { cache: "no-store" },
+    { cache: "no-store", timeoutMs: 5_000 },
   );
   if (!res.ok) throw new Error(`hermes_${res.status}`);
   const data = (await res.json()) as { parsed?: ParsedPrice[] };
@@ -89,7 +95,7 @@ async function fetchBenchmarksClose(
     `&from=${now - 432000}` +
     `&to=${now}`;
 
-  const res = await fetch(url, { cache: "no-store" });
+  const res = await fetchWithTimeout(url, { cache: "no-store", timeoutMs: 5_000 });
   if (!res.ok) {
     console.warn(`[24h] benchmarks http ${res.status} for ${sym}`);
     return null;
@@ -126,26 +132,26 @@ async function fetchBenchmarksClose(
   return { price: cs[0], time: ts[0] };
 }
 
-export async function GET(req: Request) {
+export const GET = withErrorHandler(async (req: Request) => {
+  await requireRateLimit(req, { bucket: "markets-24h", max: 30, windowSeconds: 60 });
   const url = new URL(req.url);
   const symsParam = url.searchParams.get("syms") ?? "";
-  const syms = symsParam
-    .split(",")
-    .map((s) => s.trim().toUpperCase())
-    .filter(Boolean)
-    .slice(0, MAX_SYMS);
+  const syms = Array.from(
+    new Set(
+      symsParam
+        .split(",")
+        .map((s) => s.trim().toUpperCase())
+        .filter((s) => /^[A-Z0-9]{1,8}$/.test(s)),
+    ),
+  ).slice(0, MAX_SYMS);
 
-  if (syms.length === 0) {
-    return NextResponse.json({ error: "missing_syms" }, { status: 400 });
-  }
+  if (syms.length === 0) throw new ApiError(400, "missing_syms");
 
   const mapped = syms
     .map((s) => [s, PYTH_PRICE_IDS[s]] as const)
     .filter(([, id]) => !!id) as Array<readonly [string, `0x${string}`]>;
 
-  if (mapped.length === 0) {
-    return NextResponse.json({ error: "no_known_feeds" }, { status: 400 });
-  }
+  if (mapped.length === 0) throw new ApiError(400, "no_known_feeds");
 
   const now = Math.floor(Date.now() / 1000);
   const then = now - DAY;
@@ -156,11 +162,9 @@ export async function GET(req: Request) {
   try {
     latest = await fetchHermesLatest(idsQS);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json(
-      { error: "hermes_latest_failed", detail: msg },
-      { status: 502 },
-    );
+    const { code, logMessage } = sanitizeError(err);
+    console.error("[24h] hermes_latest_failed:", logMessage);
+    throw new ApiError(502, code);
   }
 
   // ── 2. Per-symbol historical from Benchmarks ─────────────────────────────
@@ -204,4 +208,4 @@ export async function GET(req: Request) {
       "Cache-Control": "public, max-age=120, s-maxage=120",
     },
   });
-}
+});

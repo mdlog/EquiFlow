@@ -1,6 +1,12 @@
 import { NextResponse } from "next/server";
 import { PYTH_PRICE_IDS } from "@/lib/web3/pyth";
 import { HISTORY_ENABLED, readSeries, type HistoryPoint } from "@/lib/web3/price-history";
+import { ApiError, withErrorHandler } from "@/lib/api/handler";
+import {
+  fetchWithTimeout,
+  requireRateLimit,
+  sanitizeError,
+} from "@/lib/api/security";
 
 /// Pyth Benchmarks-backed OHLCV history for a single ticker. Used by the
 /// asset detail page (`/markets/[sym]`) to render a real price chart.
@@ -44,25 +50,25 @@ interface BenchmarksBars {
   errmsg?: string;
 }
 
-export async function GET(req: Request, { params }: Params) {
+export const GET = withErrorHandler(async (req: Request, { params }: Params) => {
+  await requireRateLimit(req, { bucket: "markets-history", max: 60, windowSeconds: 60 });
   const { sym } = await params;
   const upper = sym.toUpperCase();
-  if (!PYTH_PRICE_IDS[upper]) {
-    return NextResponse.json(
-      { error: "unknown_symbol", symbol: upper },
-      { status: 404 },
-    );
-  }
+  if (!/^[A-Z0-9]{1,8}$/.test(upper)) throw new ApiError(400, "invalid_symbol");
+  if (!PYTH_PRICE_IDS[upper]) throw new ApiError(404, "unknown_symbol");
 
   const url = new URL(req.url);
   const daysRaw = Number(url.searchParams.get("days") ?? 7);
   const days = Math.min(MAX_DAYS, Math.max(1, Math.floor(daysRaw) || 7));
   const resolution = url.searchParams.get("resolution") ?? "60";
   if (!ALLOWED_RESOLUTIONS.has(resolution)) {
-    return NextResponse.json(
-      { error: "invalid_resolution" },
-      { status: 400 },
-    );
+    throw new ApiError(400, "invalid_resolution");
+  }
+
+  // Cap total bars to prevent expensive long-window queries on minute-resolution.
+  const bucketSeconds = resolutionToSeconds(resolution);
+  if ((days * 86400) / bucketSeconds > 10_000) {
+    throw new ApiError(400, "bar_count_exceeds_limit");
   }
 
   const symbolName =
@@ -78,7 +84,7 @@ export async function GET(req: Request, { params }: Params) {
     `&to=${now}`;
 
   try {
-    const res = await fetch(target, { cache: "no-store" });
+    const res = await fetchWithTimeout(target, { cache: "no-store", timeoutMs: 8_000 });
     if (!res.ok) {
       return NextResponse.json(
         { s: "error", errmsg: `benchmarks_http_${res.status}` },
@@ -132,13 +138,11 @@ export async function GET(req: Request, { params }: Params) {
       },
     );
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json(
-      { s: "error", errmsg: msg.slice(0, 240) },
-      { status: 502 },
-    );
+    const { code, logMessage } = sanitizeError(err);
+    console.error(`[history] fetch failed sym=${upper}:`, logMessage);
+    return NextResponse.json({ s: "error", errmsg: code }, { status: 502 });
   }
-}
+});
 
 function resolutionToSeconds(res: string): number {
   if (res === "D") return 86400;

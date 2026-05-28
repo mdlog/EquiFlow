@@ -4,212 +4,213 @@ import {
   createWalletClient,
   encodeFunctionData,
   http,
-  parseUnits,
   type Address,
   type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { robinhoodChainTestnet } from "@/lib/config/chain";
-import {
-  PYTH_ADAPTER_ABI,
-  PYTH_PRICE_IDS,
-  craftMockPythUpdate,
-} from "@/lib/web3/pyth";
+import { PYTH_ADAPTER_ABI, craftMockPythUpdate } from "@/lib/web3/pyth";
+import { fetchFreshestPyth } from "@/lib/web3/hermes";
 import { recordPrice } from "@/lib/web3/price-history";
 import {
   EQUIFLOW_VAULT_ABI,
   EQUIFLOW_VAULT_ADDRESS,
 } from "@/lib/contracts";
-import {
-  listActive,
-  type DefenderConfig,
-} from "@/lib/web3/defender-store";
+import { listActive, type DefenderConfig } from "@/lib/web3/defender-store";
 import { acquireNonce, resyncNonce } from "@/lib/web3/keeper-nonce";
+import {
+  getVaultAllowlist,
+  symbolForToken,
+} from "@/lib/web3/vault-allowlist";
+import {
+  requireBearerSecret,
+  requireRateLimit,
+  readBoundedJson,
+  requireAddressValue,
+  isHex,
+  sanitizeError,
+} from "@/lib/api/security";
+import { ApiError, withErrorHandler } from "@/lib/api/handler";
 
-/// Reverse lookup from registered (regular-session) priceId → ticker.
-/// Built once per worker. Adapter contracts on RBN are deployed against the
-/// regular session, so this map is sufficient — the keeper substitutes other
-/// sessions transparently inside the same registered priceId.
-const PRICE_ID_TO_SYMBOL = new Map<string, string>(
-  Object.entries(PYTH_PRICE_IDS).map(([sym, id]) => [id.toLowerCase(), sym]),
-);
+// Server-side keeper signer.
+//
+// Security changes vs prior version:
+//   - Requires Bearer CRON_SECRET (timing-safe). Fails closed in production.
+//   - Body now only carries a `symbol`; the server fetches the freshest price
+//     from Hermes itself. Caller-supplied prices are NEVER trusted.
+//   - `adapterAddress` is allowlisted against listedAssets() on the vault.
+//   - Per-IP rate limit (60 req/min, hard cap 5 sec burst).
+//   - Body capped at 16 KiB.
+//   - Error responses use stable codes — viem error text never leaks.
 
-/// Server-side keeper signer.
-///
-/// Why this exists: the price-keeper used to sign updates client-side using
-/// `NEXT_PUBLIC_KEEPER_PRIVATE_KEY`, which leaked the key into the browser
-/// bundle. Now the client `usePriceKeeper` hook only POSTs adapter + Pyth
-/// quote payloads here; the key never leaves the server.
-///
-/// Body:
-///   {
-///     adapterAddress: Address,
-///     priceId: Hex (32-byte),
-///     // Pyth quote (optional). If absent, we fall back to a random walk
-///     // anchored on `fallbackPrice`.
-///     pythPrice?: string,         // int64 as decimal string
-///     pythExpo?: number,
-///     // Random-walk fallback inputs.
-///     fallbackPrice: number,      // last-known display price in USD
-///     volatility: number,         // fraction (0–1)
-///   }
-///
-/// Returns:
-///   { ok: true, txHash: Hex, source: 'pyth' | 'mock', price: number, publishTime: number }
-
-interface TickBody {
-  adapterAddress?: string;
-  priceId?: string;
-  pythPrice?: string;
-  pythExpo?: number;
-  fallbackPrice?: number;
-  volatility?: number;
-}
-
-const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
-const ID_RE = /^0x[0-9a-fA-F]{64}$/;
 const PK_RE = /^0x[0-9a-fA-F]{64}$/;
 
-export async function POST(req: Request) {
+interface TickBody {
+  symbol?: string;
+}
+
+export const POST = withErrorHandler(async (req: Request) => {
+  requireBearerSecret(req, "CRON_SECRET");
+  await requireRateLimit(req, { bucket: "tick", max: 60, windowSeconds: 60 });
+
   const pkEnv = process.env.KEEPER_PRIVATE_KEY;
   if (!pkEnv || !PK_RE.test(pkEnv)) {
-    return NextResponse.json(
-      { ok: false, error: "keeper_disabled" },
-      { status: 503 },
-    );
+    throw new ApiError(503, "keeper_disabled");
+  }
+  if (!EQUIFLOW_VAULT_ADDRESS) {
+    throw new ApiError(503, "vault_not_configured");
   }
 
-  let body: TickBody;
+  const body = await readBoundedJson<TickBody>(req);
+  const symbol = typeof body.symbol === "string" ? body.symbol.toUpperCase() : "";
+  if (!/^[A-Z0-9]{1,8}$/.test(symbol)) {
+    throw new ApiError(400, "invalid_symbol");
+  }
+
+  const publicClient = createPublicClient({
+    chain: robinhoodChainTestnet,
+    transport: http(),
+  });
+
+  // Resolve adapter + priceId from on-chain config — never from the caller.
+  const allowlist = await getVaultAllowlist(publicClient);
+  if (allowlist.adapters.size === 0) {
+    throw new ApiError(503, "vault_empty");
+  }
+
+  // Find the token address for the symbol from our env-driven token map,
+  // then read its adapter from the vault. This is the canonical mapping.
+  const tokenAddress = await resolveTokenAddress(symbol);
+  if (!tokenAddress) throw new ApiError(404, "unknown_symbol");
+
+  let adapter: Address;
+  let enabled: boolean;
   try {
-    body = (await req.json()) as TickBody;
-  } catch {
-    return NextResponse.json(
-      { ok: false, error: "invalid_json" },
-      { status: 400 },
-    );
+    const cfg = (await publicClient.readContract({
+      abi: EQUIFLOW_VAULT_ABI,
+      address: EQUIFLOW_VAULT_ADDRESS,
+      functionName: "assets",
+      args: [tokenAddress],
+    })) as readonly [Address, bigint, bigint, bigint, boolean];
+    adapter = cfg[0];
+    enabled = cfg[4];
+  } catch (err) {
+    const { code, logMessage } = sanitizeError(err);
+    console.error("[keeper/tick] assets_read_failed:", logMessage);
+    throw new ApiError(502, code);
   }
 
-  const adapterAddress = body.adapterAddress;
-  const priceId = body.priceId;
-  if (!adapterAddress || !ADDR_RE.test(adapterAddress)) {
-    return NextResponse.json(
-      { ok: false, error: "invalid_adapter_address" },
-      { status: 400 },
-    );
-  }
-  if (!priceId || !ID_RE.test(priceId)) {
-    return NextResponse.json(
-      { ok: false, error: "invalid_price_id" },
-      { status: 400 },
-    );
+  if (!enabled) throw new ApiError(409, "asset_disabled");
+  if (!allowlist.adapters.has(adapter.toLowerCase())) {
+    // Allowlist mismatch — vault returned an adapter that isn't in our cached
+    // listedAssets. Refresh-and-fail rather than sign.
+    throw new ApiError(409, "adapter_not_allowed");
   }
 
-  const fallbackPrice =
-    typeof body.fallbackPrice === "number" && body.fallbackPrice > 0
-      ? body.fallbackPrice
-      : 1;
-  const volatility =
-    typeof body.volatility === "number" && body.volatility > 0
-      ? body.volatility
-      : 0.005;
+  // Fetch authoritative price from Hermes. No caller-controlled prices.
+  const quote = await fetchFreshestPyth(symbol);
+  const nowSec = Math.floor(Date.now() / 1000);
 
-  // Decide source
   let priceForLog: number;
   let updateBytes: Hex;
   let source: "pyth" | "mock";
-  const publishTime = Math.floor(Date.now() / 1000);
+  let publishTime: number;
 
-  if (body.pythPrice && typeof body.pythExpo === "number") {
-    const rawPrice = BigInt(body.pythPrice);
-    priceForLog = Number(rawPrice) / 10 ** -body.pythExpo;
+  if (quote) {
+    priceForLog = Number(quote.price) / 10 ** -quote.expo;
+    publishTime = nowSec;
+    const { priceIdRegular } = await resolveRegularPriceId(publicClient, adapter);
     updateBytes = craftMockPythUpdate({
-      priceId: priceId as Hex,
-      price: rawPrice,
-      expo: body.pythExpo,
+      priceId: priceIdRegular,
+      price: quote.price,
+      expo: quote.expo,
       publishTime,
+      conf: quote.conf,
     });
     source = "pyth";
   } else {
-    const delta =
-      (Math.random() - 0.5) * 2 * volatility * fallbackPrice;
-    priceForLog = Math.max(fallbackPrice + delta, 0.01);
-    updateBytes = craftMockPythUpdate({
-      priceId: priceId as Hex,
-      price: BigInt(Math.round(priceForLog * 1e8)),
-      expo: -8,
-      publishTime,
-    });
-    source = "mock";
+    // Hermes unavailable — we DO NOT fall back to caller-supplied prices.
+    // Refuse to sign rather than push attacker-chosen numbers.
+    throw new ApiError(503, "hermes_unavailable");
   }
 
+  let txHash: Hex;
   try {
     const account = privateKeyToAccount(pkEnv as Hex);
-    const client = createWalletClient({
+    const walletClient = createWalletClient({
       account,
       chain: robinhoodChainTestnet,
       transport: http(),
     });
-    const publicClient = createPublicClient({
-      chain: robinhoodChainTestnet,
-      transport: http(),
-    });
     const nonce = await acquireNonce(publicClient, account.address);
-    const hash = await client.writeContract({
+    txHash = await walletClient.writeContract({
       abi: PYTH_ADAPTER_ABI,
-      address: adapterAddress as Address,
+      address: adapter,
       functionName: "updatePrice",
       args: [[updateBytes]],
       nonce,
     });
-
-    // Record into the 24h history sorted set. Best-effort: errors are swallowed
-    // inside recordPrice so a Redis hiccup never breaks the on-chain tx response.
-    const sym = PRICE_ID_TO_SYMBOL.get(priceId.toLowerCase());
-    if (sym) {
-      await recordPrice(sym, priceForLog, publishTime);
-    }
-
-    // ── Auto-Defender pass ──────────────────────────────────────────────
-    // Now that prices are fresh, sweep active defenders to see if any need
-    // a precautionary repay. Strictly additive — failures here don't affect
-    // the price-push response. The keeper does NOT use the user's session
-    // key here in the demo; it uses its own KEEPER_PRIVATE_KEY to dispatch
-    // a public-facing `repay(amountUsd)` call standing in for the keeper
-    // bot's signed UserOp. The session-key infra remains the user-facing
-    // authorization layer.
-    let defenderResults: DefenderActionResult[] = [];
-    try {
-      defenderResults = await runDefenderSweep(client);
-    } catch (err) {
-      console.warn("[keeper] defender sweep failed:", err);
-    }
-
-    return NextResponse.json({
-      ok: true,
-      txHash: hash,
-      source,
-      price: priceForLog,
-      publishTime,
-      defenderTriggered: defenderResults.some((d) => d.acted),
-      defenderResults,
-    });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    if (/nonce/i.test(msg)) resyncNonce();
-    console.error(
-      `[keeper] submit_failed adapter=${adapterAddress} priceId=${priceId.slice(0, 10)}… src=${source}:`,
-      msg,
-    );
-    return NextResponse.json(
-      { ok: false, error: "submit_failed", detail: msg.slice(0, 240) },
-      { status: 502 },
-    );
+    const { code, logMessage } = sanitizeError(err);
+    if (code === "nonce_error") resyncNonce();
+    console.error("[keeper/tick] submit_failed:", logMessage);
+    throw new ApiError(502, code);
   }
+
+  // Best-effort history recording. Errors swallowed.
+  try {
+    await recordPrice(symbol, priceForLog, publishTime);
+  } catch (err) {
+    console.warn("[keeper/tick] recordPrice failed:", err);
+  }
+
+  // Auto-Defender sweep. Failures don't affect the price-push response.
+  let defenderResults: DefenderActionResult[] = [];
+  try {
+    defenderResults = await runDefenderSweep(publicClient);
+  } catch (err) {
+    console.warn("[keeper/tick] defender sweep failed:", err);
+  }
+
+  return NextResponse.json({
+    ok: true,
+    txHash,
+    source,
+    price: priceForLog,
+    publishTime,
+    defenderTriggered: defenderResults.some((d) => d.acted),
+    defenderResults,
+  });
+});
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+async function resolveTokenAddress(symbol: string): Promise<Address | null> {
+  const { STOCK_TOKEN_ADDRESSES } = await import("@/lib/contracts/addresses");
+  const addr = STOCK_TOKEN_ADDRESSES[symbol];
+  return addr ?? null;
 }
 
-/* ──────────────────────────────────────────────────────────────────────
-   Auto-Defender sweep — runs after every price push.
-   ────────────────────────────────────────────────────────────────────── */
+const ADAPTER_PRICEID_CACHE = new Map<string, Hex>();
+
+async function resolveRegularPriceId(
+  client: ReturnType<typeof createPublicClient>,
+  adapter: Address,
+): Promise<{ priceIdRegular: Hex }> {
+  const key = adapter.toLowerCase();
+  const cached = ADAPTER_PRICEID_CACHE.get(key);
+  if (cached) return { priceIdRegular: cached };
+  const id = (await client.readContract({
+    abi: PYTH_ADAPTER_ABI,
+    address: adapter,
+    functionName: "priceId",
+  })) as Hex;
+  if (!isHex(id, 66)) throw new ApiError(502, "invalid_price_id_onchain");
+  ADAPTER_PRICEID_CACHE.set(key, id);
+  return { priceIdRegular: id };
+}
+
+// ─── Auto-Defender sweep ─────────────────────────────────────────────────
 
 interface DefenderActionResult {
   wallet: Address;
@@ -221,37 +222,29 @@ interface DefenderActionResult {
   txHash?: Hex;
 }
 
-type WalletClientType = ReturnType<typeof createWalletClient>;
-
-/// 5% of weekly limit as a top-up cap per single intervention. Keeps a single
-/// price wick from chewing up the user's entire weekly authorization.
-const PER_TICK_FRACTION = 0.5;
+const PER_TICK_FRACTION = 0.05; // 5% of weekly limit per intervention
 
 async function runDefenderSweep(
-  walletClient: WalletClientType,
+  publicClient: ReturnType<typeof createPublicClient>,
 ): Promise<DefenderActionResult[]> {
   if (!EQUIFLOW_VAULT_ADDRESS) return [];
   const configs = await listActive();
   if (configs.length === 0) return [];
 
-  const publicClient = createPublicClient({
-    chain: robinhoodChainTestnet,
-    transport: http(),
-  });
-
   const out: DefenderActionResult[] = [];
   for (const cfg of configs) {
     try {
-      const result = await maybeRepayFor(cfg, publicClient, walletClient);
-      out.push(result);
+      out.push(await maybeRepayFor(cfg, publicClient));
     } catch (err) {
+      const { logMessage } = sanitizeError(err);
       out.push({
         wallet: cfg.wallet,
         healthFactor: "0",
         threshold: cfg.threshold,
         acted: false,
-        reason: err instanceof Error ? err.message.slice(0, 80) : "unknown",
+        reason: "sweep_error",
       });
+      console.warn(`[defender] sweep error for ${cfg.wallet}:`, logMessage);
     }
   }
   return out;
@@ -260,12 +253,12 @@ async function runDefenderSweep(
 async function maybeRepayFor(
   cfg: DefenderConfig,
   publicClient: ReturnType<typeof createPublicClient>,
-  walletClient: WalletClientType,
 ): Promise<DefenderActionResult> {
-  // 1. Read position health-factor from vault. `healthFactor` returns 1e18-scaled.
+  // Need vault for typed reads.
+  const vault = EQUIFLOW_VAULT_ADDRESS!;
   const hfRaw = (await publicClient.readContract({
     abi: EQUIFLOW_VAULT_ABI,
-    address: EQUIFLOW_VAULT_ADDRESS as Address,
+    address: vault,
     functionName: "healthFactor",
     args: [cfg.wallet],
   })) as bigint;
@@ -281,17 +274,12 @@ async function maybeRepayFor(
     };
   }
 
-  // 2. Compute repay amount that brings HF back above threshold. Approx:
-  //    target_debt = collateral * liq_threshold / desired_HF.
-  //    Repay = current_debt − target_debt, clamped to weekly remaining and
-  //    `PER_TICK_FRACTION × weekly limit`.
   const pos = (await publicClient.readContract({
     abi: EQUIFLOW_VAULT_ABI,
-    address: EQUIFLOW_VAULT_ADDRESS as Address,
+    address: vault,
     functionName: "positionOf",
     args: [cfg.wallet],
   })) as readonly [bigint, bigint, bigint];
-
   const [collateralUsd18, borrowedUsd18] = pos;
   if (borrowedUsd18 === 0n) {
     return {
@@ -305,19 +293,16 @@ async function maybeRepayFor(
 
   const liqBps = (await publicClient.readContract({
     abi: EQUIFLOW_VAULT_ABI,
-    address: EQUIFLOW_VAULT_ADDRESS as Address,
+    address: vault,
     functionName: "liquidationThresholdBps",
     args: [cfg.wallet],
   })) as bigint;
 
-  // Desired HF: nudge ~5% above threshold so we don't immediately re-trigger.
   const desiredHf = (threshold * 105n) / 100n;
-  // target_debt = collateral * (liqBps/10_000) * 1e18 / desiredHf
   const targetDebt =
     (collateralUsd18 * liqBps * BigInt(1e18)) /
     (BigInt(10_000) * desiredHf);
-  const repayUsd18 =
-    targetDebt < borrowedUsd18 ? borrowedUsd18 - targetDebt : 0n;
+  const repayUsd18 = targetDebt < borrowedUsd18 ? borrowedUsd18 - targetDebt : 0n;
   if (repayUsd18 === 0n) {
     return {
       wallet: cfg.wallet,
@@ -328,10 +313,8 @@ async function maybeRepayFor(
     };
   }
 
-  // Convert USD-18 → USDG atomic (6 dec) for limit comparison.
   const repayUsdg = repayUsd18 / BigInt(1e12);
-  const weeklyRemaining =
-    BigInt(cfg.weeklyLimit) - BigInt(cfg.weekUsed);
+  const weeklyRemaining = BigInt(cfg.weeklyLimit) - BigInt(cfg.weekUsed);
   if (weeklyRemaining <= 0n) {
     return {
       wallet: cfg.wallet,
@@ -342,8 +325,7 @@ async function maybeRepayFor(
     };
   }
   const perTickCap =
-    (BigInt(cfg.weeklyLimit) * BigInt(Math.floor(PER_TICK_FRACTION * 100))) /
-    100n;
+    (BigInt(cfg.weeklyLimit) * BigInt(Math.floor(PER_TICK_FRACTION * 100))) / 100n;
   let effectiveUsdg = repayUsdg;
   if (effectiveUsdg > weeklyRemaining) effectiveUsdg = weeklyRemaining;
   if (effectiveUsdg > perTickCap) effectiveUsdg = perTickCap;
@@ -357,23 +339,16 @@ async function maybeRepayFor(
     };
   }
 
-  // 3. Build vault.repay(amountUsd) call. amountUsd is USD-18.
+  // The real session-key path requires on-chain installValidation() to land;
+  // until then we hold the keeper to dry_run regardless of config to avoid
+  // signing repays that the user hasn't actually authorized on-chain. See
+  // docs/SECURITY_RUNBOOK.md for the rollout plan.
   const effectiveUsd18 = effectiveUsdg * BigInt(1e12);
-  // /// TODO: real session-key path — this would build a UserOp signed by the
-  // /// user's session signer (cfg.sessionKey), with the keeper as the
-  // /// `userOp.sender = smartWallet` and bundler-relayed. For the demo we
-  // /// fire a direct keeper-signed tx so the on-chain effect (HF restored)
-  // /// is observable. NOTE: this means the keeper must hold USDG; in real
-  // /// deployments the user's smart wallet pays.
   const data = encodeFunctionData({
     abi: EQUIFLOW_VAULT_ABI,
     functionName: "repay",
     args: [effectiveUsd18],
   });
-  void data; // future use when we delegate via Modular Account execute
-
-  void parseUnits;
-  void walletClient;
   void data;
 
   return {
@@ -385,3 +360,6 @@ async function maybeRepayFor(
     reason: "dry_run",
   };
 }
+
+// Silence unused-import lint while the dry-run guard is in effect.
+void requireAddressValue;

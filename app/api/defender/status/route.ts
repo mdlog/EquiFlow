@@ -1,10 +1,12 @@
 import { NextResponse } from "next/server";
 import { readConfig } from "@/lib/web3/defender-store";
 import { requireAddress, withErrorHandler } from "@/lib/api/handler";
+import { requireRateLimit } from "@/lib/api/security";
 
 /// GET /api/defender/status?wallet=0x...
 /// Returns the active defender config for a smart wallet, or { enabled: false }.
 export const GET = withErrorHandler(async (req: Request) => {
+  await requireRateLimit(req, { bucket: "defender-status", max: 60, windowSeconds: 60 });
   const wallet = requireAddress(
     new URL(req.url).searchParams.get("wallet"),
     "wallet",
