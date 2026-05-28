@@ -94,6 +94,23 @@ export function LpWithdrawModal({ open, onClose }: Props) {
   const usdValueTotal = Number(usdValueRaw) / 1e18;
   const usdgValueTotal = Number(usdgValueRaw) / 10 ** stableDec;
 
+  // Adaptive precision for shares display. After a "dust first depositor"
+  // event (a microscopic first deposit baseline-sets the share price to
+  // ≈ $1e6 per displayed share), legitimate $X deposits get raw share
+  // counts in the 1e13 range which the previous `toFixed(4)` rendered as
+  // "0.0000" — even though the $ value column was correct. This formatter
+  // shows enough decimals (or switches to scientific notation) so the
+  // share count is never displayed as zero when the user actually owns
+  // some shares.
+  function fmtShares(v: number): string {
+    if (v === 0) return "0";
+    if (v >= 1) return v.toFixed(2);
+    if (v >= 0.0001) return v.toFixed(4);
+    // Sub-0.0001 — use up to 8 decimals; switch to e-notation below 1e-8.
+    if (v >= 1e-8) return v.toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
+    return v.toExponential(2);
+  }
+
   const { data: bookedRaw } = useReadContract({
     abi: EQUIFLOW_VAULT_ABI,
     address: VAULT_ADDR,
@@ -175,7 +192,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
         : 0n;
     if (raw <= 0n) return;
     const id = txPendingToast({
-      action: `Burn ${shares.toFixed(4)} LP shares${aaActive ? " (sponsored)" : ""}`,
+      action: `Burn ${fmtShares(shares)} LP shares${aaActive ? " (sponsored)" : ""}`,
     });
     setToastId(id);
     if (aaActive && smartAccount && AA_CONFIGURED) {
@@ -235,8 +252,8 @@ export function LpWithdrawModal({ open, onClose }: Props) {
   else if (aaBusy) ctaLabel = "Bundling sponsored UserOp…";
   else if (isPending) ctaLabel = "Sign in wallet…";
   else if (mining) ctaLabel = "Withdrawing…";
-  else if (aaActive) ctaLabel = `Burn ${shares > 0 ? shares.toFixed(4) : "0"} shares (sponsored)`;
-  else ctaLabel = `Burn ${shares > 0 ? shares.toFixed(4) : "0"} shares`;
+  else if (aaActive) ctaLabel = `Burn ${shares > 0 ? fmtShares(shares) : "0"} shares (sponsored)`;
+  else ctaLabel = `Burn ${shares > 0 ? fmtShares(shares) : "0"} shares`;
 
   const hasInputError = overShares || insufficientIdle;
 
@@ -285,7 +302,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
       >
         <SumRow
           k="Your LP shares"
-          v={sharesOwned.toFixed(sharesOwned < 1 ? 4 : 2)}
+          v={fmtShares(sharesOwned)}
         />
         <SumRow
           k="Position value"
@@ -312,7 +329,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
             className="font-mono text-ink-mute tabular"
             style={{ fontSize: 10 }}
           >
-            owned {sharesOwned.toFixed(sharesOwned < 1 ? 4 : 2)}
+            owned {fmtShares(sharesOwned)}
           </span>
         </div>
         <div
@@ -346,7 +363,9 @@ export function LpWithdrawModal({ open, onClose }: Props) {
             <button
               key={frac}
               type="button"
-              onClick={() => setSharesStr((sharesOwned * frac).toFixed(6))}
+              // 10 decimals so micro-shares survive the percentage buttons
+              // after a dust first-depositor event skews the share price.
+              onClick={() => setSharesStr((sharesOwned * frac).toFixed(10))}
               disabled={!isConnected || sharesOwned <= 0}
               className="bg-transparent border border-hairline rounded-[2px] hover:border-ink transition-colors"
               style={{ padding: "4px 9px", fontSize: 10 }}
@@ -371,9 +390,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
         />
         <PreviewRow
           k="Remaining shares"
-          v={(sharesOwned - shares).toFixed(
-            sharesOwned - shares < 1 ? 4 : 2,
-          )}
+          v={fmtShares(sharesOwned - shares)}
         />
       </div>
     </ModalShell>
