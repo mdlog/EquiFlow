@@ -39,7 +39,9 @@ const SECS_PER_BLOCK = 0.25;
 // the event-label formatting changes (e.g. v1 → v2 fix for LP USDG decimals).
 // Old `v1` entries will be orphaned in localStorage but stop being read; the
 // `v2` re-scan starts from genesis on next page load.
-const CACHE_KEY_PREFIX = "equiflow:position-events:v2";
+// Bump to v3 because LP event labels now embed share-price context — old
+// cached label strings would otherwise persist without the suffix.
+const CACHE_KEY_PREFIX = "equiflow:position-events:v3";
 
 interface CachedShape {
   lastScannedBlock: string;
@@ -120,6 +122,35 @@ const LP_WITHDRAWN_EVENT = parseAbiItem(
 /// If a future deploy changes USDG decimals (unlikely — USDC and PYUSD-grade
 /// stablecoins are universally 6-dec), update this constant.
 const USDG_DECIMALS = 6;
+
+/// Build the "(@$X/share)" suffix appended to LP deposit/withdraw event
+/// labels so the user understands why `$10 USDG → 1.00e-5 shares` is
+/// internally consistent — the share price floated to ~$1M/share when the
+/// pool was fully withdrawn and only DEAD_SHARES + accrued borrower
+/// interest remained. Returns an empty string when the price is near $1
+/// (normal range) so we don't clutter the row when there's nothing to
+/// explain.
+function formatSharePriceSuffix(
+  usdgRaw: bigint,
+  sharesRaw: bigint,
+  usdgDecimals: number,
+): string {
+  if (sharesRaw === 0n) return "";
+  const usdgUsd = Number(usdgRaw) / 10 ** usdgDecimals;
+  const sharesDisplay = Number(sharesRaw) / 1e18;
+  if (sharesDisplay === 0) return "";
+  const pricePerShare = usdgUsd / sharesDisplay;
+  if (pricePerShare <= 0) return "";
+  // Hide for "normal" share prices (between $0.50 and $2 — common ERC-4626
+  // range when interest has accrued a bit). Show otherwise.
+  if (pricePerShare >= 0.5 && pricePerShare <= 2) return "";
+  let priceStr: string;
+  if (pricePerShare >= 1e6) priceStr = `$${(pricePerShare / 1e6).toFixed(2)}M`;
+  else if (pricePerShare >= 1e3) priceStr = `$${(pricePerShare / 1e3).toFixed(2)}k`;
+  else if (pricePerShare >= 0.01) priceStr = `$${pricePerShare.toFixed(2)}`;
+  else priceStr = `$${pricePerShare.toExponential(2)}`;
+  return ` (@ ${priceStr}/share)`;
+}
 
 export type PositionEventKind =
   | "pledge"
@@ -370,16 +401,23 @@ export function usePositionEvents(user: Address | undefined): {
       /// NOTE: `usdgAmount` is emitted in RAW USDG units (6 decimals) — not the
       /// 1e18-scaled USD used by Pledged/Repaid/Liquidated. Using 18 here makes
       /// a 10 USDG deposit display as <$0.01 (10e6 / 1e18 ≈ 1e-11).
+      ///
+      /// Share-price suffix: when the share count would otherwise read as a
+      /// confusing "1e-5 shares for $10 USDG" — which happens after a full LP
+      /// withdrawal leaves only DEAD_SHARES against accrued borrower interest
+      /// — append the implied price per displayed share so the user sees WHY
+      /// the share count looks off. See L-07 in the audit log.
       for (const log of lpDeposited) {
         if ((log.args.lp ?? "").toLowerCase() !== userLower) continue;
         const usdg = log.args.usdgAmount ?? 0n;
         const shares = log.args.sharesMinted ?? 0n;
         const ageMs = Number(head - log.blockNumber) * SECS_PER_BLOCK * 1000;
+        const priceSuffix = formatSharePriceSuffix(usdg, shares, USDG_DECIMALS);
         out.push({
           kind: "lp-deposit",
           symbol: "USDG",
           token: null,
-          label: `LP deposit · ${fmtUsd(usdg, USDG_DECIMALS)} USDG → ${fmtTokenAmt(shares, 18)} shares`,
+          label: `LP deposit · ${fmtUsd(usdg, USDG_DECIMALS)} USDG → ${fmtTokenAmt(shares, 18)} shares${priceSuffix}`,
           valueDisplay: fmtUsd(usdg, USDG_DECIMALS, "+"),
           valueColor: "lp-deposit",
           blockNumber: log.blockNumber,
@@ -397,11 +435,12 @@ export function usePositionEvents(user: Address | undefined): {
         const usdg = log.args.usdgAmount ?? 0n;
         const shares = log.args.sharesBurned ?? 0n;
         const ageMs = Number(head - log.blockNumber) * SECS_PER_BLOCK * 1000;
+        const priceSuffix = formatSharePriceSuffix(usdg, shares, USDG_DECIMALS);
         out.push({
           kind: "lp-withdraw",
           symbol: "USDG",
           token: null,
-          label: `LP withdraw · ${fmtUsd(usdg, USDG_DECIMALS)} USDG ← ${fmtTokenAmt(shares, 18)} shares`,
+          label: `LP withdraw · ${fmtUsd(usdg, USDG_DECIMALS)} USDG ← ${fmtTokenAmt(shares, 18)} shares${priceSuffix}`,
           valueDisplay: fmtUsd(usdg, USDG_DECIMALS, "−"),
           valueColor: "lp-withdraw",
           blockNumber: log.blockNumber,
