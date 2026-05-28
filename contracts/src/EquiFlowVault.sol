@@ -7,6 +7,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
+import {IInterestRateModel} from "./interest/IInterestRateModel.sol";
 
 interface IConfidenceOracle {
     function confidence() external view returns (uint64);
@@ -78,7 +79,20 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
     mapping(address user => uint256) public sharesOf;
 
     // ── Interest model ──
-    /// @notice Linear interest rate in BPS per year. Settable by owner.
+    /// @notice Pluggable interest rate model. When unset (address(0)) the
+    ///         vault falls back to the legacy flat `borrowRateBps` so the
+    ///         contract remains deployable before an IRM is published.
+    IInterestRateModel public irm;
+    /// @notice Pending IRM swap, executable after `OWNER_WITHDRAW_DELAY`.
+    struct PendingIrm {
+        address irm;
+        uint256 readyAt;
+    }
+    PendingIrm public pendingIrm;
+    /// @notice Legacy flat rate. Still used when `irm` is unset. Owner-set
+    ///         via `setBorrowRateBps`. Kept for backwards compatibility
+    ///         with existing deploys; once an IRM is wired this value is
+    ///         no longer consulted.
     uint256 public borrowRateBps;
     /// @notice Compound-style borrow index. Starts at 1e18, grows over time.
     uint256 public borrowIndex = INDEX_DECIMALS;
@@ -211,6 +225,9 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
     event DepositIntentCreated(address indexed lp, uint256 amount, uint256 deadline);
     event DepositIntentCancelled(address indexed lp);
     event BadDebtWrittenOff(address indexed user, uint256 debtUsd, uint256 fromReserves, uint256 fromLp);
+    event IrmScheduled(address indexed irm, uint256 readyAt);
+    event IrmExecuted(address indexed previous, address indexed current);
+    event IrmCancelled();
     event OwnerWithdrawScheduled(uint256 amount, address indexed to, uint256 readyAt);
     event OwnerWithdrawExecuted(uint256 amount, address indexed to);
     event OwnerWithdrawCancelled();
@@ -263,6 +280,8 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
     error WidenNotReady();
     error NarrowOnly();
     error WithdrawNotReady();
+    error IrmNotReady();
+    error IrmInvalid();
 
     // ─── Constructor ─────────────────────────────────────────────────────
     constructor(
@@ -390,12 +409,64 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
 
     /// @notice Update annual borrow rate. Accrues pending interest at the old
     ///         rate first so the change is forward-looking only.
+    ///
+    ///         Legacy path: only meaningful when `irm == address(0)`. Once a
+    ///         pluggable IRM is wired in (`executeIrm`), `_currentBorrowRateBps`
+    ///         reads from the IRM instead and this setter has no observable
+    ///         effect on accrual.
     function setBorrowRateBps(uint256 newRate) external onlyOwner {
         if (newRate > MAX_BORROW_RATE_BPS) revert RateTooHigh();
         _accrueInterest();
         uint256 old = borrowRateBps;
         borrowRateBps = newRate;
         emit BorrowRateSet(old, newRate);
+    }
+
+    /// @notice Schedule a swap of the active interest rate model. Goes
+    ///         through the same `OWNER_WITHDRAW_DELAY` queue used by other
+    ///         risk-affecting parameter changes so borrowers can observe
+    ///         and react before the new curve goes live.
+    ///
+    ///         The proposed model is sanity-called once (getBorrowRate(0))
+    ///         at schedule time to reject obviously-broken deploys early.
+    function scheduleIrm(address newIrm) external onlyOwner {
+        if (newIrm == address(0)) revert IrmInvalid();
+        // Sanity probe: any conforming model must accept utilization=0.
+        IInterestRateModel(newIrm).getBorrowRate(0);
+        pendingIrm = PendingIrm({
+            irm: newIrm,
+            readyAt: block.timestamp + OWNER_WITHDRAW_DELAY
+        });
+        emit IrmScheduled(newIrm, block.timestamp + OWNER_WITHDRAW_DELAY);
+    }
+
+    /// @notice Execute a previously-scheduled IRM swap. Settles pending
+    ///         interest at the OLD model first so the change is
+    ///         forward-looking and the historical accrual stays correct.
+    function executeIrm() external onlyOwner {
+        PendingIrm memory p = pendingIrm;
+        if (p.irm == address(0) || block.timestamp < p.readyAt) revert IrmNotReady();
+        _accrueInterest();
+        address prev = address(irm);
+        irm = IInterestRateModel(p.irm);
+        delete pendingIrm;
+        emit IrmExecuted(prev, p.irm);
+    }
+
+    function cancelIrm() external onlyOwner {
+        delete pendingIrm;
+        emit IrmCancelled();
+    }
+
+    /// @dev Resolves the rate to use for the current accrual step.
+    ///      When an IRM is wired in, this delegates to it and clamps the
+    ///      result against MAX_BORROW_RATE_BPS regardless of what the
+    ///      model returns (defense in depth — a buggy IRM cannot push
+    ///      rates above the protocol cap).
+    function _currentBorrowRateBps() internal view returns (uint256) {
+        if (address(irm) == address(0)) return borrowRateBps;
+        uint256 raw = irm.getBorrowRate(utilizationBps());
+        return raw > MAX_BORROW_RATE_BPS ? MAX_BORROW_RATE_BPS : raw;
     }
 
     /// @notice Update protocol's interest cut. Accrues at the old factor first.
@@ -967,18 +1038,22 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
     ///         (1 − reserveFactor). Interest flows from borrowers to LPs net
     ///         of the protocol's cut.
     function lpApyBps() external view returns (uint256) {
-        uint256 gross = (borrowRateBps * utilizationBps()) / BPS;
+        uint256 rate = _currentBorrowRateBps();
+        uint256 gross = (rate * utilizationBps()) / BPS;
         return (gross * (BPS - reserveFactorBps)) / BPS;
     }
 
     /// @notice Gross borrow APY for borrowers (before LP/reserve split).
+    ///         Reads from the active IRM (or legacy flat rate when IRM is
+    ///         unwired).
     function borrowApyBps() external view returns (uint256) {
-        return borrowRateBps;
+        return _currentBorrowRateBps();
     }
 
     /// @notice Protocol's share of interest as APY (information only).
     function reserveApyBps() external view returns (uint256) {
-        uint256 gross = (borrowRateBps * utilizationBps()) / BPS;
+        uint256 rate = _currentBorrowRateBps();
+        uint256 gross = (rate * utilizationBps()) / BPS;
         return (gross * reserveFactorBps) / BPS;
     }
 
@@ -1253,8 +1328,9 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
         uint256 dt = block.timestamp - lastAccruedAt;
         if (dt == 0) return;
 
-        if (totalBorrowedUsd > 0 && borrowRateBps > 0) {
-            uint256 growthFactor = (borrowRateBps * dt * INDEX_DECIMALS) /
+        uint256 rate = _currentBorrowRateBps();
+        if (totalBorrowedUsd > 0 && rate > 0) {
+            uint256 growthFactor = (rate * dt * INDEX_DECIMALS) /
                 (BPS * SECONDS_PER_YEAR);
             uint256 indexDelta = (borrowIndex * growthFactor) / INDEX_DECIMALS;
             uint256 interest = (totalBorrowedUsd * growthFactor) / INDEX_DECIMALS;
@@ -1272,10 +1348,11 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
     ///      `borrowedOf` etc so reads reflect accrual even before a mutation.
     function _projectedBorrowIndex() internal view returns (uint256) {
         uint256 dt = block.timestamp - lastAccruedAt;
-        if (dt == 0 || totalBorrowedUsd == 0 || borrowRateBps == 0) {
+        uint256 rate = _currentBorrowRateBps();
+        if (dt == 0 || totalBorrowedUsd == 0 || rate == 0) {
             return borrowIndex;
         }
-        uint256 growthFactor = (borrowRateBps * dt * INDEX_DECIMALS) /
+        uint256 growthFactor = (rate * dt * INDEX_DECIMALS) /
             (BPS * SECONDS_PER_YEAR);
         uint256 indexDelta = (borrowIndex * growthFactor) / INDEX_DECIMALS;
         return borrowIndex + indexDelta;
@@ -1284,8 +1361,9 @@ contract EquiFlowVault is Ownable, ReentrancyGuard, Pausable {
     /// @dev View-only projection of interest pending since lastAccruedAt.
     function _pendingInterest() internal view returns (uint256) {
         uint256 dt = block.timestamp - lastAccruedAt;
-        if (dt == 0 || totalBorrowedUsd == 0 || borrowRateBps == 0) return 0;
-        uint256 growthFactor = (borrowRateBps * dt * INDEX_DECIMALS) /
+        uint256 rate = _currentBorrowRateBps();
+        if (dt == 0 || totalBorrowedUsd == 0 || rate == 0) return 0;
+        uint256 growthFactor = (rate * dt * INDEX_DECIMALS) /
             (BPS * SECONDS_PER_YEAR);
         return (totalBorrowedUsd * growthFactor) / INDEX_DECIMALS;
     }
