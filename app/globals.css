@@ -7,8 +7,11 @@
   --paper-deep: #ECE5D2;
   --ink: #1A1814;
   --ink-soft: #4A463E;
-  --ink-mute: #857F72;
+  /* ink-mute darkened from #857F72 (~4.04:1) to #6B6558 (~5.3:1) per WCAG SC 1.4.3 AA */
+  --ink-mute: #6B6558;
+  /* hairline-strong meets SC 1.4.11 (≥3:1) for focusable component borders */
   --hairline: #D9D2C2;
+  --hairline-strong: #A89F8A;
   --hairline-soft: #EAE4D5;
   --up: oklch(0.48 0.12 145);
   --up-soft: oklch(0.92 0.04 145);
@@ -17,6 +20,19 @@
   --amber: oklch(0.62 0.15 70);
   --amber-soft: oklch(0.93 0.06 80);
   --brand: oklch(0.30 0.06 250);
+
+  /* Design tokens — radius/spacing/text scale to replace inline magic numbers */
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 12px;
+  --text-eyebrow: 10px;
+  --text-meta: 11px;
+  --text-mono-sm: 12px;
+  --text-body: 13px;
+  --text-body-lg: 14px;
+  --space-modal-x: 24px;
+  --space-modal-y: 20px;
 }
 
 @theme inline {
@@ -45,6 +61,11 @@
   --animate-marquee: ef-marquee 60s linear infinite;
   --animate-fade-in: ef-fade-in 0.4s ease-out;
   --animate-spin-slow: ef-spin 1.6s linear infinite;
+
+  --radius-xs: var(--radius-xs);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
 }
 
 * {
@@ -168,6 +189,10 @@ html, body {
   0%, 100% { box-shadow: 0 0 0 6px var(--paper), 0 0 0 7px var(--hairline-soft); }
   50%      { box-shadow: 0 0 0 6px var(--paper), 0 0 0 7px var(--ink); }
 }
+@keyframes ef-shimmer {
+  0%   { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
 
 .animate-tick-up   { animation: ef-tick-up 0.9s ease-out; }
 .animate-tick-down { animation: ef-tick-down 0.9s ease-out; }
@@ -191,3 +216,49 @@ button:focus-visible {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--hairline); border-radius: 4px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--ink-mute); }
+
+/* ─── Skip link (WCAG SC 2.4.1 bypass blocks) ─────────────────── */
+.skip-link {
+  position: absolute;
+  top: -40px;
+  left: 8px;
+  background: var(--ink);
+  color: var(--paper);
+  padding: 8px 12px;
+  border-radius: var(--radius-xs);
+  font-size: var(--text-body);
+  font-weight: 500;
+  z-index: 100;
+  transition: top 0.15s ease-out;
+}
+.skip-link:focus {
+  top: 8px;
+  outline: 2px solid var(--paper);
+  outline-offset: 2px;
+}
+
+/* ─── Reduced motion (WCAG SC 2.3.3) ──────────────────────────── */
+/* Kill all decorative animations & transitions for users with the
+   prefers-reduced-motion preference. Per-component RAF loops (HeroOrbit)
+   should also consult window.matchMedia('(prefers-reduced-motion: reduce)'). */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ─── Screen-reader-only utility ──────────────────────────────── */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}

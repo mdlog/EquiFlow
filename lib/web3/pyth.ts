@@ -94,6 +94,25 @@ export const PYTH_ADAPTER_ABI = [
     inputs: [{ name: "updateData", type: "bytes[]" }],
     outputs: [],
   },
+  // H-02 fix (audit pass 2): keeper escape hatch when the deviation cap would
+  // otherwise reject every update during a legitimate gap move. Callable once
+  // the cached price is older than `DEVIATION_OVERRIDE_DELAY` (30 min).
+  {
+    type: "function",
+    name: "forceUpdatePrice",
+    stateMutability: "payable",
+    inputs: [{ name: "updateData", type: "bytes[]" }],
+    outputs: [],
+  },
+  // Read the current per-update deviation ceiling (bps). Used by the keeper
+  // to decide between `updatePrice` and `forceUpdatePrice` paths.
+  {
+    type: "function",
+    name: "maxDeviationBps",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint256" }],
+  },
   {
     type: "function",
     name: "latestRoundData",

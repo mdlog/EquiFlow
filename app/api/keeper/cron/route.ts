@@ -13,13 +13,16 @@ import {
   PYTH_PRICE_IDS,
   craftMockPythUpdate,
 } from "@/lib/web3/pyth";
-import { fetchFreshestPyth } from "@/lib/web3/hermes";
+import { fetchFreshestPyth, validatePythQuote } from "@/lib/web3/hermes";
 import { EQUIFLOW_VAULT_ABI, EQUIFLOW_VAULT_ADDRESS } from "@/lib/contracts";
 import { STOCK_TOKEN_ADDRESSES } from "@/lib/contracts";
-import { STOCKS } from "@/lib/config/stocks";
 import { recordPrice } from "@/lib/web3/price-history";
 import { acquireNonce, resyncNonce } from "@/lib/web3/keeper-nonce";
-import { requireBearerSecret, sanitizeError } from "@/lib/api/security";
+import {
+  requireBearerSecret,
+  requireRateLimit,
+  sanitizeError,
+} from "@/lib/api/security";
 import { ApiError, withErrorHandler } from "@/lib/api/handler";
 
 /// Cron-friendly keeper sweep.
@@ -53,7 +56,7 @@ interface TickResult {
   symbol: string;
   token: Address;
   adapter: Address;
-  source: "pyth" | "mock";
+  source: "pyth";
   price: number;
   publishTime: number;
   txHash?: Hex;
@@ -68,11 +71,14 @@ for (const [sym, addr] of Object.entries(STOCK_TOKEN_ADDRESSES)) {
   if (addr) TOKEN_TO_SYMBOL.set(addr.toLowerCase(), sym);
 }
 
-const STOCK_BY_SYM = new Map(STOCKS.map((s) => [s.sym, s]));
-
 export const GET = withErrorHandler(async (req: Request) => {
   // Bearer auth — timing-safe compare, fail-closed in production.
   requireBearerSecret(req, "CRON_SECRET");
+
+  // Depth-defense rate limit on top of bearer auth. Vercel cron fires once
+  // every 2 minutes (~30/h), so 12/min per IP leaves wide headroom for legit
+  // traffic but caps damage from a leaked secret or a preview-URL exposure.
+  await requireRateLimit(req, { bucket: "cron-keeper", windowSeconds: 60, max: 12 });
 
   const pk = process.env.KEEPER_PRIVATE_KEY;
   if (!pk || !PK_RE.test(pk)) throw new ApiError(503, "keeper_disabled");
@@ -128,19 +134,20 @@ export const GET = withErrorHandler(async (req: Request) => {
   );
 
   // ── 3. Per-asset: fetch quote, encode, send updatePrice ────────────────
+  const ZERO_ADDR = "0x0000000000000000000000000000000000000000" as Address;
   const results: TickResult[] = [];
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i];
-    const symbol = TOKEN_TO_SYMBOL.get(token.toLowerCase());
-    const meta = STOCK_BY_SYM.get(symbol ?? "");
     const assetCfg = assetReads[i];
+    if (!token || !assetCfg) continue;
+    const symbol = TOKEN_TO_SYMBOL.get(token.toLowerCase());
 
-    if (!symbol || !meta) {
+    if (!symbol) {
       results.push({
-        symbol: symbol ?? "?",
+        symbol: "?",
         token,
-        adapter: "0x0000000000000000000000000000000000000000" as Address,
-        source: "mock",
+        adapter: ZERO_ADDR,
+        source: "pyth",
         price: 0,
         publishTime: 0,
         skipped: "unknown_token",
@@ -151,8 +158,8 @@ export const GET = withErrorHandler(async (req: Request) => {
       results.push({
         symbol,
         token,
-        adapter: "0x0000000000000000000000000000000000000000" as Address,
-        source: "mock",
+        adapter: ZERO_ADDR,
+        source: "pyth",
         price: 0,
         publishTime: 0,
         error: "assets_read_failed",
@@ -171,7 +178,7 @@ export const GET = withErrorHandler(async (req: Request) => {
         symbol,
         token,
         adapter,
-        source: "mock",
+        source: "pyth",
         price: 0,
         publishTime: 0,
         skipped: "asset_disabled",
@@ -185,7 +192,7 @@ export const GET = withErrorHandler(async (req: Request) => {
         symbol,
         token,
         adapter,
-        source: "mock",
+        source: "pyth",
         price: 0,
         publishTime: 0,
         skipped: "no_price_id",
@@ -193,40 +200,57 @@ export const GET = withErrorHandler(async (req: Request) => {
       continue;
     }
 
-    // Fetch fresh Pyth quote (preferred) or fall back to a random walk
+    // Fetch the freshest Pyth quote. If Hermes is unavailable or returns a
+    // quote that fails freshness/confidence checks, SKIP this symbol — never
+    // fall back to fabricated prices. A stale or fake on-chain price would
+    // distort health-factor / LTV checks at the vault level.
     const quote = await fetchFreshestPyth(symbol);
     const nowSec = Math.floor(Date.now() / 1000);
 
-    let priceForLog: number;
-    let updateBytes: Hex;
-    let source: "pyth" | "mock";
-    let publishTime: number;
-
-    if (quote) {
-      priceForLog = Number(quote.price) / 10 ** -quote.expo;
-      // Use server `now` rather than Hermes publishTime — adapter staleAfter
-      // is measured against block.timestamp on RBN, and Hermes may be a few
-      // seconds behind. Using `now` maximises the freshness window.
-      publishTime = nowSec;
-      updateBytes = craftMockPythUpdate({
-        priceId,
-        price: quote.price,
-        expo: quote.expo,
-        publishTime,
+    if (!quote) {
+      results.push({
+        symbol,
+        token,
+        adapter,
+        source: "pyth",
+        price: 0,
+        publishTime: 0,
+        skipped: "hermes_unavailable",
       });
-      source = "pyth";
-    } else {
-      const delta = (Math.random() - 0.5) * 2 * meta.volatility * meta.price;
-      priceForLog = Math.max(meta.price + delta, 0.01);
-      publishTime = nowSec;
-      updateBytes = craftMockPythUpdate({
-        priceId,
-        price: BigInt(Math.round(priceForLog * 1e8)),
-        expo: -8,
-        publishTime,
-      });
-      source = "mock";
+      continue;
     }
+
+    const validation = validatePythQuote(quote, nowSec);
+    if (!validation.ok) {
+      console.warn(
+        `[keeper/cron] quote_rejected sym=${symbol} reason=${validation.reason} ` +
+          `age=${validation.ageSeconds}s conf=${validation.confBps}bps`,
+      );
+      results.push({
+        symbol,
+        token,
+        adapter,
+        source: "pyth",
+        price: 0,
+        publishTime: 0,
+        skipped: `quote_${validation.reason}`,
+      });
+      continue;
+    }
+
+    const priceForLog = Number(quote.price) / 10 ** -quote.expo;
+    // On-chain publishTime is the server's "I attest this submission is fresh"
+    // timestamp. validatePythQuote() above already guarantees the underlying
+    // Hermes publish_time is within MAX_PUBLISH_AGE_SECONDS of now.
+    const publishTime = nowSec;
+    const updateBytes: Hex = craftMockPythUpdate({
+      priceId,
+      price: quote.price,
+      expo: quote.expo,
+      publishTime,
+      conf: quote.conf,
+    });
+    const source: "pyth" = "pyth";
 
     try {
       const nonce = await acquireNonce(publicClient, account.address);

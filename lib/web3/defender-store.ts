@@ -18,9 +18,10 @@
 
 import type { Address } from "viem";
 
-const URL = process.env.UPSTASH_REDIS_REST_URL;
-const TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
-const REDIS_ENABLED = !!(URL && TOKEN);
+const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL;
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+const REDIS_ENABLED = !!(UPSTASH_URL && UPSTASH_TOKEN);
+const IS_PROD = process.env.NODE_ENV === "production";
 
 const REDIS_KEY_PREFIX = "defender:";
 const REDIS_INDEX = "defender:active";
@@ -50,10 +51,10 @@ const MEM: Map<string, DefenderConfig> = (() => {
 
 async function redisCall(cmd: (string | number)[]): Promise<unknown> {
   if (!REDIS_ENABLED) return null;
-  const res = await fetch(`${URL}`, {
+  const res = await fetch(UPSTASH_URL as string, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${TOKEN}`,
+      Authorization: `Bearer ${UPSTASH_TOKEN}`,
       "Content-Type": "application/json",
     },
     body: JSON.stringify(cmd),
@@ -63,6 +64,17 @@ async function redisCall(cmd: (string | number)[]): Promise<unknown> {
   const json = (await res.json()) as { result?: unknown; error?: string };
   if (json.error) throw new Error(`upstash_cmd_${json.error}`);
   return json.result;
+}
+
+/// In production we never silently degrade to the per-process MEM map — across
+/// Vercel lambdas different instances would see different state, so a defender
+/// config registered on instance A could be invisible to the keeper running
+/// on instance B. Hard-fail loudly instead.
+function failOpenIfDev(err: unknown, op: string): void {
+  if (REDIS_ENABLED && IS_PROD) {
+    throw err instanceof Error ? err : new Error(`defender_store_${op}_failed`);
+  }
+  console.warn(`[defender] redis ${op} failed, falling back to mem:`, err);
 }
 
 const WEEK = 7 * 86400;
@@ -79,7 +91,7 @@ export async function readConfig(wallet: Address): Promise<DefenderConfig | null
       const cfg = JSON.parse(raw) as DefenderConfig;
       return rolloverIfExpired(cfg);
     } catch (err) {
-      console.warn("[defender] redis read failed, falling back to mem:", err);
+      failOpenIfDev(err, "read");
     }
   }
   const cfg = MEM.get(key);
@@ -97,7 +109,7 @@ export async function writeConfig(cfg: DefenderConfig): Promise<void> {
       await redisCall(["SADD", REDIS_INDEX, key]);
       return;
     } catch (err) {
-      console.warn("[defender] redis write failed, falling back to mem:", err);
+      failOpenIfDev(err, "write");
     }
   }
   MEM.set(key, cfg);
@@ -111,7 +123,7 @@ export async function deleteConfig(wallet: Address): Promise<void> {
       await redisCall(["SREM", REDIS_INDEX, key]);
       return;
     } catch (err) {
-      console.warn("[defender] redis delete failed, falling back to mem:", err);
+      failOpenIfDev(err, "delete");
     }
   }
   MEM.delete(key);
@@ -134,7 +146,7 @@ export async function listActive(): Promise<DefenderConfig[]> {
       }
       return out;
     } catch (err) {
-      console.warn("[defender] redis list failed, falling back to mem:", err);
+      failOpenIfDev(err, "list");
     }
   }
   for (const cfg of MEM.values()) {
@@ -175,20 +187,37 @@ async function clearUsageCounter(walletLc: string): Promise<void> {
 /// concurrent calls don't lose increments within one Node worker. Cross-
 /// process races still possible without Upstash, but those are noted in
 /// the audit and documented in SECURITY_RUNBOOK.md.
-const usageMutexes = new Map<string, Promise<void>>();
+const usageMutexes = new Map<string, Promise<unknown>>();
 
-async function withMutex<T>(key: string, fn: () => Promise<T>): Promise<T> {
+/// Per-key promise-chain mutex. Each entry in `usageMutexes` is the latest
+/// promise to acquire the lock — new callers chain onto it and replace the
+/// entry, so the lock is FIFO. The entry is cleared once it is the tail.
+///
+/// Exported for read-modify-write call-sites in routes (e.g. defender/register
+/// preserving weekUsed/weekStart) so they share the same lock domain.
+export async function withWalletMutex<T>(
+  wallet: Address,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const key = lc(wallet);
   const prior = usageMutexes.get(key) ?? Promise.resolve();
-  let release!: () => void;
-  const next = new Promise<void>((r) => (release = r));
-  usageMutexes.set(key, prior.then(() => next));
+  // Set the new tail BEFORE awaiting prior so concurrent callers see us.
+  let resolveNext!: () => void;
+  const next = new Promise<void>((r) => (resolveNext = r));
+  const myTail = prior.then(() => next);
+  usageMutexes.set(key, myTail);
   try {
     await prior;
     return await fn();
   } finally {
-    release();
-    if (usageMutexes.get(key) === next) usageMutexes.delete(key);
+    resolveNext();
+    // Only clear the map entry if no one chained after us.
+    if (usageMutexes.get(key) === myTail) usageMutexes.delete(key);
   }
+}
+
+async function withMutex<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  return withWalletMutex(key as Address, fn);
 }
 
 async function redisIncrBy(key: string, delta: bigint): Promise<bigint | null> {

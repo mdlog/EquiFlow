@@ -102,11 +102,26 @@ interface TickResponse {
 
 // The server resolves adapter + priceId + freshest Pyth quote itself from the
 // symbol — caller-supplied prices are never trusted (see /api/keeper/tick).
+//
+// Auth: when `KEEPER_PRIVATE_KEY` is set server-side, the tick endpoint
+// requires `Authorization: Bearer <CRON_SECRET>`. The browser keeper reads
+// the matching `NEXT_PUBLIC_CRON_SECRET` (same value, public-bundled) and
+// sends it. This is a rate-limit gate, not a real auth boundary — the
+// secret is visible in the JS bundle. For testnet acceptable; production
+// should rotate to a separate `NEXT_PUBLIC_KEEPER_TOKEN` distinct from the
+// long-lived cron secret.
 async function postTick(payload: { symbol: string }): Promise<TickResponse> {
   try {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    const browserSecret = process.env.NEXT_PUBLIC_CRON_SECRET;
+    if (browserSecret) {
+      headers.Authorization = `Bearer ${browserSecret}`;
+    }
     const res = await fetch("/api/keeper/tick", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(payload),
     });
     const data = (await res.json()) as TickResponse;
@@ -216,10 +231,15 @@ export function usePriceKeeper({
     if (adapters.length === 0) return;
 
     const tick = async () => {
+      // Skip ticks while the tab is hidden — Page Visibility API.
+      // Background tabs running the keeper drain battery, RPC quota, and
+      // create duplicate UserOps across windows for no UX benefit.
+      if (typeof document !== "undefined" && document.hidden) return;
       if (inflightRef.current) return;
       inflightRef.current = true;
       try {
         const a = adapters[cursorRef.current % adapters.length];
+        if (!a) return;
         cursorRef.current++;
 
         // fetchPythPrice runs only to surface activeSession in the verbose log

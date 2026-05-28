@@ -88,6 +88,19 @@ const nextConfig: NextConfig = {
     root: __dirname,
   },
   outputFileTracingRoot: __dirname,
+  // Aggressively tree-shake heavy web3 libs — viem/wagmi re-export hundreds
+  // of helpers but a typical client touches a dozen. Without this each
+  // import path re-pulls the full module.
+  experimental: {
+    optimizePackageImports: [
+      "viem",
+      "wagmi",
+      "@rainbow-me/rainbowkit",
+      "@tanstack/react-query",
+      "ox",
+      "permissionless",
+    ],
+  },
   async headers() {
     return [
       {

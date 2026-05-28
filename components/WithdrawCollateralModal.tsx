@@ -1,16 +1,18 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { type Address, type Hex, encodeFunctionData, parseUnits } from "viem";
 import {
   useWaitForTransactionReceipt,
   useWriteContract,
 } from "wagmi";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   EQUIFLOW_VAULT_ABI,
   STOCK_TOKEN_ADDRESSES,
 } from "@/lib/contracts";
 import { useVaultContext } from "@/lib/hooks/use-vault-context";
+import { usePosition } from "@/lib/hooks/use-position";
 import { ROBINHOOD_CHAIN_TESTNET_ID } from "@/lib/config/chain";
 import { fmt } from "@/lib/format";
 import { useStockPrices } from "@/lib/hooks/use-adapter-price";
@@ -19,7 +21,17 @@ import { useActiveWallet } from "@/lib/hooks/use-active-wallet";
 import { useSmartWallet } from "@/lib/aa/use-smart-wallet";
 import { sendUserOp } from "@/lib/aa/send-userop";
 import { AA_CONFIGURED } from "@/lib/web3/alchemy";
+import { parseAmount } from "@/lib/utils/bigint";
+import { friendlyError } from "@/lib/utils/error";
 import {
+  txErrorToast,
+  txPendingToast,
+  txSealedToast,
+} from "@/lib/utils/tx-toast";
+import { qkMatches } from "@/lib/hooks/query-keys";
+import { HealthFactorMeter } from "@/components/HealthFactorMeter";
+import {
+  ContractTrustLine,
   ModalActions,
   ModalFootnote,
   ModalShell,
@@ -57,20 +69,28 @@ export function WithdrawCollateralModal({
 }: Props) {
   const { vault } = useVaultContext();
   const VAULT_ADDR = vault.address;
-  const TOKEN_ADDR = vault.tokenAddress;
   const tokenSymbol = vault.borrowSymbol;
 
   const { isConnected } = useActiveWallet();
-  const { mode: aaMode, smartAccount, smartAddress, prepareForSubmit } =
+  const { mode: aaMode, smartAccount, prepareForSubmit } =
     useSmartWallet();
   const aaActive = aaMode !== "off" && smartAccount != null;
   const prices = useStockPrices();
+  const pos = usePosition();
+  const queryClient = useQueryClient();
+
+  const sharesId = useId();
+  const helperId = useId();
+  const errorId = useId();
 
   const [selectedSym, setSelectedSym] = useState<string>(lines[0]?.sym ?? "");
   const [sharesStr, setSharesStr] = useState("");
+  const [acknowledgeRisk, setAcknowledgeRisk] = useState(false);
+  const [toastId, setToastId] = useState<string | number | null>(null);
 
   useEffect(() => {
-    if (open && lines[0]) setSelectedSym(lines[0].sym);
+    const first = lines[0];
+    if (open && first) setSelectedSym(first.sym);
   }, [open, lines]);
 
   const line = lines.find((l) => l.sym === selectedSym);
@@ -97,9 +117,16 @@ export function WithdrawCollateralModal({
     newCollateralUsd > 0 ? (borrowedUsd / newCollateralUsd) * 100 : 0;
   const newHf =
     newLtv > 0 ? liqLtv / newLtv : Number.POSITIVE_INFINITY;
+  const currentHf =
+    borrowedUsd > 0 && collateralUsd > 0
+      ? liqLtv / ((borrowedUsd / collateralUsd) * 100)
+      : Number.POSITIVE_INFINITY;
   const overCap = withdrawUsd > maxWithdrawUsd + 0.001;
   const overBalance = line ? shares > line.shares + 1e-9 : false;
   const invalid = overCap || overBalance;
+  // Trip the safety checkbox once projected HF dips below 1.5 — the user is
+  // either flying close to the cap or moving into the amber band.
+  const requiresAck = shares > 0 && Number.isFinite(newHf) && newHf < 1.5;
 
   const { writeContract, data: txHash, isPending, error, reset } =
     useWriteContract();
@@ -115,22 +142,52 @@ export function WithdrawCollateralModal({
   const [aaError, setAaError] = useState<string | null>(null);
   const [aaBusy, setAaBusy] = useState(false);
   const sealed = eoaSealed || aaTxHash != null;
+  const busy = isPending || mining || aaBusy;
 
   useEffect(() => {
     if (!open) {
       setSharesStr("");
+      setAcknowledgeRisk(false);
       setAaTxHash(null);
       setAaError(null);
       setAaBusy(false);
+      setToastId(null);
       reset();
     }
   }, [open, reset]);
 
   useEffect(() => {
     if (!sealed) return;
+    if (toastId !== null) {
+      txSealedToast(toastId, {
+        action: `Withdraw ${shares} ${selectedSym}`,
+        txHash: aaTxHash ?? txHash,
+      });
+    }
+    queryClient.invalidateQueries({
+      predicate: (q) => qkMatches.postTx(q.queryKey),
+    });
+    queryClient.invalidateQueries({ queryKey: ["wagmi"] });
     const t = setTimeout(() => onClose(), 2000);
     return () => clearTimeout(t);
-  }, [sealed, onClose]);
+  }, [
+    sealed,
+    onClose,
+    toastId,
+    shares,
+    selectedSym,
+    aaTxHash,
+    txHash,
+    queryClient,
+  ]);
+
+  useEffect(() => {
+    if (!error) return;
+    if (toastId !== null) txErrorToast(toastId, error);
+  }, [error, toastId]);
+
+  const oracleStale = pos.oracleStale;
+  const showAckGate = requiresAck && !acknowledgeRisk;
 
   const canWithdraw =
     isConnected &&
@@ -138,24 +195,30 @@ export function WithdrawCollateralModal({
     !!VAULT_ADDR &&
     shares > 0 &&
     !invalid &&
-    !isPending &&
-    !mining &&
-    !aaBusy &&
+    !oracleStale &&
+    !showAckGate &&
+    !busy &&
     !sealed;
 
   function handleWithdraw() {
-    if (!tokenAddr || !VAULT_ADDR) return;
+    if (!tokenAddr || !VAULT_ADDR || !line) return;
     // Use the raw on-chain balance when the user is withdrawing their full
     // position. `parseUnits(shares.toFixed(18), 18)` drifts by ~1 wei on
     // non-exactly-representable decimals (e.g. 0.11), and the vault rejects
     // with `InsufficientCollateral()` even at +1 wei past the balance.
-    const fullWithdraw =
-      line !== undefined && Math.abs(shares - line.shares) < 1e-9;
-    const amount = fullWithdraw && line
+    const fullWithdraw = Math.abs(shares - line.shares) < 1e-9;
+    const amount = fullWithdraw
       ? line.sharesRaw
-      : parseUnits(shares.toFixed(18), 18);
+      : sharesStr.trim().length > 0
+        ? parseAmount(sharesStr, 18)
+        : parseUnits(shares.toFixed(18), 18);
+    if (amount <= 0n) return;
+    const id = txPendingToast({
+      action: `Withdraw ${shares} ${selectedSym}${aaActive ? " (sponsored)" : ""}`,
+    });
+    setToastId(id);
     if (aaActive && smartAccount && AA_CONFIGURED) {
-      void handleBundle(amount);
+      void handleBundle(amount, id);
       return;
     }
     writeContract({
@@ -167,7 +230,7 @@ export function WithdrawCollateralModal({
     });
   }
 
-  async function handleBundle(amount: bigint) {
+  async function handleBundle(amount: bigint, id: string | number) {
     if (!tokenAddr || !VAULT_ADDR || !smartAccount) return;
     setAaError(null);
     setAaBusy(true);
@@ -190,7 +253,8 @@ export function WithdrawCollateralModal({
       setAaTxHash(hash);
     } catch (err) {
       console.error("[WithdrawCollateralModal] UserOp failed:", err);
-      setAaError(err instanceof Error ? err.message : String(err));
+      setAaError(friendlyError(err));
+      txErrorToast(id, err);
     } finally {
       setAaBusy(false);
     }
@@ -199,6 +263,7 @@ export function WithdrawCollateralModal({
   let ctaLabel: string;
   if (!isConnected) ctaLabel = "Connect wallet";
   else if (!tokenAddr) ctaLabel = "Token not configured";
+  else if (oracleStale) ctaLabel = "Wait for next keeper tick";
   else if (aaBusy) ctaLabel = "Bundling sponsored UserOp…";
   else if (isPending) ctaLabel = "Sign in wallet…";
   else if (mining) ctaLabel = "Withdrawing…";
@@ -206,6 +271,8 @@ export function WithdrawCollateralModal({
     ctaLabel = `Sign withdraw (sponsored) · ${shares > 0 ? shares.toFixed(4) : "0"} ${selectedSym}`;
   else
     ctaLabel = `Sign withdraw · ${shares > 0 ? shares.toFixed(4) : "0"} ${selectedSym}`;
+
+  const hasInputError = overCap || overBalance || oracleStale;
 
   return (
     <ModalShell
@@ -216,7 +283,7 @@ export function WithdrawCollateralModal({
       footer={
         <>
           {overCap && (
-            <ValidationError>
+            <ValidationError id={errorId}>
               Withdrawal would breach LTV cap. Reduce amount or repay debt first.
             </ValidationError>
           )}
@@ -225,12 +292,34 @@ export function WithdrawCollateralModal({
               Exceeds your locked balance ({line?.shares} {selectedSym}).
             </ValidationError>
           )}
-          <TxError message={aaError ?? error?.message} />
+          {oracleStale && (
+            <ValidationError>
+              Oracle price is stale — wait for the next keeper tick.
+            </ValidationError>
+          )}
+          <TxError message={aaError ?? friendlyError(error)} />
           <TxLink hash={aaTxHash ?? txHash} />
           {sealed && (
             <SealedMessage>
               Unlocked {shares} {selectedSym} · refresh position to see update
             </SealedMessage>
+          )}
+          {requiresAck && (
+            <label
+              className="flex items-start gap-2 text-ink-soft"
+              style={{ fontSize: 11, lineHeight: 1.4 }}
+            >
+              <input
+                type="checkbox"
+                checked={acknowledgeRisk}
+                onChange={(e) => setAcknowledgeRisk(e.target.checked)}
+                style={{ marginTop: 2 }}
+              />
+              <span>
+                I understand this brings me closer to liquidation (new HF{" "}
+                <span className="font-mono">{newHf.toFixed(2)}</span>).
+              </span>
+            </label>
           )}
           <ModalActions
             onClose={onClose}
@@ -239,8 +328,10 @@ export function WithdrawCollateralModal({
               label: ctaLabel,
               onClick: handleWithdraw,
               disabled: !canWithdraw,
+              busy,
             }}
           />
+          <ContractTrustLine address={VAULT_ADDR} />
           <ModalFootnote>
             Calls{" "}
             <span className="font-mono">
@@ -274,32 +365,37 @@ export function WithdrawCollateralModal({
           <div className="eyebrow" style={{ marginBottom: 8 }}>
             Asset
           </div>
-          <div className="flex gap-1 flex-wrap">
-            {lines.map((l) => (
-              <button
-                key={l.sym}
-                type="button"
-                onClick={() => {
-                  setSelectedSym(l.sym);
-                  setSharesStr("");
-                }}
-                className="rounded-[2px] transition-colors"
-                style={{
-                  padding: "6px 10px",
-                  fontSize: 11,
-                  fontFamily: "JetBrains Mono",
-                  background:
-                    l.sym === selectedSym ? "var(--ink)" : "transparent",
-                  color:
-                    l.sym === selectedSym
-                      ? "var(--paper)"
-                      : "var(--ink-soft)",
-                  border: `1px solid ${l.sym === selectedSym ? "var(--ink)" : "var(--hairline)"}`,
-                }}
-              >
-                {l.sym}
-              </button>
-            ))}
+          <div
+            className="flex gap-1 flex-wrap"
+            role="radiogroup"
+            aria-label="Collateral asset to withdraw"
+          >
+            {lines.map((l) => {
+              const isSelected = l.sym === selectedSym;
+              return (
+                <button
+                  key={l.sym}
+                  type="button"
+                  role="radio"
+                  aria-checked={isSelected}
+                  onClick={() => {
+                    setSelectedSym(l.sym);
+                    setSharesStr("");
+                  }}
+                  className="rounded-[2px] transition-colors"
+                  style={{
+                    padding: "6px 10px",
+                    fontSize: 11,
+                    fontFamily: "JetBrains Mono",
+                    background: isSelected ? "var(--ink)" : "transparent",
+                    color: isSelected ? "var(--paper)" : "var(--ink-soft)",
+                    border: `1px solid ${isSelected ? "var(--ink)" : "var(--hairline)"}`,
+                  }}
+                >
+                  {l.sym}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
@@ -310,8 +406,11 @@ export function WithdrawCollateralModal({
           className="flex justify-between items-baseline"
           style={{ marginBottom: 8 }}
         >
-          <span className="eyebrow">Shares to withdraw</span>
+          <label htmlFor={sharesId} className="eyebrow">
+            Shares to withdraw
+          </label>
           <span
+            id={helperId}
             className="font-mono text-ink-mute tabular"
             style={{ fontSize: 10 }}
           >
@@ -328,6 +427,7 @@ export function WithdrawCollateralModal({
           }}
         >
           <input
+            id={sharesId}
             type="number"
             step="any"
             min="0"
@@ -335,6 +435,8 @@ export function WithdrawCollateralModal({
             onChange={(e) => setSharesStr(e.target.value)}
             disabled={!isConnected || mining || isPending}
             placeholder="0"
+            aria-describedby={`${helperId} ${errorId}`}
+            aria-invalid={hasInputError || undefined}
             className="font-serif font-medium tabular bg-transparent border-0 outline-none flex-1 w-full min-w-0"
             style={{ fontSize: 22, letterSpacing: "-0.02em" }}
           />
@@ -396,17 +498,9 @@ export function WithdrawCollateralModal({
                 : "var(--ink)"
           }
         />
-        <PreviewRow
-          k="Health factor"
-          v={newHf === Number.POSITIVE_INFINITY ? "∞" : newHf.toFixed(2)}
-          color={
-            newHf > 2.5
-              ? "var(--up)"
-              : newHf > 1.5
-                ? "var(--amber)"
-                : "var(--down)"
-          }
-        />
+        <div style={{ marginTop: 10 }}>
+          <HealthFactorMeter before={currentHf} after={newHf} />
+        </div>
       </div>
     </ModalShell>
   );

@@ -26,6 +26,55 @@ export interface PythQuote {
   conf: bigint;
 }
 
+/// Maximum age (in seconds) a Hermes-reported `publish_time` may have before
+/// the keeper refuses to push it on-chain. Tuned around Pyth equity cadence:
+///   - regular hours: publishes every ~300 ms
+///   - extended/overnight: every few seconds
+///   - real outages: minutes to hours
+/// 60 s rejects only genuine staleness, not normal jitter.
+const MAX_PUBLISH_AGE_SECONDS = 60;
+
+/// Maximum confidence interval (basis points of price) the keeper will accept.
+/// Pyth `conf` is in the same units as `price`. A 500 bps (5 %) cap rejects
+/// feed-source disagreements that imply the aggregate is unreliable.
+const MAX_CONF_BPS = 500n;
+
+export type QuoteRejectionReason =
+  | "negative_price"
+  | "stale_publish_time"
+  | "low_confidence";
+
+export interface QuoteValidationResult {
+  ok: boolean;
+  reason?: QuoteRejectionReason;
+  /// Age in seconds at the time of validation (informational; -1 when unset).
+  ageSeconds: number;
+  /// confidence-to-price ratio in basis points (informational).
+  confBps: number;
+}
+
+/// Reject a Pyth quote when it is stale or wide. Caller decides what to do
+/// with the rejection — the keeper routes throw 503, while UI surfaces can
+/// flag visually. Pure: no I/O.
+export function validatePythQuote(
+  quote: PythQuote,
+  nowSec: number = Math.floor(Date.now() / 1000),
+): QuoteValidationResult {
+  const age = nowSec - quote.publishTime;
+  const confBps =
+    quote.price > 0n ? Number((quote.conf * 10_000n) / quote.price) : Number.MAX_SAFE_INTEGER;
+  if (quote.price <= 0n) {
+    return { ok: false, reason: "negative_price", ageSeconds: age, confBps };
+  }
+  if (age > MAX_PUBLISH_AGE_SECONDS) {
+    return { ok: false, reason: "stale_publish_time", ageSeconds: age, confBps };
+  }
+  if (BigInt(confBps) > MAX_CONF_BPS) {
+    return { ok: false, reason: "low_confidence", ageSeconds: age, confBps };
+  }
+  return { ok: true, ageSeconds: age, confBps };
+}
+
 export async function fetchFreshestPyth(symbol: string): Promise<PythQuote | null> {
   const upper = symbol.toUpperCase();
   const sessions = PYTH_PRICE_IDS_BY_SESSION[upper];

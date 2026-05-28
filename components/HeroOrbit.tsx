@@ -749,7 +749,11 @@ function OrbitContent({
           >
             <img
               src="/logo-equiflow.png"
-              alt="EquiFlow"
+              alt=""
+              width={48}
+              height={48}
+              loading="lazy"
+              decoding="async"
               style={{ height: 48, width: "auto", display: "block" }}
             />
           </div>

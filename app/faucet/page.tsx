@@ -42,6 +42,7 @@ export default function FaucetPage() {
     <div className="flex flex-col min-h-screen">
       <PageNav current="faucet" />
 
+      <main id="main-content">
       {/* Hero */}
       <section className="border-b border-ink">
         <div className="max-w-[1320px] mx-auto px-4 sm:px-8 pt-6 pb-5">
@@ -305,6 +306,7 @@ export default function FaucetPage() {
           </div>
         </div>
       </section>
+      </main>
 
       <SiteFooter />
     </div>

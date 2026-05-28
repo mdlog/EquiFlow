@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Wordmark } from "./Wordmark";
@@ -22,20 +22,25 @@ export function PageNav({ current, rightExtras }: Props) {
   const pathname = usePathname();
   const active = current ?? PAGES.find((p) => pathname?.startsWith(p.href))?.id;
   const [menuOpen, setMenuOpen] = useState(false);
+  const mobileNavId = useId();
 
   return (
     <header className="border-b border-hairline bg-paper shrink-0">
       <div className="max-w-[1320px] mx-auto px-4 sm:px-8 py-3.5 flex items-center justify-between">
-        <Link href="/" className="flex no-underline text-ink shrink-0">
-          <Wordmark size={16} />
+        <Link href="/" className="flex no-underline text-ink shrink-0" aria-label="EquiFlow home">
+          <Wordmark size={16} priority />
         </Link>
-        <nav className="hidden md:flex gap-[22px] text-[13px]">
+        <nav
+          className="hidden md:flex gap-[22px] text-[13px]"
+          aria-label="Primary"
+        >
           {PAGES.map((p) => {
             const isActive = p.id === active;
             return (
               <Link
                 key={p.id}
                 href={p.href}
+                aria-current={isActive ? "page" : undefined}
                 className="no-underline pb-4 -mb-4 transition-colors"
                 style={{
                   color: isActive ? "var(--ink)" : "var(--ink-soft)",
@@ -57,7 +62,9 @@ export function PageNav({ current, rightExtras }: Props) {
             type="button"
             onClick={() => setMenuOpen((v) => !v)}
             className="md:hidden flex flex-col justify-center items-center w-9 h-9 border border-hairline rounded-[2px] bg-transparent"
-            aria-label="Toggle menu"
+            aria-label={menuOpen ? "Close menu" : "Open menu"}
+            aria-expanded={menuOpen}
+            aria-controls={mobileNavId}
           >
             <span className="block w-4 h-[1.5px] bg-ink transition-transform" style={{
               transform: menuOpen ? "translateY(2.75px) rotate(45deg)" : "none",
@@ -73,13 +80,18 @@ export function PageNav({ current, rightExtras }: Props) {
       </div>
 
       {menuOpen && (
-        <nav className="md:hidden border-t border-hairline bg-paper px-4 py-2 flex flex-col gap-0.5">
+        <nav
+          id={mobileNavId}
+          aria-label="Primary mobile"
+          className="md:hidden border-t border-hairline bg-paper px-4 py-2 flex flex-col gap-0.5"
+        >
           {PAGES.map((p) => {
             const isActive = p.id === active;
             return (
               <Link
                 key={p.id}
                 href={p.href}
+                aria-current={isActive ? "page" : undefined}
                 onClick={() => setMenuOpen(false)}
                 className="no-underline py-2.5 px-2 rounded-[2px] transition-colors hover:bg-paper-alt"
                 style={{

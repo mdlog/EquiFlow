@@ -154,6 +154,7 @@ export default function MarketsPage() {
     <div className="flex flex-col min-h-screen">
       <PageNav current="markets" />
 
+      <main id="main-content">
       <div className="max-w-[1320px] w-full mx-auto px-4 sm:px-8 pt-5 sm:pt-7 pb-4">
         <SectionHead
           kicker={`Markets · ${stats.assetCount ?? STOCKS.length} listed assets · Pyth Network oracles`}
@@ -381,6 +382,7 @@ export default function MarketsPage() {
         </div>
         </div>
       </div>
+      </main>
 
       <PledgeSidebar
         sym={pledgeSym ?? "TSLA"}

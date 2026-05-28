@@ -40,13 +40,12 @@ export function withErrorHandler<Args extends unknown[]>(
           { status: err.status },
         );
       }
+      // Never expose raw error messages to the client — they can contain RPC
+      // URLs with API keys, internal addresses, calldata, viem stack traces.
+      // Log on the server, return a stable opaque code.
       console.error("[api] unhandled:", err);
       return NextResponse.json(
-        {
-          ok: false,
-          error: "internal_error",
-          message: err instanceof Error ? err.message : String(err),
-        },
+        { ok: false, error: "internal_error" },
         { status: 500 },
       );
     }

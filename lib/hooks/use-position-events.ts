@@ -35,7 +35,11 @@ const SYMBOL_BY_ADDRESS = (() => {
 /// so history grows monotonically and survives across sessions.
 const RECENT_WINDOW_BLOCKS = 345_600n;
 const SECS_PER_BLOCK = 0.25;
-const CACHE_KEY_PREFIX = "equiflow:position-events:v1";
+// Bump the version suffix to invalidate browser localStorage caches whenever
+// the event-label formatting changes (e.g. v1 → v2 fix for LP USDG decimals).
+// Old `v1` entries will be orphaned in localStorage but stop being read; the
+// `v2` re-scan starts from genesis on next page load.
+const CACHE_KEY_PREFIX = "equiflow:position-events:v2";
 
 interface CachedShape {
   lastScannedBlock: string;
@@ -107,6 +111,15 @@ const LP_DEPOSITED_EVENT = parseAbiItem(
 const LP_WITHDRAWN_EVENT = parseAbiItem(
   "event LpWithdrawn(address indexed lp, uint256 usdgAmount, uint256 sharesBurned)",
 );
+
+/// USDG raw-unit scale — vault emits LP event `usdgAmount` in raw token units
+/// (6 decimals on RBN testnet), not the 1e18-scaled USD used by borrow/repay/
+/// liquidation events. Hardcoded here because USDG decimals are immutable per
+/// vault deploy and the position-events hook would otherwise need an extra
+/// RPC roundtrip on every page load just to read `vault.usdcDecimals()`.
+/// If a future deploy changes USDG decimals (unlikely — USDC and PYUSD-grade
+/// stablecoins are universally 6-dec), update this constant.
+const USDG_DECIMALS = 6;
 
 export type PositionEventKind =
   | "pledge"
@@ -353,6 +366,10 @@ export function usePositionEvents(user: Address | undefined): {
       /// LP deposit: USDG → LP shares. Arrow direction "→" mirrors the on-chain
       /// flow (capital flowing INTO yield position). Brand-blue color sets these
       /// rows apart from collateral/debt rows visually.
+      ///
+      /// NOTE: `usdgAmount` is emitted in RAW USDG units (6 decimals) — not the
+      /// 1e18-scaled USD used by Pledged/Repaid/Liquidated. Using 18 here makes
+      /// a 10 USDG deposit display as <$0.01 (10e6 / 1e18 ≈ 1e-11).
       for (const log of lpDeposited) {
         if ((log.args.lp ?? "").toLowerCase() !== userLower) continue;
         const usdg = log.args.usdgAmount ?? 0n;
@@ -362,8 +379,8 @@ export function usePositionEvents(user: Address | undefined): {
           kind: "lp-deposit",
           symbol: "USDG",
           token: null,
-          label: `LP deposit · ${fmtUsd(usdg, 18)} USDG → ${fmtTokenAmt(shares, 18)} shares`,
-          valueDisplay: fmtUsd(usdg, 18, "+"),
+          label: `LP deposit · ${fmtUsd(usdg, USDG_DECIMALS)} USDG → ${fmtTokenAmt(shares, 18)} shares`,
+          valueDisplay: fmtUsd(usdg, USDG_DECIMALS, "+"),
           valueColor: "lp-deposit",
           blockNumber: log.blockNumber,
           txHash: log.transactionHash,
@@ -374,6 +391,7 @@ export function usePositionEvents(user: Address | undefined): {
       /// LP withdraw: LP shares → USDG. Arrow direction "←" mirrors capital
       /// flowing OUT of yield position back to wallet. Amber color stays in the
       /// LP visual family but reads as "leaving" vs the brand-blue "entering".
+      /// `usdgAmount` is RAW USDG (6 dec) — see LP deposit comment above.
       for (const log of lpWithdrawn) {
         if ((log.args.lp ?? "").toLowerCase() !== userLower) continue;
         const usdg = log.args.usdgAmount ?? 0n;
@@ -383,8 +401,8 @@ export function usePositionEvents(user: Address | undefined): {
           kind: "lp-withdraw",
           symbol: "USDG",
           token: null,
-          label: `LP withdraw · ${fmtUsd(usdg, 18)} USDG ← ${fmtTokenAmt(shares, 18)} shares`,
-          valueDisplay: fmtUsd(usdg, 18, "−"),
+          label: `LP withdraw · ${fmtUsd(usdg, USDG_DECIMALS)} USDG ← ${fmtTokenAmt(shares, 18)} shares`,
+          valueDisplay: fmtUsd(usdg, USDG_DECIMALS, "−"),
           valueColor: "lp-withdraw",
           blockNumber: log.blockNumber,
           txHash: log.transactionHash,

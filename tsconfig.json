@@ -13,6 +13,12 @@
     "isolatedModules": true,
     "jsx": "react-jsx",
     "incremental": true,
+    // `noUncheckedIndexedAccess` is staged for a follow-up sweep — surfaces
+    // 130+ legitimate guard sites that need explicit handling. Track in
+    // docs/typescript-strictness-migration.md when scheduled.
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
     "plugins": [
       {
         "name": "next"

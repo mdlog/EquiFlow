@@ -120,6 +120,7 @@ export default function LiquidationsPage() {
         }
       />
 
+      <main id="main-content">
       {/* ── 1. Hero ─────────────────────────────────────────── */}
       <section className="border-b border-ink">
         <div className="max-w-[1320px] mx-auto px-4 sm:px-8 pt-5 sm:pt-6 pb-5">
@@ -284,6 +285,7 @@ export default function LiquidationsPage() {
 
       {/* ── 7. How it works ─────────────────────────────────── */}
       <HowItWorks />
+      </main>
 
       {/* Modal */}
       {target && (

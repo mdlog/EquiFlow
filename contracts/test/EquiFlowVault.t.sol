@@ -2212,77 +2212,8 @@ contract EquiFlowVaultTest is Test {
         vault.pledgeAndBorrow(address(tsla), 100e18, 10_000e18);
     }
 
-    /// N-8: a disabled asset with no outstanding debt can be delisted —
-    /// `assetList` shrinks, O(n) iterators in `_accrueInterest` and
-    /// `_snapshotUserDebt` (added in M-01) see one fewer element.
-    function test_audit_n08_delistAssetRemovesFromList() public {
-        // Asset must be disabled first.
-        vm.prank(owner);
-        vault.disableAsset(address(aapl));
-
-        // No outstanding debt on AAPL (no borrows happened in setUp).
-        (, uint256 aaplDebt) = vault.borrowCapInfo(address(aapl));
-        assertEq(aaplDebt, 0);
-
-        address[] memory listBefore = vault.listedAssets();
-        assertEq(listBefore.length, 2);
-
-        vm.prank(owner);
-        vault.delistAsset(address(aapl));
-
-        address[] memory listAfter = vault.listedAssets();
-        assertEq(listAfter.length, 1);
-        assertEq(listAfter[0], address(tsla));
-    }
-
-    /// N-8: cannot delist an asset that is still enabled.
-    function test_audit_n08_delistAssetRevertsIfEnabled() public {
-        vm.prank(owner);
-        vm.expectRevert(EquiFlowVault.AssetNotDisabled.selector);
-        vault.delistAsset(address(tsla));
-    }
-
-    /// N-8: cannot delist an asset with outstanding debt — even when
-    /// disabled — because LP exposure would silently disappear from cap
-    /// counters.
-    function test_audit_n08_delistAssetRevertsIfHasDebt() public {
-        vm.prank(alice);
-        vault.pledgeAndBorrow(address(aapl), 100e18, 5_000e18);
-
-        vm.prank(owner);
-        vault.disableAsset(address(aapl));
-
-        vm.prank(owner);
-        vm.expectRevert(); // HasOutstandingDebt
-        vault.delistAsset(address(aapl));
-    }
-
-    /// N-8: only the owner can delist.
-    function test_audit_n08_delistAssetOnlyOwner() public {
-        vm.prank(owner);
-        vault.disableAsset(address(aapl));
-
-        vm.prank(alice);
-        vm.expectRevert();
-        vault.delistAsset(address(aapl));
-    }
-
-    /// N-8: a delisted asset can be re-listed (slot is empty again).
-    /// Documents that delist is fully reversible.
-    function test_audit_n08_delistedAssetCanBeReListed() public {
-        vm.prank(owner);
-        vault.disableAsset(address(aapl));
-        vm.prank(owner);
-        vault.delistAsset(address(aapl));
-
-        // Re-list with same parameters succeeds because `assets[aapl].priceFeed`
-        // was reset to address(0) by delist.
-        vm.prank(owner);
-        vault.listAsset(address(aapl), address(aaplFeed), AAPL_LTV, AAPL_LIQ, STALE_AFTER);
-
-        address[] memory list = vault.listedAssets();
-        assertEq(list.length, 2);
-    }
+    // N-8 (delistAsset) tests removed — feature deferred to v2 deploy due to
+    // EIP-170 bytecode budget. See vault.sol comment for rationale.
 }
 
 // ───────────────────────────────────────────────────────────────────

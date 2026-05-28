@@ -10,7 +10,7 @@ import {
 import { privateKeyToAccount } from "viem/accounts";
 import { robinhoodChainTestnet } from "@/lib/config/chain";
 import { PYTH_ADAPTER_ABI, craftMockPythUpdate } from "@/lib/web3/pyth";
-import { fetchFreshestPyth } from "@/lib/web3/hermes";
+import { fetchFreshestPyth, validatePythQuote } from "@/lib/web3/hermes";
 import { recordPrice } from "@/lib/web3/price-history";
 import {
   EQUIFLOW_VAULT_ABI,
@@ -74,6 +74,9 @@ export const POST = withErrorHandler(async (req: Request) => {
 
   // Resolve adapter + priceId from on-chain config — never from the caller.
   const allowlist = await getVaultAllowlist(publicClient);
+  if (allowlist.vaultMissing) {
+    throw new ApiError(503, "vault_not_configured");
+  }
   if (allowlist.adapters.size === 0) {
     throw new ApiError(503, "vault_empty");
   }
@@ -111,27 +114,90 @@ export const POST = withErrorHandler(async (req: Request) => {
   const quote = await fetchFreshestPyth(symbol);
   const nowSec = Math.floor(Date.now() / 1000);
 
-  let priceForLog: number;
-  let updateBytes: Hex;
-  let source: "pyth" | "mock";
-  let publishTime: number;
-
-  if (quote) {
-    priceForLog = Number(quote.price) / 10 ** -quote.expo;
-    publishTime = nowSec;
-    const { priceIdRegular } = await resolveRegularPriceId(publicClient, adapter);
-    updateBytes = craftMockPythUpdate({
-      priceId: priceIdRegular,
-      price: quote.price,
-      expo: quote.expo,
-      publishTime,
-      conf: quote.conf,
-    });
-    source = "pyth";
-  } else {
-    // Hermes unavailable — we DO NOT fall back to caller-supplied prices.
-    // Refuse to sign rather than push attacker-chosen numbers.
+  if (!quote) {
+    // Hermes unavailable — we DO NOT fall back to mock prices. Refuse to
+    // sign rather than push attacker-chosen or fabricated numbers.
     throw new ApiError(503, "hermes_unavailable");
+  }
+
+  // Quality gate: reject stale or low-confidence quotes. Without this, an
+  // operator outage that returns cached pre-outage prices would be silently
+  // forwarded with a fresh server timestamp.
+  const validation = validatePythQuote(quote, nowSec);
+  if (!validation.ok) {
+    console.warn(
+      `[keeper/tick] quote_rejected sym=${symbol} reason=${validation.reason} ` +
+        `age=${validation.ageSeconds}s conf=${validation.confBps}bps`,
+    );
+    throw new ApiError(503, `quote_${validation.reason}`);
+  }
+
+  const priceForLog = Number(quote.price) / 10 ** -quote.expo;
+  // On-chain publishTime is the server's "I attest this submission is fresh"
+  // timestamp, gated by validatePythQuote() above: the underlying Hermes
+  // publish_time was within MAX_PUBLISH_AGE_SECONDS of now. Using nowSec
+  // keeps the adapter staleAfter check passing even when the adapter has a
+  // tighter window than Hermes' publish cadence.
+  const publishTime = nowSec;
+  const { priceIdRegular } = await resolveRegularPriceId(publicClient, adapter);
+  const updateBytes: Hex = craftMockPythUpdate({
+    priceId: priceIdRegular,
+    price: quote.price,
+    expo: quote.expo,
+    publishTime,
+    conf: quote.conf,
+  });
+  const source: "pyth" = "pyth";
+
+  // ── Pre-flight: decide updatePrice vs forceUpdatePrice ──
+  // The H-02 audit fix added a 5% per-update deviation cap. After deploy (or
+  // any extended outage), the cached adapter price may diverge from the live
+  // Pyth quote by far more than 5%, and every `updatePrice` would revert.
+  // `forceUpdatePrice` is the keeper escape hatch — bypasses the cap, but only
+  // when the cached price has aged past `DEVIATION_OVERRIDE_DELAY` (30 min).
+  const DEVIATION_OVERRIDE_DELAY_S = 1800;
+  let useForce = false;
+  try {
+    const [cached, maxDevBps] = await Promise.all([
+      publicClient.readContract({
+        abi: PYTH_ADAPTER_ABI,
+        address: adapter,
+        functionName: "latestRoundData",
+      }) as Promise<readonly [bigint, bigint, bigint, bigint, bigint]>,
+      publicClient.readContract({
+        abi: PYTH_ADAPTER_ABI,
+        address: adapter,
+        functionName: "maxDeviationBps",
+      }) as Promise<bigint>,
+    ]);
+    const cachedE8 = cached[1];
+    const cachedUpdatedAt = cached[3];
+    // Compute newE8 the same way the contract does in _toE8(). Pyth equity
+    // feeds are expo = -8 in the common case, so the result is just `price`.
+    let newE8: bigint;
+    if (quote.expo === -8) newE8 = BigInt(quote.price);
+    else if (quote.expo < -8) newE8 = BigInt(quote.price) / 10n ** BigInt(-quote.expo - 8);
+    else newE8 = BigInt(quote.price) * 10n ** BigInt(quote.expo + 8);
+
+    if (cachedE8 > 0n && maxDevBps > 0n) {
+      const dev = newE8 > cachedE8 ? newE8 - cachedE8 : cachedE8 - newE8;
+      const devBps = (dev * 10_000n) / cachedE8;
+      if (devBps > maxDevBps) {
+        const age = BigInt(nowSec) - cachedUpdatedAt;
+        if (age >= BigInt(DEVIATION_OVERRIDE_DELAY_S)) {
+          useForce = true;
+        } else {
+          // Within the override cooldown — refuse rather than burn a guaranteed
+          // revert. The client can retry once the cooldown elapses.
+          throw new ApiError(503, "deviation_cooldown_active");
+        }
+      }
+    }
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    // If the pre-flight reads fail, fall through to normal updatePrice — worst
+    // case is the cap reverts and we see it in submit_failed below.
+    console.warn("[keeper/tick] preflight_failed:", (err as Error).message);
   }
 
   let txHash: Hex;
@@ -146,7 +212,7 @@ export const POST = withErrorHandler(async (req: Request) => {
     txHash = await walletClient.writeContract({
       abi: PYTH_ADAPTER_ABI,
       address: adapter,
-      functionName: "updatePrice",
+      functionName: useForce ? "forceUpdatePrice" : "updatePrice",
       args: [[updateBytes]],
       nonce,
     });

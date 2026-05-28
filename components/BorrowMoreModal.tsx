@@ -1,16 +1,18 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { type Address, type Hex, encodeFunctionData, parseUnits } from "viem";
+import { useEffect, useId, useState } from "react";
+import { type Address, type Hex, encodeFunctionData } from "viem";
 import {
   useWaitForTransactionReceipt,
   useWriteContract,
 } from "wagmi";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   EQUIFLOW_VAULT_ABI,
   STOCK_TOKEN_ADDRESSES,
 } from "@/lib/contracts";
 import { useVaultContext } from "@/lib/hooks/use-vault-context";
+import { usePosition } from "@/lib/hooks/use-position";
 import { ROBINHOOD_CHAIN_TESTNET_ID } from "@/lib/config/chain";
 import { fmt } from "@/lib/format";
 import type { LiveCollateralLine } from "@/lib/hooks/use-position";
@@ -18,7 +20,17 @@ import { useActiveWallet } from "@/lib/hooks/use-active-wallet";
 import { useSmartWallet } from "@/lib/aa/use-smart-wallet";
 import { sendUserOp } from "@/lib/aa/send-userop";
 import { AA_CONFIGURED } from "@/lib/web3/alchemy";
+import { usdToE18Safe, parseAmount } from "@/lib/utils/bigint";
+import { friendlyError } from "@/lib/utils/error";
 import {
+  txErrorToast,
+  txPendingToast,
+  txSealedToast,
+} from "@/lib/utils/tx-toast";
+import { qkMatches } from "@/lib/hooks/query-keys";
+import { HealthFactorMeter } from "@/components/HealthFactorMeter";
+import {
+  ContractTrustLine,
   ModalActions,
   ModalFootnote,
   ModalShell,
@@ -58,19 +70,36 @@ export function BorrowMoreModal({
 }: Props) {
   const { vault } = useVaultContext();
   const VAULT_ADDR = vault.address;
-  const TOKEN_ADDR = vault.tokenAddress;
   const tokenSymbol = vault.borrowSymbol;
 
   const { isConnected } = useActiveWallet();
   const { mode: aaMode, smartAccount, prepareForSubmit } = useSmartWallet();
   const aaActive = aaMode !== "off" && smartAccount != null;
+  const pos = usePosition();
+  const queryClient = useQueryClient();
+
+  const amountId = useId();
+  const helperId = useId();
+  const errorId = useId();
+
   const [amountStr, setAmountStr] = useState("");
+  const [acknowledgeRisk, setAcknowledgeRisk] = useState(false);
+  const [toastId, setToastId] = useState<string | number | null>(null);
+
   const headroom = Math.max(0, collateralUsd * (ltvCap / 100) - borrowedUsd);
   const amount = Math.max(0, Number(amountStr) || 0);
   const newBorrowed = borrowedUsd + amount;
   const newLtv = collateralUsd > 0 ? (newBorrowed / collateralUsd) * 100 : 0;
   const newHf = newLtv > 0 ? liqLtv / newLtv : Infinity;
+  const currentHf =
+    borrowedUsd > 0 && collateralUsd > 0
+      ? liqLtv / ((borrowedUsd / collateralUsd) * 100)
+      : Infinity;
   const overCap = amount > headroom + 0.001;
+  // Require explicit acknowledgement when the projected HF lands in the
+  // amber/red band — a single click should not silently push a user toward
+  // liquidation.
+  const requiresAck = amount > 0 && Number.isFinite(newHf) && newHf < 1.3;
 
   const tokenSym = lines[0]?.sym;
   const tokenAddr = tokenSym ? STOCK_TOKEN_ADDRESSES[tokenSym] : undefined;
@@ -87,22 +116,44 @@ export function BorrowMoreModal({
   const [aaError, setAaError] = useState<string | null>(null);
   const [aaBusy, setAaBusy] = useState(false);
   const sealed = eoaSealed || aaTxHash != null;
+  const busy = isPending || mining || aaBusy;
 
   useEffect(() => {
     if (!open) {
       setAmountStr("");
+      setAcknowledgeRisk(false);
       setAaTxHash(null);
       setAaError(null);
       setAaBusy(false);
+      setToastId(null);
       reset();
     }
-  }, [open, reset]);
+  }, [open, reset, setToastId]);
 
   useEffect(() => {
     if (!sealed) return;
+    if (toastId !== null) {
+      txSealedToast(toastId, {
+        action: `Borrow ${fmt.usd(amount, 2)}`,
+        txHash: aaTxHash ?? txHash,
+      });
+    }
+    queryClient.invalidateQueries({
+      predicate: (q) => qkMatches.postTx(q.queryKey),
+    });
+    queryClient.invalidateQueries({ queryKey: ["wagmi"] });
     const t = setTimeout(() => onClose(), 2000);
     return () => clearTimeout(t);
-  }, [sealed, onClose]);
+  }, [sealed, onClose, toastId, amount, aaTxHash, txHash, queryClient]);
+
+  // Propagate wagmi errors into the persistent toast.
+  useEffect(() => {
+    if (!error) return;
+    if (toastId !== null) txErrorToast(toastId, error);
+  }, [error, toastId]);
+
+  const oracleStale = pos.oracleStale;
+  const showAckGate = requiresAck && !acknowledgeRisk;
 
   const canBorrow =
     isConnected &&
@@ -110,16 +161,25 @@ export function BorrowMoreModal({
     !!VAULT_ADDR &&
     amount > 0 &&
     !overCap &&
-    !isPending &&
-    !mining &&
-    !aaBusy &&
+    !oracleStale &&
+    !showAckGate &&
+    !busy &&
     !sealed;
 
   function handleBorrow() {
     if (!tokenAddr || !VAULT_ADDR) return;
-    const borrowUsd = parseUnits(amount.toFixed(18), 18);
+    // String-first to avoid float drift on inputs like "0.11".
+    const borrowUsd =
+      amountStr.trim().length > 0
+        ? parseAmount(amountStr, 18)
+        : usdToE18Safe(amount);
+    if (borrowUsd <= 0n) return;
+    const id = txPendingToast({
+      action: `Borrow ${fmt.usd(amount, 2)}${aaActive ? " (sponsored)" : ""}`,
+    });
+    setToastId(id);
     if (aaActive && smartAccount && AA_CONFIGURED) {
-      void handleBundle(borrowUsd);
+      void handleBundle(borrowUsd, id);
       return;
     }
     writeContract({
@@ -131,7 +191,7 @@ export function BorrowMoreModal({
     });
   }
 
-  async function handleBundle(borrowUsd: bigint) {
+  async function handleBundle(borrowUsd: bigint, id: string | number) {
     if (!tokenAddr || !VAULT_ADDR || !smartAccount) return;
     setAaError(null);
     setAaBusy(true);
@@ -154,7 +214,9 @@ export function BorrowMoreModal({
       setAaTxHash(hash);
     } catch (err) {
       console.error("[BorrowMoreModal] UserOp failed:", err);
-      setAaError(err instanceof Error ? err.message : String(err));
+      const msg = friendlyError(err);
+      setAaError(msg);
+      txErrorToast(id, err);
     } finally {
       setAaBusy(false);
     }
@@ -163,11 +225,14 @@ export function BorrowMoreModal({
   let ctaLabel: string;
   if (!isConnected) ctaLabel = "Connect wallet";
   else if (!tokenAddr) ctaLabel = "No collateral asset";
+  else if (oracleStale) ctaLabel = "Wait for next keeper tick";
   else if (aaBusy) ctaLabel = "Bundling sponsored UserOp…";
   else if (isPending) ctaLabel = "Sign in wallet…";
   else if (mining) ctaLabel = "Borrowing…";
   else if (aaActive) ctaLabel = `Sign borrow (sponsored) · ${fmt.usd(amount, 2)}`;
   else ctaLabel = `Sign borrow · ${fmt.usd(amount, 2)}`;
+
+  const hasInputError = overCap || oracleStale;
 
   return (
     <ModalShell
@@ -178,16 +243,39 @@ export function BorrowMoreModal({
       footer={
         <>
           {overCap && (
-            <ValidationError>
+            <ValidationError id={errorId}>
               Exceeds LTV cap. Reduce amount or add collateral first.
             </ValidationError>
           )}
-          <TxError message={aaError ?? error?.message} />
+          {oracleStale && (
+            <ValidationError>
+              Oracle price is stale — wait for the next keeper tick.
+            </ValidationError>
+          )}
+          <TxError message={aaError ?? friendlyError(error)} />
           <TxLink hash={aaTxHash ?? txHash} />
           {sealed && (
             <SealedMessage>
               Borrowed {fmt.usd(amount, 2)} {tokenSymbol} · refresh position to see update
             </SealedMessage>
+          )}
+          {requiresAck && (
+            <label
+              className="flex items-start gap-2 text-ink-soft"
+              style={{ fontSize: 11, lineHeight: 1.4 }}
+            >
+              <input
+                type="checkbox"
+                checked={acknowledgeRisk}
+                onChange={(e) => setAcknowledgeRisk(e.target.checked)}
+                style={{ marginTop: 2 }}
+              />
+              <span>
+                I understand this brings my health factor to{" "}
+                <span className="font-mono">{newHf.toFixed(2)}</span>, closer to
+                liquidation.
+              </span>
+            </label>
           )}
           <ModalActions
             onClose={onClose}
@@ -196,8 +284,10 @@ export function BorrowMoreModal({
               label: ctaLabel,
               onClick: handleBorrow,
               disabled: !canBorrow,
+              busy,
             }}
           />
+          <ContractTrustLine address={VAULT_ADDR} />
           <ModalFootnote>
             Calls{" "}
             <span className="font-mono">
@@ -228,8 +318,11 @@ export function BorrowMoreModal({
           className="flex justify-between items-baseline"
           style={{ marginBottom: 8 }}
         >
-          <span className="eyebrow">Amount to borrow</span>
+          <label htmlFor={amountId} className="eyebrow">
+            Amount to borrow
+          </label>
           <span
+            id={helperId}
             className="font-mono text-ink-mute tabular"
             style={{ fontSize: 10 }}
           >
@@ -247,6 +340,7 @@ export function BorrowMoreModal({
             $
           </span>
           <input
+            id={amountId}
             type="number"
             step="0.01"
             min="0"
@@ -255,6 +349,8 @@ export function BorrowMoreModal({
             onChange={(e) => setAmountStr(e.target.value)}
             disabled={!isConnected || mining || isPending}
             placeholder="0.00"
+            aria-describedby={`${helperId} ${errorId}`}
+            aria-invalid={hasInputError || undefined}
             className="font-serif font-medium tabular bg-transparent border-0 outline-none flex-1 w-full min-w-0"
             style={{ fontSize: 22, letterSpacing: "-0.02em" }}
           />
@@ -298,17 +394,9 @@ export function BorrowMoreModal({
                 : "var(--ink)"
           }
         />
-        <PreviewRow
-          k="Health factor"
-          v={newHf > 99 ? "∞" : newHf.toFixed(2)}
-          color={
-            newHf > 2.5
-              ? "var(--up)"
-              : newHf > 1.5
-                ? "var(--amber)"
-                : "var(--down)"
-          }
-        />
+        <div style={{ marginTop: 10 }}>
+          <HealthFactorMeter before={currentHf} after={newHf} />
+        </div>
       </div>
     </ModalShell>
   );

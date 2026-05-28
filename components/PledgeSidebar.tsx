@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { encodeFunctionData, maxUint256, parseUnits, type Address, type Hex } from "viem";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { encodeFunctionData, type Address, type Hex } from "viem";
 import {
   useAccount,
   useChainId,
@@ -10,10 +10,13 @@ import {
   useWaitForTransactionReceipt,
   useWriteContract,
 } from "wagmi";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   ERC20_ABI,
   EQUIFLOW_VAULT_ABI,
   EQUIFLOW_VAULT_ADDRESS,
+  explorerAddr,
+  shortAddr,
 } from "@/lib/contracts";
 import { findStock, stockAddress, isLive } from "@/lib/config/stocks";
 import { useStockPrice } from "@/lib/hooks/use-adapter-price";
@@ -23,10 +26,23 @@ import { useSmartWallet } from "@/lib/aa/use-smart-wallet";
 import { sendUserOp } from "@/lib/aa/send-userop";
 import { AA_CONFIGURED } from "@/lib/web3/alchemy";
 import { useVaultContext } from "@/lib/hooks/use-vault-context";
-import { useListedAssets, useProtocolStats } from "@/lib/hooks/use-protocol-stats";
+import {
+  useListedAssets,
+  useProtocolStats,
+} from "@/lib/hooks/use-protocol-stats";
+import { usePosition } from "@/lib/hooks/use-position";
 import { VaultSelector } from "@/components/VaultSelector";
 import { AssetLogo } from "@/components/AssetLogo";
+import { HealthFactorMeter } from "@/components/HealthFactorMeter";
 import { useEthPrice } from "@/lib/hooks/use-eth-price";
+import { parseAmount, usdToE18Safe } from "@/lib/utils/bigint";
+import { friendlyError } from "@/lib/utils/error";
+import {
+  txErrorToast,
+  txPendingToast,
+  txSealedToast,
+} from "@/lib/utils/tx-toast";
+import { qkMatches } from "@/lib/hooks/query-keys";
 
 type Stage = "idle" | "approve" | "approving" | "lock" | "locking" | "bundling" | "sealed";
 
@@ -41,6 +57,16 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
   const { address, isConnected } = useAccount();
   const chainId = useChainId();
   const { switchChain } = useSwitchChain();
+  const queryClient = useQueryClient();
+  const pos = usePosition();
+
+  const titleId = useId();
+  const sharesId = useId();
+  const sharesHelperId = useId();
+  const borrowId = useId();
+  const errorId = useId();
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
 
   const s = findStock(sym);
   const tokenAddr = stockAddress(sym);
@@ -56,6 +82,7 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
   const shares = Math.max(0, Number(sharesStr) || 0);
   const [borrowPct, setBorrowPct] = useState(60);
   const [stage, setStage] = useState<Stage>("idle");
+  const [toastId, setToastId] = useState<string | number | null>(null);
 
   const { data: decimals } = useReadContract({
     abi: ERC20_ABI,
@@ -133,10 +160,12 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
     return borrowUsd > vaultLiquidityRaw;
   })();
 
+  // String-first parsing avoids ~1 wei drift on free-form shares like "0.11"
+  // that would let the user pledge more than their balance.
   const shareAmountRaw = useMemo(() => {
-    try { return parseUnits(shares.toString(), dec); }
-    catch { return 0n; }
-  }, [shares, dec]);
+    if (!sharesStr.trim()) return 0n;
+    return parseAmount(sharesStr, dec);
+  }, [sharesStr, dec]);
 
   const needsApproval =
     live && allowance !== undefined && shareAmountRaw > (allowance as bigint);
@@ -164,13 +193,36 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
   useEffect(() => {
     if (!receiptSuccess) return;
     if (stage === "approving") {
+      // Resolve the orphaned "Approve …" toast the moment the receipt lands.
+      // Without this, sonner keeps the loading spinner on `duration: Infinity`
+      // forever even though the chain has already confirmed the approval —
+      // the user sees "approve notif loading lama" while we silently transition
+      // to the lock step. Stamp it sealed, then null the id so the next
+      // handleLock spawns a fresh pending toast for the pledge tx.
+      if (toastId !== null) {
+        txSealedToast(toastId, {
+          action: `Approved ${shares} ${s.sym}`,
+          txHash,
+        });
+        setToastId(null);
+      }
       resetWrite();
       refetchAllowance().then(() => setStage("lock"));
     } else if (stage === "locking") {
       setStage("sealed");
       refetchBalance();
     }
-  }, [receiptSuccess, stage, resetWrite, refetchAllowance, refetchBalance]);
+  }, [
+    receiptSuccess,
+    stage,
+    resetWrite,
+    refetchAllowance,
+    refetchBalance,
+    toastId,
+    shares,
+    s.sym,
+    txHash,
+  ]);
 
   const [aaTxHash, setAaTxHash] = useState<Hex | null>(null);
   const [aaError, setAaError] = useState<string | null>(null);
@@ -179,18 +231,24 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
     if (!tokenAddr || !spender || !smartAccount) return;
     setAaError(null);
     setStage("bundling");
+    const id = txPendingToast({
+      action: `Pledge ${shares} ${s.sym} (sponsored)`,
+    });
+    setToastId(id);
     try {
       await prepareForSubmit();
-      const borrowUsdScaled =
-        borrowUsd > 0 ? parseUnits(borrowUsd.toFixed(18), 18) : 0n;
+      const borrowUsdScaled = usdToE18Safe(borrowUsd);
       const calls = [];
+      // Approve exactly what this UserOp will pull — never maxUint256. If a
+      // future upgrade introduces an admin escape hatch, an outstanding
+      // unlimited approval would let it drain the user's full balance.
       if (allowance === undefined || shareAmountRaw > (allowance as bigint)) {
         calls.push({
           to: tokenAddr,
           data: encodeFunctionData({
             abi: ERC20_ABI,
             functionName: "approve",
-            args: [spender, maxUint256],
+            args: [spender, shareAmountRaw],
           }),
         });
       }
@@ -212,7 +270,8 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
       refetchAllowance();
       refetchBalance();
     } catch (err) {
-      setAaError(err instanceof Error ? err.message : String(err));
+      setAaError(friendlyError(err));
+      txErrorToast(id, err);
       setStage("idle");
     }
   };
@@ -220,11 +279,14 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
   const handleApprove = () => {
     if (!tokenAddr) return;
     setStage("approving");
+    const id = txPendingToast({ action: `Approve ${shares} ${s.sym}` });
+    setToastId(id);
+    // Exact-amount approval — see comment in handleBundle.
     writeContract({
       abi: ERC20_ABI,
       address: tokenAddr,
       functionName: "approve",
-      args: [spender, maxUint256],
+      args: [spender, shareAmountRaw],
       chainId: ROBINHOOD_CHAIN_TESTNET_ID,
     });
   };
@@ -233,8 +295,11 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
     if (!tokenAddr || !spender) return;
     resetWrite();
     setStage("locking");
-    const borrowUsdScaled =
-      borrowUsd > 0 ? parseUnits(borrowUsd.toFixed(18), 18) : 0n;
+    const id = txPendingToast({
+      action: `Pledge ${shares} ${s.sym} · borrow ${fmt.usd(borrowUsd, 2)}`,
+    });
+    setToastId(id);
+    const borrowUsdScaled = usdToE18Safe(borrowUsd);
     writeContract({
       abi: EQUIFLOW_VAULT_ABI,
       address: spender,
@@ -248,6 +313,7 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
     setStage("idle");
     setSharesStr("");
     setBorrowPct(60);
+    setToastId(null);
     resetWrite();
     setAaTxHash(null);
     setAaError(null);
@@ -255,7 +321,60 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
 
   useEffect(() => {
     if (!open) handleReset();
-  }, [open, sym]);
+    // sym is intentionally not in deps — sym change closes the sidebar via parent.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // Lock body scroll, focus-trap, restore focus on close — same a11y contract
+  // ModalShell honours for the other tx modals.
+  useEffect(() => {
+    if (!open) return;
+    previouslyFocused.current = document.activeElement as HTMLElement | null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    const id = window.requestAnimationFrame(() => {
+      const panel = panelRef.current;
+      if (!panel) return;
+      const closeBtn = panel.querySelector<HTMLElement>(
+        '[data-modal-close="true"]',
+      );
+      (closeBtn ?? panel).focus();
+    });
+
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        onClose();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const panel = panelRef.current;
+      if (!panel) return;
+      const focusables = panel.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      );
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (!first || !last) return;
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey && active === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.cancelAnimationFrame(id);
+      document.body.style.overflow = previousOverflow;
+      previouslyFocused.current?.focus?.();
+    };
+  }, [open, onClose]);
 
   const composing = stage === "idle";
   const busy =
@@ -265,9 +384,35 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
 
   useEffect(() => {
     if (!sealed) return;
+    if (toastId !== null) {
+      txSealedToast(toastId, {
+        action: `Pledged ${shares} ${s.sym}`,
+        txHash: aaTxHash ?? txHash,
+      });
+    }
+    queryClient.invalidateQueries({
+      predicate: (q) => qkMatches.postTx(q.queryKey),
+    });
+    queryClient.invalidateQueries({ queryKey: ["wagmi"] });
     const t = setTimeout(() => onClose(), 2000);
     return () => clearTimeout(t);
-  }, [sealed, onClose]);
+  }, [
+    sealed,
+    onClose,
+    toastId,
+    shares,
+    s.sym,
+    aaTxHash,
+    txHash,
+    queryClient,
+  ]);
+
+  useEffect(() => {
+    if (!writeError) return;
+    if (toastId !== null) txErrorToast(toastId, writeError);
+  }, [writeError, toastId]);
+
+  const oracleStale = pos.oracleStale;
 
   let ctaLabel: string;
   let ctaAction: (() => void) | null = null;
@@ -279,6 +424,9 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
   } else if (!onCorrectChain) {
     ctaLabel = "Switch to Robinhood Chain";
     ctaAction = () => switchChain({ chainId: ROBINHOOD_CHAIN_TESTNET_ID });
+  } else if (oracleStale) {
+    ctaLabel = "Wait for next keeper tick";
+    ctaDisabled = true;
   } else if (borrowBelowMinimum) {
     ctaLabel = `Minimum borrow is $${MIN_BORROW_USD}`;
     ctaDisabled = true;
@@ -319,6 +467,11 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
         onClick={onClose}
       />
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         className="relative w-full max-w-[420px] bg-paper border-l border-ink overflow-y-auto flex flex-col"
         style={{ animation: "ef-slide-in 0.2s ease-out" }}
       >
@@ -335,7 +488,11 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
               <AssetLogo sym={s.sym} size={24} />
             </div>
             <div>
-              <div className="font-mono font-semibold flex items-center gap-2" style={{ fontSize: 14 }}>
+              <div
+                id={titleId}
+                className="font-mono font-semibold flex items-center gap-2"
+                style={{ fontSize: 14 }}
+              >
                 Pledge {s.sym}
               </div>
               <div className="text-ink-mute flex items-center gap-1.5" style={{ fontSize: 11 }}>
@@ -346,10 +503,12 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
           <button
             type="button"
             onClick={onClose}
+            aria-label="Close pledge sidebar"
+            data-modal-close="true"
             className="bg-transparent border-0 text-ink-mute hover:text-ink"
             style={{ fontSize: 20, padding: 4, lineHeight: 1 }}
           >
-            ×
+            <span aria-hidden="true">×</span>
           </button>
         </div>
 
@@ -380,8 +539,14 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
         {/* Shares input */}
         <div style={{ padding: "16px 20px 12px" }}>
           <div className="flex justify-between items-baseline" style={{ marginBottom: 6 }}>
-            <span className="eyebrow">Shares to pledge</span>
-            <span className="font-mono tabular text-ink-mute" style={{ fontSize: 11 }}>
+            <label htmlFor={sharesId} className="eyebrow">
+              Shares to pledge
+            </label>
+            <span
+              id={sharesHelperId}
+              className="font-mono tabular text-ink-mute"
+              style={{ fontSize: 11 }}
+            >
               ≈ {fmt.usd(collateralUsd, 0)}
             </span>
           </div>
@@ -390,11 +555,14 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
             style={{ border: `1.4px solid ${insufficient ? "var(--down)" : "var(--ink)"}` }}
           >
             <input
+              id={sharesId}
               type="number"
               value={sharesStr}
               onChange={(e) => composing && setSharesStr(e.target.value)}
               disabled={!composing}
               placeholder="0"
+              aria-describedby={`${sharesHelperId} ${errorId}`}
+              aria-invalid={insufficient || oracleStale || undefined}
               className="flex-1 bg-transparent outline-none font-serif font-medium tracking-tight"
               style={{ fontSize: 22, border: "none" }}
             />
@@ -404,6 +572,8 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
           </div>
           {insufficient && (
             <div
+              id={errorId}
+              role="alert"
               className="font-mono mt-2 rounded-[2px]"
               style={{
                 fontSize: 10,
@@ -415,6 +585,21 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
             >
               Exceeds your balance of {fmt.num(balanceDisplay ?? 0, balanceDisplay != null && balanceDisplay < 1 ? 4 : 2)} {s.sym}.
               Get tokens from faucet or reduce amount.
+            </div>
+          )}
+          {oracleStale && (
+            <div
+              role="alert"
+              className="font-mono mt-2 rounded-[2px]"
+              style={{
+                fontSize: 10,
+                padding: "5px 8px",
+                background: "var(--down-soft)",
+                color: "var(--down)",
+                border: "1px solid var(--down)",
+              }}
+            >
+              Oracle price is stale — wait for the next keeper tick.
             </div>
           )}
           {live && balanceDisplay != null && balanceDisplay > 0 && (
@@ -438,12 +623,15 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
         {/* Borrow slider */}
         <div style={{ padding: "0 20px 16px" }}>
           <div className="flex justify-between items-baseline" style={{ marginBottom: 6 }}>
-            <span className="eyebrow">Borrow {borrowPct}%</span>
+            <label htmlFor={borrowId} className="eyebrow">
+              Borrow {borrowPct}%
+            </label>
             <span className="font-mono tabular text-ink-mute" style={{ fontSize: 11 }}>
               LTV {(s.ltv * 100).toFixed(0)}% cap
             </span>
           </div>
           <input
+            id={borrowId}
             type="range"
             min="0"
             max="100"
@@ -454,6 +642,7 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
           />
           {borrowBelowMinimum && (
             <div
+              role="alert"
               className="font-mono mt-2 rounded-[2px]"
               style={{
                 fontSize: 10,
@@ -468,6 +657,7 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
           )}
           {borrowExceedsLiquidity && (
             <div
+              role="alert"
               className="font-mono mt-2 rounded-[2px]"
               style={{
                 fontSize: 10,
@@ -510,22 +700,25 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
           style={{ padding: "12px 20px" }}
         >
           <div className="eyebrow" style={{ marginBottom: 6 }}>Position preview</div>
-          {([
-            ["Collateral", fmt.usd(collateralUsd, 0)],
-            ["LTV", ltvActual > 0 ? `${ltvActual.toFixed(1)}% / ${(s.ltv * 100).toFixed(0)}% cap` : "—"],
-            ["Health factor", healthFactor > 10 ? "∞" : healthFactor.toFixed(2)],
-          ] as [string, string][]).map(([k, v]) => (
-            <div key={k} className="flex justify-between py-1.5" style={{ fontSize: 12 }}>
-              <span className="text-ink-soft">{k}</span>
-              <span className="font-mono tabular font-medium">{v}</span>
-            </div>
-          ))}
+          <div className="flex justify-between py-1.5" style={{ fontSize: 12 }}>
+            <span className="text-ink-soft">Collateral</span>
+            <span className="font-mono tabular font-medium">{fmt.usd(collateralUsd, 0)}</span>
+          </div>
+          <div className="flex justify-between py-1.5" style={{ fontSize: 12 }}>
+            <span className="text-ink-soft">LTV</span>
+            <span className="font-mono tabular font-medium">
+              {ltvActual > 0 ? `${ltvActual.toFixed(1)}% / ${(s.ltv * 100).toFixed(0)}% cap` : "—"}
+            </span>
+          </div>
+          <div style={{ marginTop: 10 }}>
+            <HealthFactorMeter before={Infinity} after={healthFactor} />
+          </div>
         </div>
 
         {/* Errors */}
         {writeError && (
           <div className="mx-5 mb-2 text-down font-mono rounded-[2px]" style={{ fontSize: 10, padding: "6px 10px", background: "var(--down-soft)", border: "1px solid var(--down)" }}>
-            {writeError.message.slice(0, 160)}
+            {friendlyError(writeError)?.slice(0, 160)}
           </div>
         )}
         {aaError && (
@@ -547,6 +740,7 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
             type="button"
             onClick={() => { if (ctaAction && !ctaDisabled) ctaAction(); }}
             disabled={ctaDisabled || !ctaAction}
+            aria-busy={busy ? true : undefined}
             className="w-full px-5 py-3.5 border border-ink rounded-[2px] font-medium"
             style={{
               fontSize: 13,
@@ -558,6 +752,22 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
           >
             {ctaLabel}
           </button>
+          {vault.address && (
+            <div
+              className="font-mono text-center"
+              style={{ fontSize: 10, color: "var(--ink-mute)", marginTop: 8 }}
+            >
+              Contract ·{" "}
+              <a
+                href={explorerAddr(vault.address)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-ink-mute hover:text-ink no-underline"
+              >
+                {shortAddr(vault.address)} ↗
+              </a>
+            </div>
+          )}
         </div>
       </div>
 

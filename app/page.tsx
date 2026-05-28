@@ -15,12 +15,14 @@ export default function Landing() {
       <WalletRedirect />
       <TopNav />
       <OracleMarquee />
-      <Hero />
-      <StatBand />
-      <HowItWorks />
-      <SupportedAssets />
-      <Integrations />
-      <FinalCta />
+      <main id="main-content">
+        <Hero />
+        <StatBand />
+        <HowItWorks />
+        <SupportedAssets />
+        <Integrations />
+        <FinalCta />
+      </main>
       <SiteFooter gap={false} />
     </div>
   );
