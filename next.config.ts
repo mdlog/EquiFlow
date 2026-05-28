@@ -24,11 +24,15 @@ const CSP = [
   "frame-ancestors 'none'",
   "form-action 'self'",
   // Next.js needs inline scripts for hydration. Allow them; everything else is locked.
-  "script-src 'self' 'unsafe-inline'",
+  // 'unsafe-eval' is dev-only: React reconstructs server stack traces via eval()
+  // in dev mode, and Turbopack HMR uses eval for module wiring. Stripped in prod.
+  `script-src 'self' 'unsafe-inline'${process.env.NODE_ENV === "development" ? " 'unsafe-eval'" : ""}`,
   // Tailwind injects inline styles, and next/font emits inline @font-face rules.
   "style-src 'self' 'unsafe-inline'",
   "font-src 'self' data:",
-  "img-src 'self' data: https://*.pyth.network https://*.robinhood.com",
+  // www.google.com/s2/favicons (used by AssetLogo) 301-redirects to
+  // t*.gstatic.com/faviconV2, so both hosts need to be allowlisted.
+  "img-src 'self' data: https://www.google.com https://*.gstatic.com https://*.pyth.network https://*.robinhood.com",
   // connect-src: every domain the client may fetch from. Add new upstreams here.
   [
     "connect-src",
