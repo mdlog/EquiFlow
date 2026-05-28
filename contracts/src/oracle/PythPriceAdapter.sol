@@ -5,6 +5,7 @@ import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interf
 import {IPyth} from "@pythnetwork/pyth-sdk-solidity/IPyth.sol";
 import {PythStructs} from "@pythnetwork/pyth-sdk-solidity/PythStructs.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 /// @title  PythPriceAdapter
 /// @notice Wraps a Pyth Network price feed behind the classic
@@ -24,7 +25,10 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 ///
 ///         Migration to real Pyth on Arbitrum Sepolia is a one-line address
 ///         change at deploy time (`0x4374e5a8b9C22271E9EB878A2AA31DE97DF15DAF`).
-contract PythPriceAdapter is AggregatorV3Interface, Ownable {
+/// @notice L-01 fix (2026-05 pass 4): inherits `Ownable2Step` so adapter
+///         ownership rotation is two-tx — protects the keeper-admin role
+///         under a single-key compromise.
+contract PythPriceAdapter is AggregatorV3Interface, Ownable2Step {
     // ─── Immutables ──────────────────────────────────────────────────────
     IPyth public immutable pyth;
     bytes32 public immutable priceId;
@@ -51,6 +55,16 @@ contract PythPriceAdapter is AggregatorV3Interface, Ownable {
     /// meaningful against a key compromise.
     uint256 public constant MAX_DEVIATION_BPS_CEILING = 2_000;
 
+    /// @notice H-02 fix (2026-05 audit): once the cached price is older than
+    /// this delay, a keeper may push a deviation-breaking update via
+    /// `forceUpdatePrice`. Recovers liveness after legitimate gap moves
+    /// (halts, earnings, market open) without owner intervention. Chosen
+    /// to fire BEFORE the typical `staleAfter` (1h) used by the vault so
+    /// positions never freeze first. A compromised keeper still cannot
+    /// instantly bypass the cap — they would need to wait this long with
+    /// the price already aged.
+    uint256 public constant DEVIATION_OVERRIDE_DELAY = 30 minutes;
+
     // ─── Keeper whitelist (C-02 fix) ─────────────────────────────────────
     mapping(address => bool) public authorizedKeepers;
 
@@ -59,6 +73,7 @@ contract PythPriceAdapter is AggregatorV3Interface, Ownable {
     uint256 public totalPendingRefunds;
 
     event PriceUpdated(int256 priceE8, uint64 publishTime, int32 expo, uint80 round);
+    event PriceForceUpdated(int256 oldPriceE8, int256 newPriceE8, uint256 ageAtOverride);
     event KeeperAuthorized(address indexed keeper, bool authorized);
     event RefundClaimed(address indexed keeper, uint256 amount);
     event MaxDeviationSet(uint256 oldBps, uint256 newBps);
@@ -118,6 +133,27 @@ contract PythPriceAdapter is AggregatorV3Interface, Ownable {
     /// @notice Submit one or more Pyth update payloads and cache the resulting
     ///         price. Pass `[bytes]` from Hermes `/v2/updates/price/latest`.
     function updatePrice(bytes[] calldata updateData) external payable onlyKeeper {
+        _applyUpdate(updateData, true);
+    }
+
+    /// @notice H-02 fix (2026-05 audit): keeper escape hatch when the
+    ///         deviation cap would otherwise permanently reject every
+    ///         update during a legitimate gap move (e.g. halt re-open,
+    ///         earnings shock). Only callable once the cached price has
+    ///         aged past `DEVIATION_OVERRIDE_DELAY`, so a compromised
+    ///         keeper still cannot bypass the cap on a fresh price. Emits
+    ///         a distinct `PriceForceUpdated` event for monitoring.
+    function forceUpdatePrice(bytes[] calldata updateData) external payable onlyKeeper {
+        uint256 age = block.timestamp > _updatedAt ? block.timestamp - _updatedAt : 0;
+        require(age >= DEVIATION_OVERRIDE_DELAY, "override too soon");
+        int256 oldPriceE8 = _price;
+        _applyUpdate(updateData, false);
+        emit PriceForceUpdated(oldPriceE8, _price, age);
+    }
+
+    /// @dev Shared implementation for `updatePrice` and `forceUpdatePrice`.
+    ///      `enforceDeviation` toggles the per-update deviation cap.
+    function _applyUpdate(bytes[] calldata updateData, bool enforceDeviation) internal {
         uint256 fee = pyth.getUpdateFee(updateData);
         pyth.updatePriceFeeds{value: fee}(updateData);
 
@@ -133,7 +169,7 @@ contract PythPriceAdapter is AggregatorV3Interface, Ownable {
         if (p.expo < -18 || p.expo > 18) revert ExponentOutOfRange(p.expo);
 
         int256 priceE8 = _toE8(p.price, p.expo);
-        if (maxDeviationBps > 0 && _price > 0) {
+        if (enforceDeviation && maxDeviationBps > 0 && _price > 0) {
             uint256 oldP = uint256(_price);
             uint256 newP = uint256(priceE8);
             uint256 deviation = newP > oldP ? newP - oldP : oldP - newP;
@@ -214,6 +250,19 @@ contract PythPriceAdapter is AggregatorV3Interface, Ownable {
     // ─── Extra views ─────────────────────────────────────────────────────
     function confidence() external view returns (uint64) {
         return _lastConf;
+    }
+
+    /// @notice M-03 fix (2026-05 pass 6): companion timestamp for
+    ///         `confidence()`. Returns the same `_updatedAt` (= Pyth
+    ///         publishTime of the last accepted update) since confidence
+    ///         is set in the same `_applyUpdate` call as the price.
+    ///         Consumers should require freshness against this stamp
+    ///         independently of the price-read path, so a refactor that
+    ///         uses a stale-tolerant price helper cannot leave the
+    ///         confidence check reading authoritative-looking but stale
+    ///         data.
+    function confidenceUpdatedAt() external view returns (uint256) {
+        return _updatedAt;
     }
 
     function exponent() external view returns (int32) {
