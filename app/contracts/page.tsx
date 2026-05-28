@@ -56,8 +56,8 @@ const CONTRACTS: Contract[] = [
     name: "EquiFlowVault",
     tag: "core · borrow + collateral",
     address:
-      EQUIFLOW_VAULT_ADDRESS ?? "0x9E4f0a7e5b1c8a2C73c9E6cD9b8AfA2c7e4F8a13",
-    version: "v0.4.2",
+      EQUIFLOW_VAULT_ADDRESS ?? "0xbaB08584Ce7a240BC1Fc641BC6A5682067c5b2fC",
+    version: "v0.5.0",
     audits: [
       { firm: "Trail of Bits", date: "Mar 2026", ref: "TOB-EF-204" },
       { firm: "Spearbit", date: "Apr 2026", ref: "SP-2026-019" },
@@ -450,9 +450,16 @@ const DEPLOYMENTS: {
   {
     ts: "2026-05-04 07:24 UTC",
     block: 42_917_406,
-    title: "v0.4.2 — current",
+    title: "v0.4.2 — superseded",
     body: "PythPriceAdapter switched to lastObservation() fallback. Vault default borrow rate adjusted to 4.50% APR.",
     type: "param",
+  },
+  {
+    ts: "2026-05-29 03:00 UTC",
+    block: 63_656_956,
+    title: "v0.5.0 — current",
+    body: "Post-audit redeploy after 7 in-house tightening passes. VaultMath external library + view dedup brings vault under EIP-170 (24,493 bytes). PythAdapterRegistry shares one adapter per priceId across vaults (T-4 fix). KinkedRateModel scheduled with 24h timelock.",
+    type: "deploy",
   },
 ];
 
@@ -549,7 +556,7 @@ export default function ContractsPage() {
                 className="font-mono text-ink-mute mt-1"
                 style={{ fontSize: 10 }}
               >
-                tag v0.4.2 · merged 4 days ago
+                tag v0.5.0 · merged today
               </div>
             </div>
           </div>
@@ -1261,7 +1268,7 @@ function DeploymentTimeline() {
               className="font-serif font-medium m-0"
               style={{ fontSize: 22, letterSpacing: "-0.025em" }}
             >
-              From genesis to <span className="italic">v0.4.2</span>
+              From genesis to <span className="italic">v0.5.0</span>
             </h2>
           </div>
           <span
