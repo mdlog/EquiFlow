@@ -13,6 +13,7 @@ import { AssetActivityFeed } from "@/components/AssetActivityFeed";
 import { Sparkline } from "@/components/Sparkline";
 import { StockBalanceCell } from "@/components/StockBalanceCell";
 import { LtvBreakdown } from "@/components/LtvBreakdown";
+import { PledgeSidebar } from "@/components/PledgeSidebar";
 import { findStock, stockAddress, isLive } from "@/lib/config/stocks";
 import { fmt } from "@/lib/format";
 import { useLiveAdapterTick, useStockPrice } from "@/lib/hooks/use-adapter-price";
@@ -74,6 +75,7 @@ export function AssetDetailClient({ sym }: Props) {
   /// Pledge calculator — uses the LIVE rates (derived) for the yield estimate,
   /// so the math reflects what the user will actually earn at current util.
   const [calcShares, setCalcShares] = useState(0);
+  const [pledgeOpen, setPledgeOpen] = useState(false);
   const effectiveLtv = liveLtv ?? stock.ltv;
   const calcUsd = live.value * calcShares;
   const maxBorrow = calcUsd * effectiveLtv;
@@ -419,9 +421,10 @@ export function AssetDetailClient({ sym }: Props) {
                   </span>
                 </div>
               ))}
-              <Link
-                href={`/markets`}
-                className="rounded-[2px] flex justify-between items-center bg-ink text-paper no-underline font-medium mt-5"
+              <button
+                type="button"
+                onClick={() => setPledgeOpen(true)}
+                className="w-full rounded-[2px] flex justify-between items-center bg-ink text-paper border-0 cursor-pointer font-medium mt-5"
                 style={{ padding: "14px 18px", fontSize: 14 }}
               >
                 <span>Pledge {stock.sym} · 1-click bundle</span>
@@ -431,7 +434,7 @@ export function AssetDetailClient({ sym }: Props) {
                 >
                   ERC-4337 ↗
                 </span>
-              </Link>
+              </button>
               <div
                 className="text-center text-ink-mute mt-2"
                 style={{ fontSize: 10 }}
@@ -445,6 +448,12 @@ export function AssetDetailClient({ sym }: Props) {
 
       {/* On-chain activity (Pledged + Liquidated for this token) */}
       <AssetActivityFeed symbol={stock.sym} token={addr} />
+
+      <PledgeSidebar
+        sym={stock.sym}
+        open={pledgeOpen}
+        onClose={() => setPledgeOpen(false)}
+      />
 
       <SiteFooter />
     </div>
