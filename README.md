@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo-equiflow.png" alt="EquiFlow" width="120" />
+  <img src="public/logo-equiflow.png" alt="EquiFlow" width="120" />
 </p>
 
 <h1 align="center">EquiFlow</h1>
