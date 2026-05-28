@@ -103,7 +103,7 @@ const AUDITS: Audit[] = [
     ],
     reviewers: ["pashov", "0xRajeev", "alex-ppg", "spearbit-team"],
     blurb:
-      "Crowd review on the final v0.4.2 release candidate. The high was a rounding direction in partial-repay that, in adversarial conditions, could leave 1 wei of debt and block close-out — fixed and tested.",
+      "Crowd review on the final v0.4.2 release candidate. The high was a rounding direction in partial-repay that, in adversarial conditions, could leave 1 wei of debt and block close-out — fixed and tested. Followed by seven in-house tightening passes on the road to v0.5.0 — see history below.",
   },
 ];
 
@@ -147,7 +147,8 @@ const HISTORY = [
   { ver: "v0.2.0", date: "Nov 2025", note: "Halborn audit · 0 crit · 2 high" },
   { ver: "v0.3.0", date: "Feb 2026", note: "Trail of Bits · 1 crit (fixed)" },
   { ver: "v0.4.0", date: "Mar 2026", note: "OpenZeppelin · 0 crit · 2 high" },
-  { ver: "v0.4.2", date: "May 2026", note: "Spearbit · 0 crit · 1 high (current)" },
+  { ver: "v0.4.2", date: "May 2026", note: "Spearbit · 0 crit · 1 high" },
+  { ver: "v0.5.0", date: "May 2026", note: "Internal · 7 rounds · 0 crit · 0 high · 0 medium (current)" },
 ];
 
 export default function AuditsPage() {
@@ -208,8 +209,9 @@ export default function AuditsPage() {
                 className="text-ink-soft mt-2.5 max-w-[660px] m-0"
                 style={{ fontSize: 13.5, lineHeight: 1.55 }}
               >
-                Every contract in production at v0.4.2 has been reviewed by at
-                least two of the three firms below. Reports, commit hashes, and
+                Every contract in production at v0.5.0 has been reviewed by at
+                least two of the three firms below and tightened across seven
+                in-house follow-up passes. Reports, commit hashes, and
                 remediation evidence are public.
               </p>
             </div>

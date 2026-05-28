@@ -122,7 +122,9 @@ export function SiteFooter({ gap = true }: { gap?: boolean } = {}) {
           <div className="flex gap-[18px] items-center flex-wrap">
             <span>EQUIFLOW LABS · 2026</span>
             <span>·</span>
-            <span>{`v${process.env.NEXT_PUBLIC_APP_VERSION ?? "0.4.2"} · BUILD ${process.env.NEXT_PUBLIC_GIT_SHA?.slice(0, 7) ?? "dev"}`}</span>
+            <span>{`v${process.env.NEXT_PUBLIC_APP_VERSION ?? "0.5.0"} · BUILD ${process.env.NEXT_PUBLIC_GIT_SHA?.slice(0, 7) ?? "dev"}`}</span>
+            <span>·</span>
+            <span title="Audit rounds completed">AUDIT v7</span>
           </div>
           <div className="flex gap-[18px] items-center flex-wrap">
             <span>{blockLabel}</span>

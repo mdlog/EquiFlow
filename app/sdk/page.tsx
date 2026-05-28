@@ -293,7 +293,7 @@ export default function SdkPage() {
                 background: "var(--up)",
               }}
             />
-            v0.4.2 · npm
+            v0.5.0 · npm
           </span>
         }
       />
