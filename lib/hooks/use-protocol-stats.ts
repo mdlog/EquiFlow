@@ -17,7 +17,12 @@ import {
 } from "@/lib/contracts";
 import { ROBINHOOD_CHAIN_TESTNET_ID } from "@/lib/config/chain";
 import { PYTH_ADAPTER_ABI } from "@/lib/web3/pyth";
-import { deriveRates, type DerivedRates } from "@/lib/web3/irm";
+import {
+  aprBpsToApyBps,
+  computeSupplyRateBps,
+  deriveRates,
+  type DerivedRates,
+} from "@/lib/web3/irm";
 import { getLogsChunked } from "@/lib/web3/get-logs-chunked";
 
 export interface ProtocolStats {
@@ -37,8 +42,10 @@ export interface ProtocolStats {
   liquidations7d: { count: number; totalDebtUsd: bigint } | null;
   /** Loading: true while initial multicall round-trip hasn't resolved. */
   isLoading: boolean;
-  /** Borrow + supply rates read directly from vault.borrowApyBps() and
-   *  vault.lpApyBps(). Null while the initial RPC round-trip hasn't resolved. */
+  /** Borrow APY read from vault.borrowApyBps() (delegates through the active
+   *  IRM after executeIrm) + LP/reserve APYs derived client-side via
+   *  computeSupplyRateBps. Falls back to pure client-side `deriveRates` from
+   *  the irm module until the RPC resolves. Null on initial render. */
   derived: DerivedRates | null;
   /** Per-token collateral volume locked in vault, keyed by lowercase token address. 1e18 USD units. */
   collateralByToken: Record<string, bigint>;
@@ -99,12 +106,8 @@ export function useProtocolStats(
         functionName: "borrowApyBps",
         chainId: ROBINHOOD_CHAIN_TESTNET_ID,
       },
-      {
-        abi: EQUIFLOW_VAULT_ABI,
-        address: vaultAddr,
-        functionName: "lpApyBps",
-        chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-      },
+      // NOTE: vault.lpApyBps() removed in the EIP-170 fit refactor — LP APY
+      // is now derived client-side from `borrowApyBps × U × (1 − RF)`.
       {
         abi: EQUIFLOW_VAULT_ABI,
         address: vaultAddr,
@@ -133,13 +136,9 @@ export function useProtocolStats(
     scalar?.[5]?.status === "success"
       ? Number(scalar[5].result as bigint)
       : null;
-  const onChainLpAprBps =
+  const onChainUtilBps =
     scalar?.[6]?.status === "success"
       ? Number(scalar[6].result as bigint)
-      : null;
-  const onChainUtilBps =
-    scalar?.[7]?.status === "success"
-      ? Number(scalar[7].result as bigint)
       : null;
 
   // ── Per-asset reads: vault token balance + adapter address ────────────
@@ -275,11 +274,32 @@ export function useProtocolStats(
   const utilizationPct =
     utilizationBps != null ? utilizationBps / 100 : null;
 
+  // IRM integration: prefer on-chain `vault.borrowApyBps()` (delegates
+  // through the active IRM after `executeIrm()`), and derive LP APY +
+  // reserve APY client-side from it. Falls back to pure client-side
+  // `deriveRates()` when the RPC hasn't resolved yet — both produce the
+  // same numbers as long as `DEFAULT_RATE_CONFIG` mirrors the deployed
+  // KinkedRateModel. The on-chain authority is the invariant.
   const derived = useMemo<DerivedRates | null>(() => {
     const util = onChainUtilBps ?? utilizationBps;
     if (util == null) return null;
+    if (onChainBorrowAprBps != null) {
+      const supplyAprBps = computeSupplyRateBps(
+        onChainBorrowAprBps,
+        util,
+        reserveFactorBps,
+      );
+      return {
+        utilizationBps: util,
+        borrowAprBps: onChainBorrowAprBps,
+        borrowApyBps: aprBpsToApyBps(onChainBorrowAprBps),
+        supplyAprBps,
+        supplyApyBps: aprBpsToApyBps(supplyAprBps),
+        reserveFactorBps,
+      };
+    }
     return deriveRates(util, reserveFactorBps);
-  }, [onChainUtilBps, utilizationBps, reserveFactorBps]);
+  }, [onChainBorrowAprBps, onChainUtilBps, utilizationBps, reserveFactorBps]);
 
   // ── Liquidations (~24h window) ─────────────────────────────────────────
   const { data: head } = useBlockNumber({

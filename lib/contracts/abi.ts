@@ -377,13 +377,9 @@ export const EQUIFLOW_VAULT_ABI = [
     inputs: [],
     outputs: [{ type: "uint256" }],
   },
-  {
-    type: "function",
-    name: "lpApyBps",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [{ type: "uint256" }],
-  },
+  // NOTE: vault.lpApyBps() removed in the EIP-170 fit-and-deploy refactor —
+  // compute client-side via `computeSupplyRateBps(borrowApy, util, RF)` from
+  // `lib/web3/irm.ts`.
   {
     type: "function",
     name: "lpPositionOf",
@@ -424,13 +420,8 @@ export const EQUIFLOW_VAULT_ABI = [
     inputs: [],
     outputs: [{ type: "uint256" }],
   },
-  {
-    type: "function",
-    name: "reserveApyBps",
-    stateMutability: "view",
-    inputs: [],
-    outputs: [{ type: "uint256" }],
-  },
+  // NOTE: vault.reserveApyBps() removed in EIP-170 fit refactor — derive from
+  // (borrowApy × utilization × reserveFactor) / BPS² client-side.
   // ── ERC4626 (view-only compliance) ──
   {
     type: "function",

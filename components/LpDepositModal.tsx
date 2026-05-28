@@ -144,12 +144,30 @@ export function LpDepositModal({ open, onClose }: Props) {
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
     query: { enabled: !!VAULT_ADDR, refetchInterval: 12_000 },
   });
-  const { data: apyRaw } = useReadContract({
+  // LP APY derived client-side from on-chain (borrowApy × utilization ×
+  // (1 − reserveFactor)). vault.lpApyBps() was removed in the EIP-170 fit
+  // refactor; borrowApyBps already delegates through the active IRM after
+  // executeIrm() so this stays correct as governance swaps rate models.
+  const { data: borrowApyBpsRaw } = useReadContract({
     abi: EQUIFLOW_VAULT_ABI,
     address: VAULT_ADDR,
-    functionName: "lpApyBps",
+    functionName: "borrowApyBps",
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
     query: { enabled: !!VAULT_ADDR, refetchInterval: 12_000 },
+  });
+  const { data: utilBpsRaw } = useReadContract({
+    abi: EQUIFLOW_VAULT_ABI,
+    address: VAULT_ADDR,
+    functionName: "utilizationBps",
+    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
+    query: { enabled: !!VAULT_ADDR, refetchInterval: 12_000 },
+  });
+  const { data: reserveFactorBpsRaw } = useReadContract({
+    abi: EQUIFLOW_VAULT_ABI,
+    address: VAULT_ADDR,
+    functionName: "reserveFactorBps",
+    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
+    query: { enabled: !!VAULT_ADDR, refetchInterval: 30_000 },
   });
 
   const vaultBookedUsdg =
@@ -160,7 +178,22 @@ export function LpDepositModal({ open, onClose }: Props) {
     totalAssetsRaw !== undefined ? Number(totalAssetsRaw as bigint) / 1e18 : 0;
   const totalShares =
     totalSharesRaw !== undefined ? Number(totalSharesRaw as bigint) / 1e18 : 0;
-  const apyPct = apyRaw !== undefined ? Number(apyRaw as bigint) / 100 : 0;
+  const apyPct = (() => {
+    if (
+      borrowApyBpsRaw === undefined ||
+      utilBpsRaw === undefined ||
+      reserveFactorBpsRaw === undefined
+    ) {
+      return 0;
+    }
+    const borrowApyBps = Number(borrowApyBpsRaw as bigint);
+    const utilBps = Number(utilBpsRaw as bigint);
+    const reserveFactorBps = Number(reserveFactorBpsRaw as bigint);
+    // (borrowApy × U × (10_000 − RF)) / 10_000²  →  bps → %
+    const lpApyBps = (borrowApyBps * utilBps * (10_000 - reserveFactorBps)) /
+      (10_000 * 10_000);
+    return lpApyBps / 100;
+  })();
 
   const fmtBal = (v: number) =>
     isWeth
