@@ -1358,7 +1358,7 @@ function TxHistory() {
           className="font-mono text-ink-mute"
           style={{ fontSize: 10 }}
         >
-          {events.length} event{events.length === 1 ? "" : "s"} · 24h
+          {events.length} event{events.length === 1 ? "" : "s"} · all-time
         </span>
       </div>
 
@@ -1394,7 +1394,7 @@ function TxHistory() {
           className="font-mono text-ink-mute"
           style={{ fontSize: 11, padding: "12px 0" }}
         >
-          No vault activity in the last 24h for this wallet.
+          No vault activity yet for this wallet.
         </div>
       )}
 

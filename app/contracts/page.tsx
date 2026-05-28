@@ -103,7 +103,7 @@ const CONTRACTS: Contract[] = [
       },
       {
         sig: "setBorrowRateBps(uint256 newRate)",
-        desc: "Adjusts the protocol borrow APY in basis points. Caps at 5000 bps (50%).",
+        desc: "Base borrow rate (on-chain fallback). Frontend uses dynamic IRM: base 1%, slope1 5%, slope2 70%, kink at 85% utilization.",
         access: "onlyOwner",
       },
       {
@@ -154,7 +154,7 @@ const CONTRACTS: Contract[] = [
       },
       { slot: "2", layout: "address[]", desc: "listedAssets enumeration." },
       { slot: "3", layout: "uint256", desc: "totalBorrowedUsd (1e18)." },
-      { slot: "4", layout: "uint256", desc: "borrowRateBps (current APR)." },
+      { slot: "4", layout: "uint256", desc: "borrowRateBps (base rate, overridden by client-side IRM)." },
       {
         slot: "5",
         layout: "uint256 + uint256",

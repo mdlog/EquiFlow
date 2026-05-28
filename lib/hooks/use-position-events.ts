@@ -30,9 +30,60 @@ const SYMBOL_BY_ADDRESS = (() => {
   return m;
 })();
 
-/// ~24h at RBN's 0.25s/block. Matches use-recent-liquidations for consistency.
+/// ~24h at RBN's 0.25s/block. Used only for the FIRST scan when no cache exists;
+/// subsequent scans only fetch the delta since `lastScannedBlock` in localStorage,
+/// so history grows monotonically and survives across sessions.
 const RECENT_WINDOW_BLOCKS = 345_600n;
 const SECS_PER_BLOCK = 0.25;
+const CACHE_KEY_PREFIX = "equiflow:position-events:v1";
+
+interface CachedShape {
+  lastScannedBlock: string;
+  events: Array<Omit<PositionEvent, "blockNumber" | "timestamp"> & {
+    blockNumber: string;
+    timestamp: number;
+  }>;
+}
+
+function cacheKey(vault: Address | undefined, user: Address): string {
+  return `${CACHE_KEY_PREFIX}:${(vault ?? "0x0").toLowerCase()}:${user.toLowerCase()}`;
+}
+
+function loadCache(key: string): { lastScannedBlock: bigint; events: PositionEvent[] } | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as CachedShape;
+    return {
+      lastScannedBlock: BigInt(parsed.lastScannedBlock),
+      events: parsed.events.map((e) => ({
+        ...e,
+        blockNumber: BigInt(e.blockNumber),
+        timestamp: new Date(e.timestamp),
+      })),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function saveCache(key: string, lastScannedBlock: bigint, events: PositionEvent[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    const payload: CachedShape = {
+      lastScannedBlock: lastScannedBlock.toString(),
+      events: events.map((e) => ({
+        ...e,
+        blockNumber: e.blockNumber.toString(),
+        timestamp: e.timestamp.getTime(),
+      })),
+    };
+    window.localStorage.setItem(key, JSON.stringify(payload));
+  } catch {
+    // localStorage full or disabled — silently no-op
+  }
+}
 
 const PLEDGED_EVENT = parseAbiItem(
   "event Pledged(address indexed user, address indexed token, uint256 amount, uint256 borrowedUsd)",
@@ -132,8 +183,21 @@ export function usePositionEvents(user: Address | undefined): {
     queryFn: async (): Promise<PositionEvent[]> => {
       if (!client || !EQUIFLOW_VAULT_ADDRESS || !head || !user) return [];
 
-      const fromBlock =
-        head > RECENT_WINDOW_BLOCKS ? head - RECENT_WINDOW_BLOCKS : 0n;
+      const key = cacheKey(EQUIFLOW_VAULT_ADDRESS, user);
+      const cached = loadCache(key);
+
+      // First-time scan: use 24h window. Subsequent scans: only fetch new blocks.
+      const fromBlock = cached
+        ? cached.lastScannedBlock + 1n
+        : head > RECENT_WINDOW_BLOCKS
+          ? head - RECENT_WINDOW_BLOCKS
+          : 0n;
+
+      // Nothing new to fetch — return cached events as-is.
+      if (cached && fromBlock > head) {
+        return cached.events;
+      }
+
       const userTopic = user; // viem accepts plain address for indexed arg
 
       /// Run all six event scans in parallel — getLogsChunked already
@@ -328,15 +392,32 @@ export function usePositionEvents(user: Address | undefined): {
         });
       }
 
+      /// Merge with cached events (cache survives across sessions, so the
+      /// history panel grows monotonically and never "disappears" after 24h).
+      const merged = cached ? [...cached.events, ...out] : out;
+
+      /// Deduplicate on (txHash, kind, blockNumber) — same tx can emit pledge
+      /// + borrow rows, but a re-scan should never duplicate either row.
+      const seen = new Set<string>();
+      const deduped: PositionEvent[] = [];
+      for (const e of merged) {
+        const dedupKey = `${e.txHash}:${e.kind}:${e.blockNumber.toString()}:${e.symbol ?? ""}`;
+        if (seen.has(dedupKey)) continue;
+        seen.add(dedupKey);
+        deduped.push(e);
+      }
+
       /// Newest-first. Tie-break by kind so a pledge+borrow pair stays
       /// adjacent with the borrow row immediately below the pledge.
-      out.sort((a, b) => {
+      deduped.sort((a, b) => {
         if (a.blockNumber !== b.blockNumber) {
           return a.blockNumber > b.blockNumber ? -1 : 1;
         }
         return a.kind === "pledge" ? -1 : 1;
       });
-      return out;
+
+      saveCache(key, head, deduped);
+      return deduped;
     },
     enabled: !!client && !!EQUIFLOW_VAULT_ADDRESS && !!head && !!user,
     placeholderData: keepPreviousData,

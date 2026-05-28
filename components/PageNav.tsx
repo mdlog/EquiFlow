@@ -10,6 +10,7 @@ const PAGES = [
   { id: "markets", label: "Markets", href: "/markets" },
   { id: "portfolio", label: "Portfolio", href: "/portfolio" },
   { id: "liquidations", label: "Liquidations", href: "/liquidations" },
+  { id: "faucet", label: "Faucet", href: "/faucet" },
 ] as const;
 
 type Props = {

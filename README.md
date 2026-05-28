@@ -33,11 +33,9 @@ Pledge tokenized US equities as collateral, borrow regulated stablecoins (USDG),
 
 | Route | Description |
 |---|---|
-| `/markets` | Live markets table with Pyth price feeds, sparklines, LTV bars, and session badges |
+| `/markets` | Live markets with Pyth price feeds, search/filter, sector tabs, and inline pledge sidebar |
 | `/markets/[sym]` | Asset detail with OHLCV chart, risk parameters, and pledge calculator |
-| `/topography` | Yield topography — terrain visualization of vault/borrow APR across assets |
-| `/pledge` | Pledge collateral + borrow USDG in one transaction with full wagmi flow |
-| `/positions` | Position management — orbital atlas, health factor, repay/borrow/withdraw modals |
+| `/portfolio` | Position management — orbital atlas, health factor, repay/borrow/withdraw modals |
 | `/liquidations` | At-risk position board with health factor leaderboard and liquidation CTAs |
 
 ---
