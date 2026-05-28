@@ -193,13 +193,36 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
   useEffect(() => {
     if (!receiptSuccess) return;
     if (stage === "approving") {
+      // Resolve the orphaned "Approve …" toast the moment the receipt lands.
+      // Without this, sonner keeps the loading spinner on `duration: Infinity`
+      // forever even though the chain has already confirmed the approval —
+      // the user sees "approve notif loading lama" while we silently transition
+      // to the lock step. Stamp it sealed, then null the id so the next
+      // handleLock spawns a fresh pending toast for the pledge tx.
+      if (toastId !== null) {
+        txSealedToast(toastId, {
+          action: `Approved ${shares} ${s.sym}`,
+          txHash,
+        });
+        setToastId(null);
+      }
       resetWrite();
       refetchAllowance().then(() => setStage("lock"));
     } else if (stage === "locking") {
       setStage("sealed");
       refetchBalance();
     }
-  }, [receiptSuccess, stage, resetWrite, refetchAllowance, refetchBalance]);
+  }, [
+    receiptSuccess,
+    stage,
+    resetWrite,
+    refetchAllowance,
+    refetchBalance,
+    toastId,
+    shares,
+    s.sym,
+    txHash,
+  ]);
 
   const [aaTxHash, setAaTxHash] = useState<Hex | null>(null);
   const [aaError, setAaError] = useState<string | null>(null);
