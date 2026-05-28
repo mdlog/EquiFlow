@@ -25,7 +25,13 @@ export const robinhoodChainTestnet = defineChain({
     },
   },
   fees: {
-    defaultPriorityFee: () => 1n,
+    // 0.05 gwei floor. RBN testnet historically accepts priority fees as
+    // low as 1 wei, but the AA bundler enforces a higher minimum
+    // (see lib/aa/send-userop.ts → MIN_PRIORITY_FEE). Keeping EOA priority
+    // fees at the same floor avoids stuck-in-mempool surprises when keeper
+    // and user txs share the chain. Raise to 0.5 gwei if the chain's
+    // congestion ever pushes effective base fees higher.
+    defaultPriorityFee: () => 50_000_000n,
   },
   // NOTE: Address 0xa432504b6F04Cafe775b09D8AA92e8dbe41Ec7a8 on RBN testnet
   // implements Multicall v1/v2 (aggregate, tryAggregate) but NOT Multicall3

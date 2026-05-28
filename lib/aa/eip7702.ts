@@ -1,10 +1,61 @@
 "use client";
 
 import type { Address, Hex, SignedAuthorization, WalletClient } from "viem";
-import { numberToHex } from "viem";
+import { keccak256, numberToHex } from "viem";
 import { MODULAR_ACCOUNT_V2_IMPL } from "@/lib/web3/alchemy";
 import { getPublicClient } from "./bundler";
 import { isEoaDelegated } from "./smart-account";
+
+// Bytecode-hash allowlist for the Modular Account v2 implementation.
+//
+// Why this exists: MODULAR_ACCOUNT_V2_IMPL is sourced from NEXT_PUBLIC_* env
+// vars and ultimately from a build-time config. A compromised Vercel env or
+// a typo-d address would silently delegate every user's EOA to attacker
+// bytecode. By keccak256-hashing the impl bytecode at runtime and gating
+// delegation behind a known-good hash list, we make that pivot impossible
+// without code-review of this file.
+//
+// Operators MUST populate `ALLOWED_IMPL_CODE_HASHES` after deploying or
+// verifying the Modular Account v2 impl on RBN. Until then, the gate is
+// configurable via `NEXT_PUBLIC_TRUST_IMPL_BYTECODE=1` for dev/testnet.
+//
+// To add a hash: `cast keccak (cast code <impl>)` and paste below.
+const ALLOWED_IMPL_CODE_HASHES: ReadonlySet<Hex> = new Set<Hex>([
+  // populate with verified hashes once published — empty by default
+]);
+
+class EipImplHashMismatchError extends Error {
+  constructor(public actualHash: Hex) {
+    super(
+      `EIP-7702 delegation aborted: implementation bytecode hash ${actualHash} ` +
+        "is not in the verified allowlist. Refusing to delegate the EOA. " +
+        "See lib/aa/eip7702.ts → ALLOWED_IMPL_CODE_HASHES.",
+    );
+    this.name = "EipImplHashMismatchError";
+  }
+}
+
+async function ensureImplBytecodeAllowed(impl: Address): Promise<void> {
+  const trustEnv = process.env.NEXT_PUBLIC_TRUST_IMPL_BYTECODE;
+  const publicClient = getPublicClient();
+  const code = await publicClient.getCode({ address: impl });
+  if (!code || code === "0x") {
+    throw new Error(
+      `EIP-7702 delegation aborted: no bytecode at impl ${impl}. ` +
+        "Did you point NEXT_PUBLIC_MODULAR_ACCOUNT_V2_IMPL at a real contract?",
+    );
+  }
+  const hash = keccak256(code) as Hex;
+  if (ALLOWED_IMPL_CODE_HASHES.has(hash)) return;
+  if (trustEnv === "1") {
+    console.warn(
+      "[7702] WARNING: trusting unverified impl bytecode hash (NEXT_PUBLIC_TRUST_IMPL_BYTECODE=1):",
+      hash,
+    );
+    return;
+  }
+  throw new EipImplHashMismatchError(hash);
+}
 
 /// ─── EIP-7702 Authorization Helpers ──────────────────────────────────────
 ///
@@ -69,44 +120,48 @@ export class Eip7702DelegationCancelledError extends Error {
 /// on-chain delegation, `false` aborts with `Eip7702DelegationCancelledError`.
 export type ConfirmOnchainDelegation = () => Promise<boolean>;
 
-/// Storage key for the user's signed-but-not-yet-submitted authorization.
-/// The UserOp send path consumes this on the next submission.
-const PENDING_AUTH_KEY = "equiflow.aa.pendingAuth.v1";
+// Auth tuples used to be persisted in localStorage so the next UserOp could
+// pick them up after a page refresh. That made the *signed authorization*
+// (which an attacker can submit on the user's behalf to delegate the EOA)
+// trivially exfiltratable via any XSS. We now keep them in module memory
+// only — refresh = re-prompt, but stolen tuples are not a thing.
 
 export interface PendingAuth {
-  /// Owner EOA the auth was generated for. We re-check this to avoid using
-  /// an authorization signed by a previous wallet still cached in storage.
   owner: Address;
-  /// The actual signed tuple — exactly what viem's `signAuthorization` returns,
-  /// so it can be passed through to a UserOp's `authorization` field as-is.
   tuple: SignedAuthorization;
-  /// Wall-clock timestamp the tuple was signed. Used for stale checks.
   signedAt: number;
 }
 
+const inMemoryAuths = new Map<string, PendingAuth>();
+
 export function readPendingAuth(owner: Address): PendingAuth | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = window.localStorage.getItem(PENDING_AUTH_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as PendingAuth;
-    if (parsed.owner.toLowerCase() !== owner.toLowerCase()) return null;
-    // Stale-guard: discard tuples older than 1h (nonce moves with state).
-    if (Date.now() - parsed.signedAt > 60 * 60 * 1000) return null;
-    return parsed;
-  } catch {
+  const cached = inMemoryAuths.get(owner.toLowerCase());
+  if (!cached) return null;
+  // 5-minute lifetime — short enough that stale nonces are unlikely,
+  // long enough to cover the round-trip from signing to UserOp submission.
+  if (Date.now() - cached.signedAt > 5 * 60 * 1000) {
+    inMemoryAuths.delete(owner.toLowerCase());
     return null;
   }
+  return cached;
 }
 
 export function clearPendingAuth() {
-  if (typeof window === "undefined") return;
-  window.localStorage.removeItem(PENDING_AUTH_KEY);
+  inMemoryAuths.clear();
 }
 
 function writePendingAuth(p: PendingAuth) {
-  if (typeof window === "undefined") return;
-  window.localStorage.setItem(PENDING_AUTH_KEY, JSON.stringify(p));
+  inMemoryAuths.set(p.owner.toLowerCase(), p);
+}
+
+// One-time migration: wipe any old localStorage tuples left from the prior
+// persistent implementation.
+if (typeof window !== "undefined") {
+  try {
+    window.localStorage.removeItem("equiflow.aa.pendingAuth.v1");
+  } catch {
+    // ignore
+  }
 }
 
 /// Asks the user to sign a 7702 authorization tuple delegating their EOA to
@@ -132,6 +187,9 @@ export async function ensureDelegation(
 
   const cached = readPendingAuth(owner);
   if (cached) return cached;
+
+  // Pin: refuse to delegate if the impl bytecode hash isn't in the allowlist.
+  await ensureImplBytecodeAllowed(MODULAR_ACCOUNT_V2_IMPL);
 
   const publicClient = getPublicClient();
   // Prefer the wallet's nonce view (Rabby et al track pending txs locally,
@@ -353,6 +411,28 @@ async function sendType4DelegationTx(
 ): Promise<void> {
   const provider = getInjectedProvider();
   if (!provider) throw new Error("No injected provider");
+
+  // Verify the provider is actually on the target chain. Stops type-4 txs
+  // from being submitted on mainnet if a user has mid-flight switched
+  // networks. The inner authorization tuple is signed for `args.chainId`
+  // (replay-safe on its own) but the outer tx must land on the right chain.
+  try {
+    const providerChainHex = (await provider.request({
+      method: "eth_chainId",
+    })) as Hex;
+    const providerChainId = parseInt(providerChainHex.replace(/^0x/, ""), 16);
+    if (providerChainId !== args.chainId) {
+      throw new Error(
+        `Wallet is on chain ${providerChainId}, expected ${args.chainId}. ` +
+          "Switch to Robinhood Chain Testnet before delegating.",
+      );
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("Wallet is on chain"))
+      throw err;
+    // If eth_chainId fails entirely, treat as unsupported.
+    throw new Error("Could not verify wallet chain before delegation");
+  }
 
   const txParams = {
     from: owner,
