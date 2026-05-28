@@ -34,7 +34,8 @@ yarn-error.log*
 .env*
 
 # docs & claude config (not for repo)
-docs/
+docs/*
+!docs/SECURITY_RUNBOOK.md
 .claude/
 CLAUDE.md
 AGENTS.md

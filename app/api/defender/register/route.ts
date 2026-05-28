@@ -1,102 +1,175 @@
 import { NextResponse } from "next/server";
-import type { Address } from "viem";
-import { writeConfig } from "@/lib/web3/defender-store";
+import {
+  createPublicClient,
+  encodePacked,
+  http,
+  keccak256,
+  type Address,
+  type Hex,
+} from "viem";
+import { writeConfig, readConfig } from "@/lib/web3/defender-store";
+import { robinhoodChainTestnet } from "@/lib/config/chain";
+import { EQUIFLOW_VAULT_ADDRESS } from "@/lib/contracts";
+import { ApiError, withErrorHandler } from "@/lib/api/handler";
+import {
+  consumeReplayNonce,
+  hashRegisterPayload,
+  isHex,
+  readBoundedJson,
+  requireAddressValue,
+  requireRateLimit,
+  sanitizeError,
+  verifySignature,
+} from "@/lib/api/security";
 
-const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
-const INT_RE = /^\d+$/;
-const HEX64_RE = /^0x[0-9a-fA-F]{64}$/;
-
-/// Max 90-day session window — anything longer is rejected as unreasonable.
+// Limits — picked so a single attacker can't exhaust storage/CPU and so
+// downstream BigInt math stays in safe bounds.
 const MAX_EXPIRY_SECONDS = 90 * 86400;
+const MIN_EXPIRY_FROM_NOW_S = 60 * 60; // 1h minimum to prevent trivially-expired authorizations
+const MAX_WEEKLY_LIMIT_USDG = 1_000_000_000_000n; // 1M USDG (6-dec atomic)
+const MIN_HEALTH_THRESHOLD = BigInt(1e18); // HF ≥ 1.0
+const MAX_HEALTH_THRESHOLD = 5n * BigInt(1e18); // HF ≤ 5.0
+const MAX_COLLATERAL_TOKENS = 32;
+const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
+const INT_RE = /^\d{1,32}$/;
 
 interface RegisterBody {
   wallet?: string;
   sessionKey?: string;
-  weeklyLimitUsdg?: string; // decimal string (atomic 6-dec USDG)
-  healthThreshold?: string; // decimal string (1e18-scaled)
-  expiresAt?: number; // unix seconds
+  weeklyLimitUsdg?: string; // 6-dec atomic, decimal string
+  healthThreshold?: string; // 1e18-scaled, decimal string
+  expiresAt?: number;
   collateralTokens?: string[];
+  nonce?: string; // 0x + 32 bytes
+  signature?: string; // 0x + 65 bytes EOA or arbitrary ERC-1271
   installUserOpHash?: string;
 }
 
-/// POST /api/defender/register
-/// Body documented in RegisterBody above. Validates shape + expiry sanity and
-/// writes the configuration to the defender store.
-///
-/// NOTE: we do not verify the signature on-chain in the demo — the legitimacy
-/// of the registration is implicitly proven by the install UserOp the user
-/// just submitted (whose hash is included in the payload).
-export async function POST(req: Request) {
-  let body: RegisterBody;
-  try {
-    body = (await req.json()) as RegisterBody;
-  } catch {
-    return NextResponse.json(
-      { ok: false, error: "invalid_json" },
-      { status: 400 },
-    );
+// Hash the canonicalised collateral list (sorted, lowercased) so two equivalent
+// arrays produce the same EIP-712 digest. Empty list → ZERO_HASH.
+function collateralTokensHash(addrs: Address[]): Hex {
+  if (addrs.length === 0) {
+    return "0x0000000000000000000000000000000000000000000000000000000000000000";
+  }
+  const sorted = [...addrs].map((a) => a.toLowerCase() as Address).sort();
+  const packed = encodePacked(
+    sorted.map(() => "address" as const),
+    sorted,
+  );
+  return keccak256(packed);
+}
+
+export const POST = withErrorHandler(async (req: Request) => {
+  await requireRateLimit(req, { bucket: "defender-register", max: 10, windowSeconds: 60 });
+  if (!EQUIFLOW_VAULT_ADDRESS) throw new ApiError(503, "vault_not_configured");
+
+  const body = await readBoundedJson<RegisterBody>(req);
+
+  // ── Shape validation ─────────────────────────────────────────────────
+  const wallet = requireAddressValue(body.wallet, "wallet");
+  const sessionKey = requireAddressValue(body.sessionKey, "session_key");
+
+  if (!body.weeklyLimitUsdg || !INT_RE.test(body.weeklyLimitUsdg)) {
+    throw new ApiError(400, "invalid_weekly_limit");
+  }
+  const weeklyLimit = BigInt(body.weeklyLimitUsdg);
+  if (weeklyLimit === 0n || weeklyLimit > MAX_WEEKLY_LIMIT_USDG) {
+    throw new ApiError(400, "weekly_limit_out_of_range");
   }
 
-  const { wallet, sessionKey, weeklyLimitUsdg, healthThreshold, expiresAt } =
-    body;
-  if (!wallet || !ADDR_RE.test(wallet)) {
-    return NextResponse.json(
-      { ok: false, error: "invalid_wallet" },
-      { status: 400 },
-    );
+  if (!body.healthThreshold || !INT_RE.test(body.healthThreshold)) {
+    throw new ApiError(400, "invalid_threshold");
   }
-  if (!sessionKey || !ADDR_RE.test(sessionKey)) {
-    return NextResponse.json(
-      { ok: false, error: "invalid_session_key" },
-      { status: 400 },
-    );
+  const threshold = BigInt(body.healthThreshold);
+  if (threshold < MIN_HEALTH_THRESHOLD || threshold > MAX_HEALTH_THRESHOLD) {
+    throw new ApiError(400, "threshold_out_of_range");
   }
-  if (!weeklyLimitUsdg || !INT_RE.test(weeklyLimitUsdg)) {
-    return NextResponse.json(
-      { ok: false, error: "invalid_weekly_limit" },
-      { status: 400 },
-    );
-  }
-  if (!healthThreshold || !INT_RE.test(healthThreshold)) {
-    return NextResponse.json(
-      { ok: false, error: "invalid_threshold" },
-      { status: 400 },
-    );
-  }
+
   const now = Math.floor(Date.now() / 1000);
   if (
-    typeof expiresAt !== "number" ||
-    expiresAt <= now + 60 ||
-    expiresAt > now + MAX_EXPIRY_SECONDS
+    typeof body.expiresAt !== "number" ||
+    body.expiresAt <= now + MIN_EXPIRY_FROM_NOW_S ||
+    body.expiresAt > now + MAX_EXPIRY_SECONDS
   ) {
-    return NextResponse.json(
-      { ok: false, error: "invalid_expiry" },
-      { status: 400 },
-    );
+    throw new ApiError(400, "invalid_expiry");
   }
+  const expiresAt = body.expiresAt;
 
-  const collateralTokens = Array.isArray(body.collateralTokens)
-    ? body.collateralTokens.filter((t) => typeof t === "string" && ADDR_RE.test(t))
-    : [];
+  // Collateral tokens: bounded, address-shaped, deduplicated.
+  if (
+    body.collateralTokens !== undefined &&
+    (!Array.isArray(body.collateralTokens) ||
+      body.collateralTokens.length > MAX_COLLATERAL_TOKENS)
+  ) {
+    throw new ApiError(400, "collateral_tokens_invalid");
+  }
+  const collateralTokens = (body.collateralTokens ?? []).filter(
+    (t): t is string => typeof t === "string" && ADDR_RE.test(t),
+  );
+  const dedupedCollateral = Array.from(
+    new Set(collateralTokens.map((t) => t.toLowerCase())),
+  ) as Address[];
 
+  // ── Anti-replay nonce ────────────────────────────────────────────────
+  if (!body.nonce || !isHex(body.nonce, 66)) {
+    throw new ApiError(400, "invalid_nonce");
+  }
+  await consumeReplayNonce(body.nonce, "defender-register");
+
+  // ── Signature verification (EOA or ERC-1271) ─────────────────────────
+  if (!body.signature || !isHex(body.signature, body.signature.length)) {
+    throw new ApiError(400, "invalid_signature");
+  }
+  const tokensHash = collateralTokensHash(dedupedCollateral);
+  const hash = hashRegisterPayload({
+    chainId: robinhoodChainTestnet.id,
+    verifyingContract: EQUIFLOW_VAULT_ADDRESS,
+    wallet,
+    sessionKey,
+    weeklyLimitUsdg: weeklyLimit,
+    healthThreshold: threshold,
+    expiresAt: BigInt(expiresAt),
+    collateralTokensHash: tokensHash,
+    nonce: BigInt(body.nonce),
+  });
+  const publicClient = createPublicClient({
+    chain: robinhoodChainTestnet,
+    transport: http(),
+  });
+  let ok = false;
+  try {
+    ok = await verifySignature({
+      publicClient,
+      expectedSigner: wallet,
+      hash,
+      signature: body.signature as Hex,
+    });
+  } catch (err) {
+    const { logMessage } = sanitizeError(err);
+    console.warn("[defender/register] verifySignature error:", logMessage);
+    throw new ApiError(401, "signature_check_failed");
+  }
+  if (!ok) throw new ApiError(401, "signature_invalid");
+
+  // ── Persist (preserve weekUsed/weekStart across re-registers) ────────
+  const existing = await readConfig(wallet);
   const installUserOpHash =
-    typeof body.installUserOpHash === "string" &&
-    HEX64_RE.test(body.installUserOpHash)
+    typeof body.installUserOpHash === "string" && isHex(body.installUserOpHash, 66)
       ? body.installUserOpHash
       : undefined;
 
   await writeConfig({
-    wallet: wallet as Address,
-    sessionKey: sessionKey as Address,
-    threshold: healthThreshold,
-    weeklyLimit: weeklyLimitUsdg,
-    weekUsed: "0",
-    weekStart: now,
+    wallet,
+    sessionKey,
+    threshold: threshold.toString(),
+    weeklyLimit: weeklyLimit.toString(),
+    weekUsed: existing?.weekUsed ?? "0",
+    weekStart: existing?.weekStart ?? now,
     expiresAt,
-    collateralTokens,
+    collateralTokens: dedupedCollateral,
     installUserOpHash,
-    createdAt: now,
+    createdAt: existing?.createdAt ?? now,
   });
 
   return NextResponse.json({ ok: true });
-}
+});

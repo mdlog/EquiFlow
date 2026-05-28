@@ -8,6 +8,7 @@ import {MockStockToken} from "../src/mocks/MockStockToken.sol";
 import {MockPyth} from "@pythnetwork/pyth-sdk-solidity/MockPyth.sol";
 import {IPyth} from "@pythnetwork/pyth-sdk-solidity/IPyth.sol";
 import {PythPriceAdapter} from "../src/oracle/PythPriceAdapter.sol";
+import {KinkedRateModel} from "../src/interest/KinkedRateModel.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @notice EquiFlow deploy script for Robinhood Chain Testnet (chainId 46630).
@@ -188,6 +189,10 @@ contract DeployScript is Script {
                 deployer
             );
             adapter.setKeeper(deployer, true);
+            // CRIT-8 fix: explicitly set the deviation cap even though the
+            // constructor now defaults to 500 bps. Belt-and-suspenders so a
+            // future constructor refactor cannot regress the protection.
+            adapter.setMaxDeviation(500);
             console2.log(string.concat("PythAdapter ", s.symbol, ":"), address(adapter));
 
             vault.listAsset(
@@ -208,6 +213,36 @@ contract DeployScript is Script {
                 console2.log(string.concat("  BorrowCap ", s.symbol, ":"), capRaw);
             }
         }
+
+        // ─── 4b. Deploy + schedule the kinked IRM ────────────────────────
+        // Curve picked to mirror lib/web3/irm.ts DEFAULT_RATE_CONFIG with
+        // slope2 clamped so that base + slope1 + slope2 ≤ BPS (constructor
+        // requirement) AND so the resulting U=100% rate stays within the
+        // vault's MAX_BORROW_RATE_BPS = 5_000 (50% APR cap, defense in depth):
+        //
+        //   base   = 1.00%    (100 bps)
+        //   slope1 = 5.00%    (500 bps)
+        //   slope2 = 49.00%   (4900 bps)
+        //   U_opt  = 85%
+        //
+        // → rate(0)   = 1%
+        // → rate(85%) = 6%
+        // → rate(100%) = 55%, clamped to 50% at the vault.
+        KinkedRateModel kinkedIrm = new KinkedRateModel(
+            "EquiFlow Kinked v1",
+            100,
+            500,
+            4900,
+            8500
+        );
+        console2.log("KinkedRateModel deployed:", address(kinkedIrm));
+
+        // Schedule the swap. In production the operator (multisig) must
+        // call vault.executeIrm() after OWNER_WITHDRAW_DELAY (24h). Until
+        // then the vault keeps using `borrowRateBps` (legacy flat rate).
+        vault.scheduleIrm(address(kinkedIrm));
+        console2.log("IRM scheduled - execute after OWNER_WITHDRAW_DELAY (24h)");
+        console2.log("  Multisig action:  vault.executeIrm()");
 
         // ─── 5. Seed liquidity (only if we deployed MockUSDC ourselves) ──
         uint256 initLiq = vm.envOr("INIT_LIQUIDITY_USDC", uint256(1_000_000));
@@ -236,6 +271,7 @@ contract DeployScript is Script {
         console2.log("NEXT_PUBLIC_VAULT_ADDRESS=", address(vault));
         console2.log("NEXT_PUBLIC_USDC_ADDRESS=", usdcAddr);
         console2.log("NEXT_PUBLIC_PYTH_ADDRESS=", address(pyth));
+        console2.log("NEXT_PUBLIC_IRM_ADDRESS=", address(kinkedIrm));
     }
 
     function _envAddrOr(string memory key, address fallback_) internal view returns (address) {

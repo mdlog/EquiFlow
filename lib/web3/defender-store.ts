@@ -144,6 +144,7 @@ export async function listActive(): Promise<DefenderConfig[]> {
 }
 
 /// Resets `weekUsed` if we've rolled past the 7-day window. Mutates a copy.
+/// Caller is responsible for persisting and clearing the atomic counter.
 function rolloverIfExpired(cfg: DefenderConfig): DefenderConfig {
   const now = Math.floor(Date.now() / 1000);
   if (now - cfg.weekStart >= WEEK) {
@@ -152,15 +153,96 @@ function rolloverIfExpired(cfg: DefenderConfig): DefenderConfig {
   return cfg;
 }
 
+async function clearUsageCounter(walletLc: string): Promise<void> {
+  if (!REDIS_ENABLED) return;
+  try {
+    await redisCall(["DEL", `defender:weekused:${walletLc}`]);
+  } catch (err) {
+    console.warn("[defender] redis counter clear failed:", err);
+  }
+}
+
 /// Atomically increment weekUsed by `delta` atomic USDG units.
+///
+/// Implementation note: we keep the truth in the serialized JSON for parity
+/// with read paths, but use a separate Upstash counter as the atomic anchor.
+/// The flow is:
+///   1. INCRBY counter:<wallet> delta       — atomic, race-safe
+///   2. read the counter back              — the canonical weekUsed
+///   3. write JSON with the new value      — keeps reads consistent
+///
+/// On Upstash unavailability we still serialize via a per-process mutex so
+/// concurrent calls don't lose increments within one Node worker. Cross-
+/// process races still possible without Upstash, but those are noted in
+/// the audit and documented in SECURITY_RUNBOOK.md.
+const usageMutexes = new Map<string, Promise<void>>();
+
+async function withMutex<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prior = usageMutexes.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const next = new Promise<void>((r) => (release = r));
+  usageMutexes.set(key, prior.then(() => next));
+  try {
+    await prior;
+    return await fn();
+  } finally {
+    release();
+    if (usageMutexes.get(key) === next) usageMutexes.delete(key);
+  }
+}
+
+async function redisIncrBy(key: string, delta: bigint): Promise<bigint | null> {
+  if (!REDIS_ENABLED) return null;
+  // Upstash INCRBY supports integer payloads up to int64 — our weekUsed is
+  // 6-dec USDG atomic; even a billion-dollar cap fits in 60 bits. Pass as
+  // string to avoid float coercion in Upstash's JSON command parser.
+  try {
+    const result = (await redisCall(["INCRBY", key, delta.toString()])) as
+      | number
+      | string
+      | null;
+    if (result === null || result === undefined) return null;
+    return BigInt(result);
+  } catch (err) {
+    console.warn("[defender] redis incrby failed:", err);
+    return null;
+  }
+}
+
 export async function recordUsage(
   wallet: Address,
   deltaUsdg: bigint,
 ): Promise<void> {
-  const cfg = await readConfig(wallet);
-  if (!cfg) return;
-  const next = (BigInt(cfg.weekUsed) + deltaUsdg).toString();
-  await writeConfig({ ...cfg, weekUsed: next });
+  if (deltaUsdg <= 0n) return;
+  const key = lc(wallet);
+  await withMutex(key, async () => {
+    // Read the *raw* config so we can detect a week boundary without
+    // rolloverIfExpired silently dropping our INCR result.
+    const cfg = await readConfig(wallet);
+    if (!cfg) return;
+
+    const now = Math.floor(Date.now() / 1000);
+    const rolledOver = now - cfg.weekStart >= WEEK;
+    if (rolledOver) {
+      // New week. Reset counter and JSON before applying this delta so the
+      // increment lands in the fresh window.
+      await clearUsageCounter(key);
+      cfg.weekStart = now;
+      cfg.weekUsed = "0";
+    }
+
+    const counterKey = `defender:weekused:${key}`;
+    const onUpstash = await redisIncrBy(counterKey, deltaUsdg);
+
+    const merged: DefenderConfig = {
+      ...cfg,
+      weekUsed:
+        onUpstash !== null
+          ? onUpstash.toString()
+          : (BigInt(cfg.weekUsed) + deltaUsdg).toString(),
+    };
+    await writeConfig(merged);
+  });
 }
 
 export async function countActive(): Promise<number> {

@@ -117,6 +117,29 @@ const MODULAR_ACCOUNT_V2_STUB_SIGNATURE = ("0xFF" + // RESERVED_VALIDATION_DATA_
   SECP256K1_N_HALF + // s — secp256k1n/2 (max valid cap)
   "1c") as Hex; // v = 28
 
+/// Asserts the WalletClient's underlying provider is still on the expected
+/// chain. Wagmi/viem caches `walletClient.chain` at creation, so a user who
+/// switches networks mid-session would otherwise have their next signature
+/// produced against a stale chainId. Calling `eth_chainId` at sign time is
+/// the only way to detect that.
+async function assertChainId(owner: WalletClient, expected: number): Promise<void> {
+  let live: number;
+  try {
+    const hex = (await owner.request({ method: "eth_chainId" })) as Hex;
+    live = parseInt(hex.replace(/^0x/, ""), 16);
+  } catch {
+    // If the transport refuses to answer, treat as unverifiable rather than
+    // implicitly trusting `owner.chain`. Refusing is safer than signing on
+    // the wrong network.
+    throw new Error("Could not verify wallet chain at sign time");
+  }
+  if (live !== expected) {
+    throw new Error(
+      `Wallet is on chain ${live}, expected ${expected}. Switch to Robinhood Chain Testnet before signing.`,
+    );
+  }
+}
+
 /// Returns the on-chain code at an address. For 7702-delegated EOAs the
 /// runtime returns a 23-byte "delegation designator" (0xef0100 + impl addr).
 /// For undelegated EOAs it returns "0x". We use this to decide whether the
@@ -243,12 +266,11 @@ export async function createSmartAccount({
       });
     },
     async signMessage({ message }) {
+      await assertChainId(owner, robinhoodChainTestnetId);
       return owner.signMessage({ account: ownerAddress, message });
     },
     async signTypedData(typedData) {
-      // viem's overloaded signature — rebuild the object so the explicit
-      // `account` field is present (WalletClient.signTypedData requires it,
-      // but the SmartAccountImplementation typedData param doesn't carry one).
+      await assertChainId(owner, robinhoodChainTestnetId);
       return owner.signTypedData({
         account: ownerAddress,
         domain: typedData.domain,
@@ -262,6 +284,13 @@ export async function createSmartAccount({
     },
     async signUserOperation(parameters) {
       const { chainId = robinhoodChainTestnetId, ...userOp } = parameters;
+      // Refuse to sign cross-chain — guards against mid-session network swaps.
+      if (chainId !== robinhoodChainTestnetId) {
+        throw new Error(
+          `signUserOperation refused: caller chainId=${chainId}, expected ${robinhoodChainTestnetId}`,
+        );
+      }
+      await assertChainId(owner, robinhoodChainTestnetId);
       const hash = getUserOperationHash({
         chainId,
         entryPointAddress: ENTRY_POINT_07,
@@ -272,9 +301,6 @@ export async function createSmartAccount({
         account: ownerAddress,
         message: { raw: hash },
       });
-      // Modular Account v2: prepend RESERVED_VALIDATION_DATA_INDEX (0xFF, the
-      // sparse-segment final-marker checked by `getFinalSegment`) and the
-      // SemiModular fallback `SignatureType.EOA` byte (0x00). Total 67 bytes.
       return ("0xFF00" + sig.slice(2)) as Hex;
     },
     async getNonce() {
@@ -381,9 +407,11 @@ export async function createEip7702SmartAccount({
       });
     },
     async signMessage({ message }) {
+      await assertChainId(owner, robinhoodChainTestnetId);
       return owner.signMessage({ account: ownerAddress, message });
     },
     async signTypedData(typedData) {
+      await assertChainId(owner, robinhoodChainTestnetId);
       return owner.signTypedData({
         account: ownerAddress,
         domain: typedData.domain,
@@ -397,6 +425,12 @@ export async function createEip7702SmartAccount({
     },
     async signUserOperation(parameters) {
       const { chainId = robinhoodChainTestnetId, ...userOp } = parameters;
+      if (chainId !== robinhoodChainTestnetId) {
+        throw new Error(
+          `signUserOperation refused: caller chainId=${chainId}, expected ${robinhoodChainTestnetId}`,
+        );
+      }
+      await assertChainId(owner, robinhoodChainTestnetId);
       const hash = getUserOperationHash({
         chainId,
         entryPointAddress: ENTRY_POINT_07,
@@ -407,7 +441,6 @@ export async function createEip7702SmartAccount({
         account: ownerAddress,
         message: { raw: hash },
       });
-      // Prepend RESERVED_VALIDATION_DATA_INDEX (0xFF) + SignatureType.EOA (0x00).
       return ("0xFF00" + sig.slice(2)) as Hex;
     },
     async getNonce() {

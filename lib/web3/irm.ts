@@ -5,21 +5,32 @@
 /// Per-asset differentiation lives in risk parameters (LTV / liq threshold),
 /// not in pricing. This module derives both rates from observed utilization.
 ///
-/// Today this runs **client-side** — vault.borrowApyBps() is still owner-set
-/// in the contract. Once the IRM is folded into pokeInterest() on-chain the
-/// frontend can switch to reading the on-chain value, but the formula here is
-/// the canonical one we're optimizing toward.
+/// On-chain authority
+/// ──────────────────
+/// As of the feat/onchain-irm release, `EquiFlowVault.borrowApyBps()` reads
+/// from a deployed `KinkedRateModel` contract (set via vault.executeIrm
+/// after the 24h timelock). The functions below remain canonical because:
+///
+///   - SSR / build-time render paths cannot call wagmi hooks. The pure
+///     `computeBorrowRateBps` is the deterministic fallback so the first
+///     paint shows sensible numbers before any RPC roundtrip.
+///   - Chart curves (`sampleCurve`) need N points. Reading N points from
+///     on-chain costs N RPC calls; the client-side curve is identical to
+///     the on-chain implementation (verified by `KinkedRateModel.t.sol`).
+///   - When IRM parameters change (governance deploys a new model + swaps),
+///     update `DEFAULT_RATE_CONFIG` below so client + on-chain remain in
+///     sync. The audit-fix invariant is that ON-CHAIN is authoritative.
 ///
 /// All inputs/outputs are in **basis points** (bps) to mirror on-chain units:
 ///   1 bps = 0.01 %
 ///   100 bps = 1 %
 ///   10_000 bps = 100 %
 ///
-/// Default config tuned for the EquiFlow demo:
-///   - Slightly lower U_optimal than Aave USDC (92 %) because collateral is
-///     volatile equity, so the supplier base needs more headroom for shocks.
-///   - Non-zero base rate so suppliers still earn something at low utilization.
-///   - Aggressive slope2 makes the penalty visually dramatic for demos.
+/// Default config matches contracts/script/Deploy.s.sol:
+///   - base=1.00%, slope1=5.00%, slope2=49.00%, U_opt=85%
+///   - slope2 trimmed from the historical demo value (70%) so worst-case
+///     at U=100% (55%) sits just above the vault's MAX_BORROW_RATE_BPS
+///     clamp (50%). The clamp at the vault is the authoritative cap.
 
 export interface RateConfig {
   baseBps: number;          // base borrow rate when U = 0
@@ -29,9 +40,12 @@ export interface RateConfig {
 }
 
 export const DEFAULT_RATE_CONFIG: RateConfig = {
+  // Mirrors contracts/script/Deploy.s.sol KinkedRateModel constructor args.
+  // Source of truth is on-chain; this is a fallback for SSR / off-line.
   baseBps: 100,           // 1.00 %
-  slope1Bps: 500,         // +5.00 % up to optimal → ceiling 6.00 % at U = optimal
-  slope2Bps: 7000,        // +70.00 % at U = 100 % → ceiling 76.00 % at full
+  slope1Bps: 500,         // +5.00 % up to optimal → ceiling 6.00 % at U_opt
+  slope2Bps: 4900,        // +49.00 % at U = 100 % → ceiling 55 %; vault
+                          //          clamps to MAX_BORROW_RATE_BPS = 50 %
   optimalUtilBps: 8500,   // U_opt = 85 %
 };
 
@@ -121,6 +135,97 @@ export function sampleCurve(
   for (let i = 0; i <= points; i++) {
     const u = (i * 10_000) / points;
     out.push({ u, rate: computeBorrowRateBps(u, cfg) });
+  }
+  return out;
+}
+
+/// ─── On-chain integration helpers ────────────────────────────────────────
+///
+/// ABI fragment matching contracts/src/interest/IInterestRateModel.sol +
+/// KinkedRateModel.sol. Import this where wagmi `useReadContract` needs to
+/// pull the live rate or the immutable curve params.
+///
+/// To read the active model:
+///   1. `useReadContract({ abi: EQUIFLOW_VAULT_ABI, functionName: "irm" })`
+///      → returns the IRM contract address (or address(0) if not yet wired).
+///   2. With that address, call `getBorrowRate(utilizationBps)` for live
+///      rate, or read `baseBps/slope1Bps/slope2Bps/optimalUtilBps` for curve
+///      params so charts can render the exact on-chain shape.
+///
+/// To read the current effective borrow APY at the live utilization:
+///   `useReadContract({ abi: EQUIFLOW_VAULT_ABI, functionName: "borrowApyBps" })`
+///   already delegates through the IRM and applies the vault's clamp —
+///   that's the preferred single-call path for headline UI metrics.
+export const KINKED_RATE_MODEL_ABI = [
+  {
+    type: "function",
+    name: "getBorrowRate",
+    stateMutability: "view",
+    inputs: [{ name: "utilizationBps", type: "uint256" }],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "name",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "string" }],
+  },
+  {
+    type: "function",
+    name: "baseBps",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "slope1Bps",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "slope2Bps",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "optimalUtilBps",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint256" }],
+  },
+] as const;
+
+/// Build a curve sample request for `useReadContracts` so a chart can plot
+/// the LIVE on-chain curve in one batched RPC call instead of N round-trips
+/// through the client formula.
+///
+/// Returns an array of contract-call descriptors. Pair with `useReadContracts`
+/// to fetch them in parallel, then `(result, i) => ({ u: i * 10_000 / points,
+/// rate: Number(result[i].result) })`.
+export function buildCurveReadCalls(
+  irmAddress: `0x${string}`,
+  points = 24,
+): Array<{
+  abi: typeof KINKED_RATE_MODEL_ABI;
+  address: `0x${string}`;
+  functionName: "getBorrowRate";
+  args: [bigint];
+}> {
+  const out = [];
+  for (let i = 0; i <= points; i++) {
+    const u = BigInt(Math.round((i * 10_000) / points));
+    out.push({
+      abi: KINKED_RATE_MODEL_ABI,
+      address: irmAddress,
+      functionName: "getBorrowRate" as const,
+      args: [u] as [bigint],
+    });
   }
   return out;
 }

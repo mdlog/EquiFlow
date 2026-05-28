@@ -119,7 +119,7 @@ export function AutoDefenderModal({
       onClose={onClose}
       variant="centered"
       width={540}
-      eyebrow="installValidation · session-key sub-signer"
+      eyebrow="BETA · off-chain authorization (on-chain validator pending)"
       title="Enable Auto-Defender"
       footer={
         <>
@@ -161,6 +161,30 @@ export function AutoDefenderModal({
           {" "}Stays in scope only for the limits you set. You can revoke at
           any time.
         </span>
+
+        {/* BETA disclosure — the install UserOp this modal submits does NOT
+            currently land an on-chain validator (Modular Account v2
+            `installValidation` is pending a published validator module on
+            RBN testnet). Limits are enforced off-chain by the keeper. The
+            keeper sweep stays in `dry_run` until the on-chain path ships.
+            Be honest with users about what's enforced and what isn't. */}
+        <div
+          className="border border-hairline-soft bg-paper-alt"
+          style={{
+            marginTop: 12,
+            padding: "10px 12px",
+            fontSize: 11,
+            lineHeight: 1.5,
+            color: "var(--amber)",
+          }}
+        >
+          <strong>BETA / off-chain enforcement.</strong>{" "}
+          Until Modular Account v2's <code>installValidation()</code> path lands,
+          these limits are stored on the keeper backend, not enforced by your
+          smart wallet on-chain. The keeper currently runs in dry-run and will
+          not move funds. We will require a re-authorization when the on-chain
+          path ships.
+        </div>
       </div>
 
       {/* Sliders */}

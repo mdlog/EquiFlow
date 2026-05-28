@@ -1,54 +1,44 @@
 import { NextResponse } from "next/server";
 import { HISTORY_ENABLED, readSeries, downsample } from "@/lib/web3/price-history";
+import { ApiError, withErrorHandler } from "@/lib/api/handler";
+import { requireRateLimit } from "@/lib/api/security";
 
-/// Batched sparkline endpoint.
-///
-/// Usage: GET /api/markets/sparkline?syms=TSLA,AMZN&points=24
-///
-/// Source-of-truth is the Upstash sorted set that /api/keeper/tick appends to
-/// on every successful adapter.updatePrice() tx. Each symbol's data covers
-/// roughly the last 24h with one point per keeper tick (~every few seconds,
-/// trimmed continuously). We downsample to `points` evenly-spaced buckets so
-/// payloads stay tiny.
-///
-/// When Upstash env vars aren't set we return { enabled: false } and the
-/// frontend falls back to the seeded synthetic sparkline. Same shape on both
-/// branches so the client doesn't branch on success/failure.
+// Batched sparkline endpoint, rate-limited per IP. Symbols deduplicated.
 
 const MAX_SYMS = 20;
 const DEFAULT_POINTS = 24;
 const MAX_POINTS = 96;
+const SYM_RE = /^[A-Z0-9]{1,8}$/;
 
-export async function GET(req: Request) {
+export const GET = withErrorHandler(async (req: Request) => {
+  await requireRateLimit(req, { bucket: "sparkline", max: 60, windowSeconds: 60 });
+
   if (!HISTORY_ENABLED) {
     return NextResponse.json(
       { enabled: false, series: {} },
-      {
-        // Cache the disabled response — env can't change between requests
-        // without a redeploy, so this is safe to memoize cheaply.
-        headers: { "Cache-Control": "public, max-age=60, s-maxage=60" },
-      },
+      { headers: { "Cache-Control": "public, max-age=60, s-maxage=60" } },
     );
   }
 
   const url = new URL(req.url);
   const symsParam = url.searchParams.get("syms") ?? "";
-  const syms = symsParam
-    .split(",")
-    .map((s) => s.trim().toUpperCase())
-    .filter(Boolean)
-    .slice(0, MAX_SYMS);
+  const symsDedup = Array.from(
+    new Set(
+      symsParam
+        .split(",")
+        .map((s) => s.trim().toUpperCase())
+        .filter((s) => SYM_RE.test(s)),
+    ),
+  ).slice(0, MAX_SYMS);
 
   const pointsRaw = Number(url.searchParams.get("points") ?? DEFAULT_POINTS);
   const points = Math.min(MAX_POINTS, Math.max(2, pointsRaw || DEFAULT_POINTS));
 
-  if (syms.length === 0) {
-    return NextResponse.json({ error: "missing_syms" }, { status: 400 });
-  }
+  if (symsDedup.length === 0) throw new ApiError(400, "missing_syms");
 
   const series: Record<string, number[]> = {};
   await Promise.all(
-    syms.map(async (sym) => {
+    symsDedup.map(async (sym) => {
       const raw = await readSeries(sym);
       series[sym] = downsample(raw, points);
     }),
@@ -56,10 +46,6 @@ export async function GET(req: Request) {
 
   return NextResponse.json(
     { enabled: true, series },
-    {
-      // 15s — short enough that new keeper ticks appear quickly, long enough
-      // to dedupe bursts when several tabs render the same table.
-      headers: { "Cache-Control": "public, max-age=15, s-maxage=15" },
-    },
+    { headers: { "Cache-Control": "public, max-age=15, s-maxage=15" } },
   );
-}
+});
