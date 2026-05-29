@@ -45,6 +45,14 @@ contract PythPriceAdapter is AggregatorV3Interface, Ownable2Step {
     int32 private _lastExpo;
     uint64 private _lastConf;
 
+    /// @notice Audit 2026-05 (completeness fix): wall-clock timestamp of the
+    ///         last accepted adapter write. The `forceUpdatePrice` override
+    ///         delay is measured against THIS, not the oracle `publishTime`
+    ///         (`_updatedAt`). Otherwise a keeper could submit a within-cap
+    ///         update carrying a backdated publishTime and instantly satisfy
+    ///         the delay, defeating the H-02 anti-compromise guarantee.
+    uint256 private _lastWriteAt;
+
     /// @notice Max allowed price change per update in BPS. 0 = uncapped.
     /// CRIT-8 fix: defaults to 5% (500 bps) on construction so a missed
     /// `setMaxDeviation` at deploy time still produces a sane cap.
@@ -110,6 +118,7 @@ contract PythPriceAdapter is AggregatorV3Interface, Ownable2Step {
         _description = description_;
         _price = initialPriceE8;
         _updatedAt = block.timestamp;
+        _lastWriteAt = block.timestamp;
         _round = 1;
         _lastExpo = -8;
         maxAge = _maxAge;
@@ -144,7 +153,11 @@ contract PythPriceAdapter is AggregatorV3Interface, Ownable2Step {
     ///         keeper still cannot bypass the cap on a fresh price. Emits
     ///         a distinct `PriceForceUpdated` event for monitoring.
     function forceUpdatePrice(bytes[] calldata updateData) external payable onlyKeeper {
-        uint256 age = block.timestamp > _updatedAt ? block.timestamp - _updatedAt : 0;
+        // Audit 2026-05 fix: age is wall-clock since the last accepted write
+        // (`_lastWriteAt`), NOT the oracle publishTime. A backdated publishTime
+        // can no longer manufacture the override window without real elapsed
+        // time, so a compromised keeper genuinely must wait the full delay.
+        uint256 age = block.timestamp > _lastWriteAt ? block.timestamp - _lastWriteAt : 0;
         require(age >= DEVIATION_OVERRIDE_DELAY, "override too soon");
         int256 oldPriceE8 = _price;
         _applyUpdate(updateData, false);
@@ -177,8 +190,14 @@ contract PythPriceAdapter is AggregatorV3Interface, Ownable2Step {
         }
         _price = priceE8;
         _updatedAt = p.publishTime;
+        _lastWriteAt = block.timestamp;
         _lastExpo = p.expo;
-        _lastConf = p.conf;
+        // Audit 2026-05 (finding #2 fix): Pyth stores price AND confidence in
+        // the same `x * 10^expo` representation, so confidence must be scaled
+        // to the fixed 1e8 convention identically to price. Storing raw `conf`
+        // left the vault's `conf * BPS / answer` width check dimensionally
+        // wrong (off by 10^(expo+8)) for any feed whose expo != -8.
+        _lastConf = _confToE8(p.conf, p.expo);
         unchecked {
             _round += 1;
         }
@@ -216,6 +235,24 @@ contract PythPriceAdapter is AggregatorV3Interface, Ownable2Step {
         }
         uint256 mul = 10 ** uint32(expo + 8);
         return int256(price) * int256(mul);
+    }
+
+    /// @dev Normalize a Pyth confidence value to the fixed 1e8 scale, using
+    ///      the same exponent transform as `_toE8` (conf shares the price
+    ///      exponent in Pyth's representation). Computed in uint256 and bounds
+    ///      the result to uint64 so the `confidence()` ABI stays unchanged;
+    ///      a normalized confidence exceeding uint64 is pathological and
+    ///      reverts rather than silently truncating the breaker's input.
+    function _confToE8(uint64 conf, int32 expo) internal pure returns (uint64) {
+        if (expo == -8) return conf;
+        uint256 c;
+        if (expo < -8) {
+            c = uint256(conf) / (10 ** uint32(-expo - 8));
+        } else {
+            c = uint256(conf) * (10 ** uint32(expo + 8));
+        }
+        require(c <= type(uint64).max, "conf overflow");
+        return uint64(c);
     }
 
     // ─── AggregatorV3Interface ───────────────────────────────────────────
