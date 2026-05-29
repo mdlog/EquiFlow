@@ -653,7 +653,17 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
     /// @notice Set max oracle confidence-interval width for a collateral token.
     ///         When conf/price exceeds this ratio, new borrows against this token
     ///         are blocked. 0 = uncapped (no check). Does not affect liquidations.
+    /// @notice Audit 2026-05 (completeness fix): hard ceiling on the
+    ///         confidence-width cap, mirroring the adapter's
+    ///         `MAX_DEVIATION_BPS_CEILING`. The owner can tighten instantly
+    ///         and disable (0) for assets where confidence is not meaningful,
+    ///         but cannot loosen the breaker past this bound — keeping the
+    ///         instant (un-timelocked) setter from being an unbounded
+    ///         risk-widening lever. 20% = a deliberately wide upper limit.
+    uint64 public constant MAX_CONF_WIDTH_BPS_CEILING = 2_000;
+
     function setMaxConfidenceWidth(address token, uint64 maxWidthBps) external onlyOwner {
+        require(maxWidthBps <= MAX_CONF_WIDTH_BPS_CEILING, "width>ceiling");
         uint64 old = maxConfWidthBps[token];
         maxConfWidthBps[token] = maxWidthBps;
         emit MaxConfidenceWidthSet(token, old, maxWidthBps);
@@ -839,7 +849,7 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
 
         // Clear debt from global and per-asset counters before charging.
         positions[user].borrowed = 0;
-        totalBorrowedUsd -= debt;
+        _reduceTotalBorrowed(debt);
         _releaseAssetBorrows(user, debt);
 
         uint256 fromReserves = debt > protocolReserves ? protocolReserves : debt;
@@ -1032,6 +1042,11 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         uint256 amountUsd = (shares * totalUsd) / totalShares;
         uint256 amountUsdg = _usdToUsdc(amountUsd);
 
+        // Audit 2026-05 (completeness fix): reject dust redemptions whose USDG
+        // payout floors to 0 — otherwise the shares are burned for nothing and
+        // their value is silently donated to the remaining LPs. Mirrors the
+        // `require(shares > 0)` guard on the deposit/register side.
+        if (amountUsdg == 0) revert AmountZero();
         if (amountUsdg > bookedUsdg) revert InsufficientLiquidity();
 
         sharesOf[msg.sender] -= shares;
@@ -1173,7 +1188,7 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         uint256 received = usdc.balanceOf(address(this)) - before;
         if (received < usdcIn) revert InsufficientTransfer(usdcIn, received);
         p.borrowed -= amountUsd;
-        totalBorrowedUsd -= amountUsd;
+        _reduceTotalBorrowed(amountUsd);
         _releaseAssetBorrows(msg.sender, amountUsd);
         bookedUsdg += received;
         emit Repaid(msg.sender, amountUsd);
@@ -1191,7 +1206,7 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         uint256 received = usdc.balanceOf(address(this)) - before;
         if (received < usdcIn) revert InsufficientTransfer(usdcIn, received);
         positions[msg.sender].borrowed = 0;
-        totalBorrowedUsd -= d;
+        _reduceTotalBorrowed(d);
         _releaseAssetBorrows(msg.sender, d);
         bookedUsdg += received;
         emit Repaid(msg.sender, d);
@@ -1261,7 +1276,7 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         }
 
         p.borrowed -= debtUsdToRepay;
-        totalBorrowedUsd -= debtUsdToRepay;
+        _reduceTotalBorrowed(debtUsdToRepay);
         _releaseAssetBorrows(user, debtUsdToRepay);
         collateral[user][token] -= tokenAmount;
 
@@ -1288,9 +1303,16 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         uint256 pending = _pendingInterest();
         uint256 pendingReserve = (pending * reserveFactorBps) / BPS;
         uint256 base = _usdcToUsd(bookedUsdg) + totalBorrowedUsd + pending;
-        // CRIT-11 fix: subtract socialized bad debt so LP shares price in
-        // realized losses.
-        uint256 deductions = protocolReserves + pendingReserve + socializedBadDebtUsd;
+        // Audit 2026-05 (finding #1 fix): the bad-debt loss is ALREADY
+        // socialized to LP share price by the `totalBorrowedUsd -= debt`
+        // reduction in `executeWriteOffBadDebt` (the worthless loan leaves
+        // `base`, less the reserve-covered portion credited back via
+        // `protocolReserves -= fromReserves`). Subtracting
+        // `socializedBadDebtUsd` here too double-counted the socialized
+        // portion — LP backing fell by ~2x the real loss. The counter is
+        // retained purely as cumulative-loss telemetry and must NOT be
+        // deducted again. (Supersedes the original CRIT-11 deduction.)
+        uint256 deductions = protocolReserves + pendingReserve;
         return base > deductions ? base - deductions : 0;
     }
 
@@ -1544,6 +1566,17 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         if (actualBps > maxWidth) revert OracleConfidenceTooWide(uint64(actualBps), maxWidth);
     }
 
+    /// @dev Audit 2026-05 (completeness fix): clamped subtraction from the
+    ///      global borrowed counter. Lazy per-user vs eager global index
+    ///      scaling can leave the global counter a few wei below a borrower's
+    ///      rolled debt; an unclamped `-=` would then underflow-revert and
+    ///      permanently brick that borrower's repay/repayMax and any
+    ///      liquidation against them. Flooring to 0 is the safe direction
+    ///      (the residual dust is swept by `sweepBorrowDust`).
+    function _reduceTotalBorrowed(uint256 amount) internal {
+        totalBorrowedUsd = amount > totalBorrowedUsd ? 0 : totalBorrowedUsd - amount;
+    }
+
     /// @dev Release per-asset borrow cap counters via the external VaultMath
     ///      library (bytecode-size optimization for EIP-170 budget).
     function _releaseAssetBorrows(address user, uint256 repaidUsd) internal {
@@ -1646,7 +1679,13 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         if (answer <= 0) revert InvalidPrice();
         if (updatedAt == 0) revert StalePrice();
         if (answeredInRound < roundId) revert StalePrice();
-        if (block.timestamp - updatedAt > a.staleAfter) revert StalePrice();
+        // Audit 2026-05 (finding #3 fix): guard `block.timestamp > updatedAt`
+        // before the subtraction, mirroring `_safePriceOrZero`. A publishTime
+        // even 1s ahead of block.timestamp (clock skew / fast Pyth push) would
+        // otherwise underflow-revert (0.8 checked math) and transiently brick
+        // pledgeAndBorrow/liquidate for the asset. A future stamp is fresh, so
+        // it must pass — only a stamp older than staleAfter is stale.
+        if (block.timestamp > updatedAt && block.timestamp - updatedAt > a.staleAfter) revert StalePrice();
         return uint256(answer);
     }
 
