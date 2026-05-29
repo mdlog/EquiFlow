@@ -347,8 +347,13 @@ contract EquiFlowVaultTest is Test {
     // ─── Oracle freshness ────────────────────────────────────────────────
     function test_pledgeAndBorrow_revertsIfStalePrice() public {
         vm.warp(block.timestamp + STALE_AFTER + 1);
+        // L-1 fix (2026-05 deep-dive): _attributeBorrow now uses the
+        // stale-tolerant _safePriceOrZero, so a stale sole-collateral leg is
+        // valued at 0 and the borrow reverts via the `totalCollUsd > 0` guard
+        // ("no collateral") rather than StalePrice. Still fail-closed — the
+        // borrow is blocked when collateral cannot be priced.
         vm.prank(alice);
-        vm.expectRevert(EquiFlowVault.StalePrice.selector);
+        vm.expectRevert(bytes("no collateral"));
         vault.pledgeAndBorrow(address(tsla), 100e18, 1_000e18);
     }
 
@@ -1998,12 +2003,16 @@ contract EquiFlowVaultTest is Test {
         _push(tslaFeed, TSLA_PRICE_ID, 174_25500000);
         assertFalse(vault.isHealthy(alice));
 
-        // 1e11 in 1e18-USD scale = $1e-7. _usdToUsdc(1e11) = 1e11 / 1e12 = 0
-        // for 6-decimal USDG. Pre-fix: liquidator gets free collateral.
-        // Post-M-04: revert with LiquidationDust.
+        // 1e11 in 1e18-USD scale = $1e-7. The M-04 concern: a liquidator must
+        // never seize collateral while paying 0 USDG. After the L-4 fix the
+        // payment rounds UP (_usdToUsdcCeil), so a dust repay now costs >= 1
+        // USDG unit instead of flooring to 0 — the invariant holds by
+        // construction. The liquidation succeeds but the liquidator is charged
+        // (never free), which the LiquidationDust guard alone used to enforce.
+        uint256 bobBefore = usdc.balanceOf(bob);
         vm.prank(bob);
-        vm.expectRevert(EquiFlowVault.LiquidationDust.selector);
         vault.liquidate(alice, address(tsla), 1e11);
+        assertGt(bobBefore - usdc.balanceOf(bob), 0, "liquidator charged > 0 (no free collateral)");
     }
 
     /// M-04: a healthy (non-dust) liquidation continues to work — pin
