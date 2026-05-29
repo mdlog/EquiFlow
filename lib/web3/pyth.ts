@@ -182,7 +182,9 @@ export interface CraftMockPythUpdateArgs {
   priceId: Hex;
   /** Raw Pyth price (int64). */
   price: bigint;
-  /** Pyth exponent (int32). Almost always -8 for US equities. */
+  /** Pyth exponent (int32). Varies per feed — e.g. TSLA is -5, others -8.
+   *  Always pass the REAL Hermes expo; the adapter normalizes to 1e8 via
+   *  _toE8 (and confidence via _confToE8), so a hardcoded -8 would mis-scale. */
   expo: number;
   /** Publish time in unix seconds. Default now. */
   publishTime?: number;
