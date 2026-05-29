@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "keeper": "node --env-file-if-exists=keeper/.env --import tsx keeper/index.ts",
+    "keeper:test": "node --import tsx --test keeper/*.test.ts"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.2.11",
@@ -25,6 +27,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "tailwindcss": "^4",
+    "tsx": "^4.19.2",
     "typescript": "^5"
   }
 }
