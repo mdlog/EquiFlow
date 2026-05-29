@@ -177,6 +177,13 @@ contract PythPriceAdapter is AggregatorV3Interface, Ownable2Step {
         if (block.timestamp > p.publishTime && block.timestamp - p.publishTime > maxAge) {
             revert PublishTimeTooOld(p.publishTime, block.timestamp);
         }
+        // L-2 fix (2026-05 deep-dive audit): reject a publishTime older than the
+        // cached one so the adapter can never move price/conf/_updatedAt
+        // backward. `>=` (not `>`) permits the constructor-block seed
+        // (publishTime == _updatedAt) and same-second re-pushes. Defense in
+        // depth: real Pyth / MockPyth are already monotonic, but this decouples
+        // the adapter's correctness from the backend's guarantees.
+        require(p.publishTime >= _updatedAt, "stale publishTime");
 
         // M-01 fix: bounds check on exponent
         if (p.expo < -18 || p.expo > 18) revert ExponentOutOfRange(p.expo);
@@ -308,7 +315,13 @@ contract PythPriceAdapter is AggregatorV3Interface, Ownable2Step {
 
     /// @notice Recover stranded ETH sent directly to the adapter.
     function recoverEth(address payable to) external onlyOwner {
-        uint256 recoverable = address(this).balance - totalPendingRefunds;
+        // I-3 fix (2026-05 deep-dive audit): clamp the subtraction. The
+        // invariant balance >= totalPendingRefunds holds on every path, so
+        // this cannot underflow in practice, but a clamped subtraction yields
+        // the clean "no recoverable ETH" revert instead of an arithmetic
+        // panic if that invariant were ever broken.
+        uint256 bal = address(this).balance;
+        uint256 recoverable = bal > totalPendingRefunds ? bal - totalPendingRefunds : 0;
         require(recoverable > 0, "no recoverable ETH");
         (bool ok, ) = to.call{value: recoverable}("");
         require(ok, "transfer failed");

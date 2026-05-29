@@ -252,6 +252,7 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         uint64 staleAfter
     );
     event AssetDisabled(address indexed token);
+    event AssetEnabled(address indexed token);
     event AssetDelisted(address indexed token);
     event Pledged(
         address indexed user,
@@ -287,6 +288,7 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
     event DepositIntentCreated(address indexed lp, uint256 amount, uint256 deadline);
     event DepositIntentCancelled(address indexed lp);
     event BadDebtWrittenOff(address indexed user, uint256 debtUsd, uint256 fromReserves, uint256 fromLp);
+    event CollateralSeizedOnWriteOff(address indexed user, address indexed token, uint256 amount);
     event BadDebtWriteOffScheduled(address indexed user, uint256 readyAt);
     event BadDebtWriteOffCancelled(address indexed user);
     event ReserveFactorScheduled(uint256 newBps, uint256 readyAt);
@@ -497,6 +499,20 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
     function disableAsset(address token) external onlyOwner {
         assets[token].enabled = false;
         emit AssetDisabled(token);
+    }
+
+    /// @notice M-1 fix (2026-05 deep-dive audit): re-enable a previously
+    ///         disabled asset. `disableAsset` was a one-way switch with no
+    ///         recovery path, so an asset paused during an oracle incident was
+    ///         permanently bricked for new pledge/borrow short of a redeploy.
+    ///         Only re-enables an already-listed asset (priceFeed set); does
+    ///         not touch risk params. Re-enabling is risk-widening but is
+    ///         symmetric with the instant `disableAsset` and lists no new
+    ///         asset, so it stays on the instant path.
+    function enableAsset(address token) external onlyOwner {
+        require(address(assets[token].priceFeed) != address(0), "not listed");
+        assets[token].enabled = true;
+        emit AssetEnabled(token);
     }
 
     /// @notice N-8 fix (2026-05 pass 6) — DEFERRED to v2 deploy due to EIP-170
@@ -847,6 +863,25 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         // with how every other LTV/HF helper values collateral.
         if (collateralValueUsd(user) >= WRITEOFF_COLLATERAL_DUST_USD) revert NoCollateral();
 
+        // H-1 fix (2026-05 deep-dive audit): the value-based guard above can
+        // pass while the borrower STILL holds collateral tokens whose feed is
+        // merely stale (valued at 0 by _safePriceOrZero) or has crashed below
+        // the dust threshold. The previous code never cleared collateral[user],
+        // so once the feed recovered the borrower could withdraw the full
+        // collateral after their debt was socialized to LPs. Seize whatever
+        // collateral remains to the treasury here. Being unconditional, this
+        // does NOT reopen the N-3 front-run (a 1-wei dust pledge is simply
+        // swept along) and guarantees no live collateral survives a write-off.
+        uint256 nAssets = assetList.length;
+        for (uint256 i; i < nAssets; ++i) {
+            address ct = assetList[i];
+            uint256 camt = collateral[user][ct];
+            if (camt == 0) continue;
+            collateral[user][ct] = 0;
+            IERC20(ct).safeTransfer(treasury, camt);
+            emit CollateralSeizedOnWriteOff(user, ct, camt);
+        }
+
         // Clear debt from global and per-asset counters before charging.
         positions[user].borrowed = 0;
         _reduceTotalBorrowed(debt);
@@ -866,6 +901,15 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
 
     /// @notice Zero out totalBorrowedUsd when no individual debts remain.
     ///         Cleans up rounding dust from compound index divergence.
+    /// @dev    I-1 note (2026-05 deep-dive audit): this intentionally does NOT
+    ///         reset per-user `userBorrowByAsset`. That mapping is not
+    ///         enumerable (no user set to iterate) and is NOT a solvency input
+    ///         — LTV, health factor, liquidation, and repayable debt all read
+    ///         `positions[user].borrowed`. The borrow CAP is enforced only
+    ///         against `totalBorrowedByAsset`, which IS zeroed here. Any stale
+    ///         per-user residual is dust (sweep requires global debt < $1) and
+    ///         cannot inflate the cap counter, so it is left as a benign,
+    ///         non-load-bearing value rather than iterated.
     function sweepBorrowDust() external onlyOwner {
         _accrueInterest();
         require(totalBorrowedUsd < 1e18, "debt > $1 dust");
@@ -934,12 +978,20 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
     ///         where an attacker rides on the victim's transfer.
     function announceDeposit(uint256 amount) external whenNotPaused {
         if (amount == 0) revert AmountZero();
-        if (activeIntentLp != address(0) && activeIntentLp != msg.sender) {
+        // M-2 fix (2026-05 deep-dive audit): a LIVE intent blocks any new
+        // announce — INCLUDING a re-announce by the current holder. Previously
+        // the `activeIntentLp != msg.sender` exemption let the holder reset the
+        // deadline on every call (cost: gas only, no transfer), holding the
+        // single slot forever and DoS-ing all other LPs. Now the holder must
+        // `cancelDeposit` (or wait for expiry) before re-announcing, so the
+        // slot always frees on schedule; `forceClearDepositIntent` is the
+        // owner backstop.
+        if (activeIntentLp != address(0)) {
             DepositIntent memory other = depositIntents[activeIntentLp];
             if (other.amount > 0 && block.timestamp <= other.deadline) {
                 revert IntentConflict(activeIntentLp);
             }
-            // Expired — silently reclaim the slot for ourselves.
+            // Expired — silently reclaim the slot.
             delete depositIntents[activeIntentLp];
         }
         uint256 deadline = block.timestamp + DEPOSIT_INTENT_TTL;
@@ -966,6 +1018,20 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         DepositIntent memory intent = depositIntents[lp];
         if (intent.amount == 0) revert NoDepositIntent();
         if (block.timestamp <= intent.deadline) revert DepositIntentExpired();
+        delete depositIntents[lp];
+        if (activeIntentLp == lp) {
+            activeIntentLp = address(0);
+        }
+        emit DepositIntentCancelled(lp);
+    }
+
+    /// @notice M-2 fix (2026-05 deep-dive audit): owner backstop to clear a
+    ///         griefing deposit intent. Combined with the announceDeposit
+    ///         change (a live intent — even the holder's own — blocks a new
+    ///         announce, so the deadline can no longer be reset indefinitely),
+    ///         this guarantees the single LP-deposit slot cannot be held
+    ///         forever to DoS other LPs.
+    function forceClearDepositIntent(address lp) external onlyOwner {
         delete depositIntents[lp];
         if (activeIntentLp == lp) {
             activeIntentLp = address(0);
@@ -1125,7 +1191,14 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
             address t = assetList[i];
             uint256 amt = collateral[user][t];
             if (amt == 0) continue;
-            uint256 price = _price(t);
+            // L-1 fix (2026-05 deep-dive audit): use the stale-tolerant price
+            // here too, matching LTV/HF valuation (_collateralStats). Using the
+            // strict _price made a single stale collateral leg revert the whole
+            // borrow even when borrowing against a different fresh asset. A
+            // stale leg now contributes 0 and is skipped; if EVERY leg is stale
+            // the `totalCollUsd > 0` guard below still blocks the borrow.
+            uint256 price = _safePriceOrZero(t);
+            if (price == 0) continue;
             uint8 dec = _tokenDecimals(t);
             collUsds[i] = (amt * price * 1e10) / (10 ** dec);
             totalCollUsd += collUsds[i];
@@ -1280,7 +1353,12 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         _releaseAssetBorrows(user, debtUsdToRepay);
         collateral[user][token] -= tokenAmount;
 
-        uint256 usdcIn = _usdToUsdc(debtUsdToRepay);
+        // L-4 fix (2026-05 deep-dive audit): round the liquidator's payment UP
+        // (like repay/repayMax) so the USDG paid always covers the full
+        // `debtUsdToRepay` reduced from the ledger. Flooring here let the
+        // liquidator clear up to ~1 sub-unit of debt without paying for it —
+        // a dust gift at LP expense and an inconsistent rounding direction.
+        uint256 usdcIn = _usdToUsdcCeil(debtUsdToRepay);
         // M-04 fix (2026-05 pass 4): refuse the call rather than let a
         // liquidator seize collateral while paying 0 USDG due to rounding.
         if (usdcIn == 0) revert LiquidationDust();
@@ -1483,8 +1561,8 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
     }
 
     /// @notice ERC4626: shares minted for a given asset deposit at current price.
-    function convertToShares(uint256 assets) public view returns (uint256) {
-        uint256 assetsUsd = _usdcToUsd(assets);
+    function convertToShares(uint256 assetsAmt) public view returns (uint256) {
+        uint256 assetsUsd = _usdcToUsd(assetsAmt);
         if (totalShares == 0) return assetsUsd;
         uint256 total = totalAssetsUsd();
         if (total == 0) return assetsUsd;
@@ -1502,8 +1580,8 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         return type(uint256).max;
     }
 
-    function previewDeposit(uint256 assets) external view returns (uint256) {
-        return convertToShares(assets);
+    function previewDeposit(uint256 assetsAmt) external view returns (uint256) {
+        return convertToShares(assetsAmt);
     }
 
     function maxMint(address) external pure returns (uint256) {
@@ -1522,10 +1600,10 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         return userAssets > bookedUsdg ? bookedUsdg : userAssets;
     }
 
-    function previewWithdraw(uint256 assets) external view returns (uint256) {
+    function previewWithdraw(uint256 assetsAmt) external view returns (uint256) {
         uint256 total = totalAssetsUsd();
         if (total == 0) return 0;
-        uint256 assetsUsd = _usdcToUsd(assets);
+        uint256 assetsUsd = _usdcToUsd(assetsAmt);
         // ceil division so the user's share-burn matches assets received
         return (assetsUsd * totalShares + total - 1) / total;
     }

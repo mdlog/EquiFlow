@@ -280,4 +280,157 @@ contract AuditBatchFixesTest is Test {
         // EXACTLY the written-off debt — not twice it. Pre-fix this is 2x.
         assertEq(drop, residualDebt, "LP backing must drop by exactly the bad debt (no double-count)");
     }
+
+    // ─── H-1 [High] write-off must seize collateral, not leave it withdrawable ─
+    function test_auditfix_h1_writeOffSeizesCollateralOnStaleFeed() public {
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 10_000e18);
+
+        // Feed goes stale (outage/halt) -> collateral values to 0 even though
+        // the tokens still exist. This is the condition that unlocks write-off.
+        vm.warp(block.timestamp + 2 hours);
+        assertEq(vault.collateralValueUsd(alice), 0, "stale feed => collateral valued at 0");
+
+        address treasury = owner; // vault constructed with treasury = owner
+        uint256 treasuryBefore = tsla.balanceOf(treasury);
+
+        vm.prank(owner);
+        vault.scheduleWriteOffBadDebt(alice);
+        vm.warp(block.timestamp + vault.OWNER_WITHDRAW_DELAY());
+        vm.prank(owner);
+        vault.executeWriteOffBadDebt(alice);
+
+        // FIX: collateral seized to treasury, not left under alice's control.
+        assertEq(vault.collateral(alice, address(tsla)), 0, "collateral seized, not retained");
+        assertEq(tsla.balanceOf(treasury) - treasuryBefore, 100e18, "treasury received the seized collateral");
+
+        // Feed recovers; alice has nothing left to withdraw.
+        _push(tslaFeed, TSLA_PRICE_ID, 348_51000000);
+        vm.prank(alice);
+        vm.expectRevert(EquiFlowVault.InsufficientCollateral.selector);
+        vault.withdraw(address(tsla), 100e18);
+    }
+
+    // ─── M-1 [Low] disableAsset must be reversible via enableAsset ──────────
+    function test_auditfix_m1_disabledAssetCanBeReEnabled() public {
+        vm.prank(owner);
+        vault.disableAsset(address(tsla));
+
+        vm.prank(alice);
+        vm.expectRevert(EquiFlowVault.AssetNotEnabled.selector);
+        vault.pledgeAndBorrow(address(tsla), 1e18, 0);
+
+        vm.prank(owner);
+        vault.enableAsset(address(tsla));
+
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 1e18, 0);
+        assertEq(vault.collateral(alice, address(tsla)), 1e18, "pledge works after re-enable");
+    }
+
+    // ─── M-2 [Medium] LP-deposit slot cannot be held indefinitely ───────────
+    function test_auditfix_m2_cannotResetLiveIntent() public {
+        address attacker = address(0xBAD);
+        vm.prank(attacker);
+        vault.announceDeposit(1_000e6);
+
+        // Re-announcing while the intent is still live must revert — the
+        // attacker can no longer reset the deadline to hold the slot forever.
+        vm.prank(attacker);
+        vm.expectRevert(abi.encodeWithSelector(EquiFlowVault.IntentConflict.selector, attacker));
+        vault.announceDeposit(1_000e6);
+    }
+
+    function test_auditfix_m2_ownerCanForceClearIntent() public {
+        address attacker = address(0xBAD);
+        vm.prank(attacker);
+        vault.announceDeposit(1_000e6);
+
+        // Owner backstop: force-clear a griefing intent.
+        vm.prank(owner);
+        vault.forceClearDepositIntent(attacker);
+
+        // Slot is free again: an honest LP can announce.
+        address lp = address(0xC0FFEE);
+        vm.prank(lp);
+        vault.announceDeposit(500e6);
+        assertEq(vault.activeIntentLp(), lp, "slot reclaimable after force-clear");
+    }
+
+    // ─── L-1 [Low] borrow must not be blocked by ONE stale collateral leg ───
+    function test_auditfix_l1_borrowSucceedsWithOneStaleLeg() public {
+        // Add a 2nd collateral asset (AAPL) and pledge both.
+        bytes32 AAPL_ID = bytes32(uint256(0x102));
+        MockStockToken aapl = new MockStockToken("Apple", "AAPL");
+        vm.startPrank(owner);
+        PythPriceAdapter aaplFeed =
+            new PythPriceAdapter(IPyth(address(pyth)), AAPL_ID, "AAPL/USD", 200_00000000, 1 hours, owner);
+        aaplFeed.setKeeper(owner, true);
+        aaplFeed.setMaxDeviation(0);
+        vault.listAsset(address(aapl), address(aaplFeed), TSLA_LTV, TSLA_LIQ, STALE_AFTER);
+        vm.stopPrank();
+        vm.prank(owner);
+        _seed(aaplFeed, AAPL_ID, 200_00000000);
+        aapl.mint(alice, 100e18);
+        vm.prank(alice);
+        aapl.approve(address(vault), type(uint256).max);
+
+        vm.startPrank(alice);
+        vault.pledgeAndBorrow(address(tsla), 100e18, 0);
+        vault.pledgeAndBorrow(address(aapl), 100e18, 0);
+        vm.stopPrank();
+
+        // AAPL feed goes stale; refresh only TSLA.
+        vm.warp(block.timestamp + 2 hours);
+        _push(tslaFeed, TSLA_PRICE_ID, 348_51000000);
+
+        // Borrow triggers _attributeBorrow which loops over ALL collateral.
+        // Pre-fix: _price(AAPL) reverts (stale). Post-fix: AAPL skipped (0).
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 1e18, 1_000e18);
+        (, uint256 borrowed, ) = vault.positionOf(alice);
+        assertEq(borrowed, 1_000e18, "borrow succeeds despite one stale collateral leg");
+    }
+
+    // ─── L-4 [Low] liquidation must not forgive sub-unit debt via floor ─────
+    function test_auditfix_l4_liquidationPaymentCoversDebtReduced() public {
+        // $1 TSLA crash with 1-token collateral -> collateral-clamped seize
+        // yields a non-round debtUsdToRepay (1e18 * 10000/10500), exposing the
+        // floor-vs-full mismatch.
+        vm.prank(alice);
+        vault.pledgeAndBorrow(address(tsla), 1e18, 100e18);
+        _push(tslaFeed, TSLA_PRICE_ID, 1_00000000);
+
+        (, uint256 debtBefore, ) = vault.positionOf(alice);
+        uint256 bobUsdcBefore = usdc.balanceOf(bob);
+
+        vm.prank(bob);
+        vault.liquidate(alice, address(tsla), 100e18);
+
+        (, uint256 debtAfter, ) = vault.positionOf(alice);
+        uint256 debtReduced = debtBefore - debtAfter;
+        uint256 paidUsd = (bobUsdcBefore - usdc.balanceOf(bob)) * 1e12; // 6dp -> 1e18
+
+        // The USDG the liquidator paid (in USD) must cover the debt cleared —
+        // pre-fix the floored payment is < debt reduced, gifting LPs' value.
+        assertGe(paidUsd, debtReduced, "liquidator payment must cover debt reduced (no rounding gift)");
+    }
+
+    // ─── L-2 [Low] adapter must reject a backward publishTime ───────────────
+    function test_auditfix_l2_rejectsBackwardPublishTime() public {
+        bytes32 pid = bytes32(uint256(0xDEAD));
+        vm.warp(block.timestamp + 1 hours); // ensure now > 100s so we can backdate
+        PythPriceAdapter feed =
+            new PythPriceAdapter(IPyth(address(pyth)), pid, "X/USD", 100_00000000, 1 hours, owner);
+        vm.prank(owner);
+        feed.setKeeper(owner, true);
+
+        // publishTime 100s BEFORE the adapter's cached _updatedAt (= ctor time).
+        // Within maxAge so Pyth accepts it; pre-fix the adapter caches it and
+        // moves _updatedAt backward. Post-fix it is rejected.
+        bytes[] memory data = _dataAt(pid, 100_00000000, block.timestamp - 100);
+        vm.prank(owner);
+        vm.expectRevert(bytes("stale publishTime"));
+        feed.updatePrice(data);
+    }
 }
