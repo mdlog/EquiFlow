@@ -173,7 +173,8 @@ export const POST = withErrorHandler(async (req: Request) => {
     const cachedE8 = cached[1];
     const cachedUpdatedAt = cached[3];
     // Compute newE8 the same way the contract does in _toE8(). Pyth equity
-    // feeds are expo = -8 in the common case, so the result is just `price`.
+    // feed exponents vary (e.g. TSLA is -5, not -8), so do NOT assume identity
+    // — the branch below normalizes for -8 / <-8 / >-8.
     let newE8: bigint;
     if (quote.expo === -8) newE8 = BigInt(quote.price);
     else if (quote.expo < -8) newE8 = BigInt(quote.price) / 10n ** BigInt(-quote.expo - 8);
