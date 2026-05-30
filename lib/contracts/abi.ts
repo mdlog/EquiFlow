@@ -272,6 +272,24 @@ export const EQUIFLOW_VAULT_ABI = [
     ],
   },
   {
+    // Tier-2 market-hours mode: 0=OPEN, 1=CLOSED, 2=HALTED.
+    type: "function",
+    name: "marketStatus",
+    stateMutability: "view",
+    inputs: [{ name: "token", type: "address" }],
+    outputs: [{ type: "uint8" }],
+  },
+  {
+    type: "function",
+    name: "setMarketStatus",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "token", type: "address" },
+      { name: "status", type: "uint8" },
+    ],
+    outputs: [],
+  },
+  {
     type: "function",
     name: "listedAssets",
     stateMutability: "view",

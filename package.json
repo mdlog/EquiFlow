@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "test:lib": "node --experimental-strip-types --test lib/web3/market-hours.test.ts"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.2.11",
