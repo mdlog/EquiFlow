@@ -53,6 +53,20 @@ function humanizeRevert(name: string): string {
       return "Borrow would exceed the LTV cap";
     case "InsufficientCollateral":
       return "Insufficient collateral for that action";
+    case "MarketClosed":
+      return "Market is closed — borrowing is paused. You can still lock collateral with borrow set to 0%";
+    case "InsufficientLiquidity":
+      return "Vault doesn't have enough liquidity for that borrow";
+    case "NoCollateral":
+      return "No collateral is backing that borrow";
+    case "BorrowTooSmall":
+      return "Borrow amount is below the minimum";
+    case "AmountZero":
+      return "Amount must be greater than zero";
+    case "AssetNotEnabled":
+      return "Asset is not enabled in this vault";
+    case "OracleConfidenceTooWide":
+      return "Oracle price is too uncertain right now — wait for the next keeper tick";
     case "StalePrice":
       return "Oracle price is stale — wait for the next keeper tick";
     case "NotListed":
