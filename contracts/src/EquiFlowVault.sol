@@ -184,6 +184,13 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
     ///         0 = uncapped (no check). E.g. 150 = conf must be < 1.5% of price.
     mapping(address token => uint64) public maxConfWidthBps;
 
+    /// @notice Tier-2 market-hours mode. 0 = OPEN (default), 1 = CLOSED,
+    ///         2 = HALTED. When not OPEN, new borrows against this collateral
+    ///         and liquidations of it are blocked (existing positions held;
+    ///         repay/add-collateral stay allowed). Set by the keeper from the
+    ///         market calendar; "grace at open" = keeper delays the flip to OPEN.
+    mapping(address token => uint8) public marketStatus;
+
     // ── Per-asset borrow cap ──
     /// @notice Max total USD borrowable via pledgeAndBorrow against this token.
     ///         0 = unlimited. Units: 1e18 USD.
@@ -281,6 +288,7 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
     event TreasurySet(address indexed oldTreasury, address indexed newTreasury);
     event ReservesClaimed(address indexed to, uint256 usdgAmount, uint256 usdValue);
     event MaxConfidenceWidthSet(address indexed token, uint64 oldBps, uint64 newBps);
+    event MarketStatusSet(address indexed token, uint8 status);
     event BorrowCapSet(address indexed token, uint256 oldCap, uint256 newCap);
     event BorrowCapReleased(address indexed token, uint256 released, uint256 remaining);
     event LiquidationBonusSet(uint256 oldBps, uint256 newBps);
@@ -339,6 +347,8 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
     error StalePrice();
     error InvalidPrice();
     error NotBorrower();
+    error MarketClosed();
+    error WidthAboveCeiling();
     error InsufficientTransfer(uint256 expected, uint256 actual);
     error InsufficientShares();
     error RateTooHigh();
@@ -679,10 +689,20 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
     uint64 public constant MAX_CONF_WIDTH_BPS_CEILING = 2_000;
 
     function setMaxConfidenceWidth(address token, uint64 maxWidthBps) external onlyOwner {
-        require(maxWidthBps <= MAX_CONF_WIDTH_BPS_CEILING, "width>ceiling");
+        if (maxWidthBps > MAX_CONF_WIDTH_BPS_CEILING) revert WidthAboveCeiling();
         uint64 old = maxConfWidthBps[token];
         maxConfWidthBps[token] = maxWidthBps;
         emit MaxConfidenceWidthSet(token, old, maxWidthBps);
+    }
+
+    /// @notice Tier-2 market-hours mode: set an asset's trading status
+    ///         (0 = OPEN, 1 = CLOSED, 2 = HALTED). When not OPEN, new borrows
+    ///         against this collateral and liquidations of it are blocked.
+    ///         onlyOwner here (owner == keeper at deploy); production can
+    ///         delegate to a dedicated status-keeper role.
+    function setMarketStatus(address token, uint8 status) external onlyOwner {
+        marketStatus[token] = status;
+        emit MarketStatusSet(token, status);
     }
 
     /// @notice Set the maximum total USD borrowable against a given collateral
@@ -1199,11 +1219,14 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
             // the `totalCollUsd > 0` guard below still blocks the borrow.
             uint256 price = _safePriceOrZero(t);
             if (price == 0) continue;
+            // Tier-2 market-hours mode: block NEW borrows backed by collateral
+            // whose market is closed/halted (price is frozen at last close).
+            if (marketStatus[t] != 0) revert MarketClosed();
             uint8 dec = _tokenDecimals(t);
             collUsds[i] = (amt * price * 1e10) / (10 ** dec);
             totalCollUsd += collUsds[i];
         }
-        require(totalCollUsd > 0, "no collateral");
+        if (totalCollUsd == 0) revert NoCollateral();
 
         // I-06 fix: hoist last-contributor lookup out of the loop (was O(n²)).
         uint256 lastIdx;
@@ -1317,6 +1340,10 @@ contract EquiFlowVault is Ownable2Step, ReentrancyGuard, Pausable {
         // still require the asset to have been listed at some point
         // (priceFeed != 0) so a typo can't accidentally drain a wrong token.
         if (address(a.priceFeed) == address(0)) revert AssetNotEnabled();
+        // Tier-2 market-hours mode: do not liquidate the seized asset while its
+        // market is closed/halted (price frozen at last close). The keeper
+        // re-opens after a grace delay; positions are simply held until then.
+        if (marketStatus[token] != 0) revert MarketClosed();
         if (debtUsdToRepay == 0) revert AmountZero();
         if (isHealthy(user)) revert PositionHealthy();
         if (collateral[user][token] == 0) revert InsufficientCollateral();
