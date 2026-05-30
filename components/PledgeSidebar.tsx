@@ -31,6 +31,12 @@ import {
   useProtocolStats,
 } from "@/lib/hooks/use-protocol-stats";
 import { usePosition } from "@/lib/hooks/use-position";
+import { useMarketStatus } from "@/lib/hooks/use-market-status";
+import {
+  isBorrowBlockedByMarket,
+  isMarketTradingClosed,
+  marketStatusLabel,
+} from "@/lib/web3/market-hours";
 import { VaultSelector } from "@/components/VaultSelector";
 import { AssetLogo } from "@/components/AssetLogo";
 import { HealthFactorMeter } from "@/components/HealthFactorMeter";
@@ -122,6 +128,12 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
     query: { enabled: !!tokenAddr && !!callerAddress, refetchInterval: 12_000 },
   });
 
+  // Tier-2 market-hours gate: read on-chain marketStatus so we can disable
+  // borrowing (and explain it) instead of letting the wallet fail to estimate
+  // gas on a tx that reverts with `MarketClosed`. Pure deposits stay allowed.
+  const market = useMarketStatus([tokenAddr], spender);
+  const marketClosed = isMarketTradingClosed(market.primaryStatus);
+
   const listedAddrs = useListedAssets(vault.address);
   const vaultStats = useProtocolStats(listedAddrs, vault.address, vault.tokenAddress);
   const vaultLiquidityRaw =
@@ -147,6 +159,12 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
   const liqAt = liqThreshold * 100;
   const healthFactor = ltvActual > 0 ? liqAt / ltvActual : 99;
   const borrowBelowMinimum = borrowUsd > 0 && borrowUsd < MIN_BORROW_USD;
+  // Only the borrow leg is gated — a deposit-only pledge (borrow 0%) still works
+  // while the market is closed, so we steer the user there rather than blocking.
+  const borrowBlockedByMarket = isBorrowBlockedByMarket(
+    market.primaryStatus,
+    borrowUsd,
+  );
 
   const borrowTokenAmount =
     isWethVault && ethPrice && ethPrice > 0 ? borrowUsd / ethPrice : null;
@@ -427,6 +445,12 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
   } else if (oracleStale) {
     ctaLabel = "Wait for next keeper tick";
     ctaDisabled = true;
+  } else if (borrowBlockedByMarket) {
+    // Market closed: the borrow leg would revert with MarketClosed. Disable the
+    // CTA so the tx never fires (no cryptic "Missing gas limit" from the wallet
+    // failing to estimate a reverting call) and steer to the deposit-only path.
+    ctaLabel = "Market closed — set borrow to 0% to deposit";
+    ctaDisabled = true;
   } else if (borrowBelowMinimum) {
     ctaLabel = `Minimum borrow is $${MIN_BORROW_USD}`;
     ctaDisabled = true;
@@ -622,6 +646,38 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
 
         {/* Borrow slider */}
         <div style={{ padding: "0 20px 16px" }}>
+          {marketClosed && (
+            <div
+              role="status"
+              className="font-mono rounded-[2px]"
+              style={{
+                fontSize: 10,
+                padding: "7px 9px",
+                marginBottom: 10,
+                background: "var(--amber-soft)",
+                color: "var(--amber)",
+                border: "1px solid var(--amber)",
+                lineHeight: 1.45,
+              }}
+            >
+              <span style={{ fontWeight: 600 }}>
+                {marketStatusLabel(market.primaryStatus)}.
+              </span>{" "}
+              Borrowing against {s.sym} is paused while its market is shut — the
+              oracle price is frozen at the last close. You can still deposit
+              collateral now and borrow once it reopens.
+              {composing && borrowPct > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setBorrowPct(0)}
+                  className="block mt-1.5 underline"
+                  style={{ color: "var(--amber)", fontSize: 10 }}
+                >
+                  Switch to deposit-only →
+                </button>
+              )}
+            </div>
+          )}
           <div className="flex justify-between items-baseline" style={{ marginBottom: 6 }}>
             <label htmlFor={borrowId} className="eyebrow">
               Borrow {borrowPct}%

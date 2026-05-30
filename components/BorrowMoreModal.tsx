@@ -13,6 +13,7 @@ import {
 } from "@/lib/contracts";
 import { useVaultContext } from "@/lib/hooks/use-vault-context";
 import { usePosition } from "@/lib/hooks/use-position";
+import { useMarketStatus } from "@/lib/hooks/use-market-status";
 import { ROBINHOOD_CHAIN_TESTNET_ID } from "@/lib/config/chain";
 import { fmt } from "@/lib/format";
 import type { LiveCollateralLine } from "@/lib/hooks/use-position";
@@ -104,6 +105,14 @@ export function BorrowMoreModal({
   const tokenSym = lines[0]?.sym;
   const tokenAddr = tokenSym ? STOCK_TOKEN_ADDRESSES[tokenSym] : undefined;
 
+  // Market-hours gate: a pure borrow reverts with MarketClosed if ANY collateral
+  // leg backing it is shut (the vault loops over every leg in _attributeBorrow).
+  // Read all legs so we block + explain instead of the wallet failing to
+  // estimate gas on a reverting tx ("Missing gas limit").
+  const collateralTokens = lines.map((l) => STOCK_TOKEN_ADDRESSES[l.sym]);
+  const market = useMarketStatus(collateralTokens, VAULT_ADDR);
+  const marketClosed = market.anyClosed;
+
   const { writeContract, data: txHash, isPending, error, reset } =
     useWriteContract();
   const { isLoading: mining, isSuccess: eoaSealed } =
@@ -162,6 +171,7 @@ export function BorrowMoreModal({
     amount > 0 &&
     !overCap &&
     !oracleStale &&
+    !marketClosed &&
     !showAckGate &&
     !busy &&
     !sealed;
@@ -225,6 +235,7 @@ export function BorrowMoreModal({
   let ctaLabel: string;
   if (!isConnected) ctaLabel = "Connect wallet";
   else if (!tokenAddr) ctaLabel = "No collateral asset";
+  else if (marketClosed) ctaLabel = "Markets closed — borrowing paused";
   else if (oracleStale) ctaLabel = "Wait for next keeper tick";
   else if (aaBusy) ctaLabel = "Bundling sponsored UserOp…";
   else if (isPending) ctaLabel = "Sign in wallet…";
@@ -245,6 +256,12 @@ export function BorrowMoreModal({
           {overCap && (
             <ValidationError id={errorId}>
               Exceeds LTV cap. Reduce amount or add collateral first.
+            </ValidationError>
+          )}
+          {marketClosed && (
+            <ValidationError>
+              Market closed — borrowing is paused until it reopens. Your existing
+              position is unaffected.
             </ValidationError>
           )}
           {oracleStale && (
