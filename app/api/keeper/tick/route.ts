@@ -11,6 +11,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { robinhoodChainTestnet } from "@/lib/config/chain";
 import { PYTH_ADAPTER_ABI, craftMockPythUpdate } from "@/lib/web3/pyth";
 import { fetchFreshestPyth, validatePythQuote } from "@/lib/web3/hermes";
+import { inferMarketOpen } from "@/lib/web3/market-hours";
 import { recordPrice } from "@/lib/web3/price-history";
 import {
   EQUIFLOW_VAULT_ABI,
@@ -120,10 +121,15 @@ export const POST = withErrorHandler(async (req: Request) => {
     throw new ApiError(503, "hermes_unavailable");
   }
 
-  // Quality gate: reject stale or low-confidence quotes. Without this, an
-  // operator outage that returns cached pre-outage prices would be silently
-  // forwarded with a fresh server timestamp.
-  const validation = validatePythQuote(quote, nowSec);
+  // Market-hours mode: infer OPEN/CLOSED from Hermes freshness (Pyth stops
+  // publishing equities when the market is closed). Drives the on-chain
+  // `marketStatus` gate and whether we push live or hold the last close.
+  const isMarketOpen = inferMarketOpen(quote.publishTime, nowSec);
+
+  // Quality gate: during OPEN hours reject stale/low-confidence quotes. When
+  // CLOSED we intentionally push the last close (allowStale) with a fresh
+  // on-chain stamp so collateral keeps a real valuation through the session.
+  const validation = validatePythQuote(quote, nowSec, { allowStale: !isMarketOpen });
   if (!validation.ok) {
     console.warn(
       `[keeper/tick] quote_rejected sym=${symbol} reason=${validation.reason} ` +
@@ -201,14 +207,15 @@ export const POST = withErrorHandler(async (req: Request) => {
     console.warn("[keeper/tick] preflight_failed:", (err as Error).message);
   }
 
+  const account = privateKeyToAccount(pkEnv as Hex);
+  const walletClient = createWalletClient({
+    account,
+    chain: robinhoodChainTestnet,
+    transport: http(),
+  });
+
   let txHash: Hex;
   try {
-    const account = privateKeyToAccount(pkEnv as Hex);
-    const walletClient = createWalletClient({
-      account,
-      chain: robinhoodChainTestnet,
-      transport: http(),
-    });
     const nonce = await acquireNonce(publicClient, account.address);
     txHash = await walletClient.writeContract({
       abi: PYTH_ADAPTER_ABI,
@@ -222,6 +229,36 @@ export const POST = withErrorHandler(async (req: Request) => {
     if (code === "nonce_error") resyncNonce();
     console.error("[keeper/tick] submit_failed:", logMessage);
     throw new ApiError(502, code);
+  }
+
+  // ── Sync the market-hours gate AFTER the price push, so the gate never opens
+  // against a stale price. Writes only on an OPEN<->CLOSED transition (rare);
+  // a read-only no-op otherwise. Non-fatal — the price push already landed.
+  const desiredStatus = isMarketOpen ? 0 : 1; // 0=OPEN, 1=CLOSED
+  try {
+    const current = Number(
+      await publicClient.readContract({
+        abi: EQUIFLOW_VAULT_ABI,
+        address: EQUIFLOW_VAULT_ADDRESS,
+        functionName: "marketStatus",
+        args: [tokenAddress],
+      }),
+    );
+    if (current !== desiredStatus) {
+      const sNonce = await acquireNonce(publicClient, account.address);
+      await walletClient.writeContract({
+        abi: EQUIFLOW_VAULT_ABI,
+        address: EQUIFLOW_VAULT_ADDRESS,
+        functionName: "setMarketStatus",
+        args: [tokenAddress, desiredStatus],
+        nonce: sNonce,
+      });
+      console.log(`[keeper/tick] marketStatus ${symbol} -> ${desiredStatus === 0 ? "OPEN" : "CLOSED"}`);
+    }
+  } catch (err) {
+    const { code } = sanitizeError(err);
+    if (code === "nonce_error") resyncNonce();
+    console.warn("[keeper/tick] marketStatus_sync_failed:", (err as Error).message);
   }
 
   // Best-effort history recording. Errors swallowed.

@@ -59,6 +59,7 @@ export interface QuoteValidationResult {
 export function validatePythQuote(
   quote: PythQuote,
   nowSec: number = Math.floor(Date.now() / 1000),
+  opts: { allowStale?: boolean } = {},
 ): QuoteValidationResult {
   const age = nowSec - quote.publishTime;
   const confBps =
@@ -66,7 +67,10 @@ export function validatePythQuote(
   if (quote.price <= 0n) {
     return { ok: false, reason: "negative_price", ageSeconds: age, confBps };
   }
-  if (age > MAX_PUBLISH_AGE_SECONDS) {
+  // `allowStale` is the market-CLOSED path: we intentionally push the last
+  // close (stale Hermes data) with a fresh on-chain stamp to hold valuation
+  // through the closed session. During OPEN hours stale data is still rejected.
+  if (!opts.allowStale && age > MAX_PUBLISH_AGE_SECONDS) {
     return { ok: false, reason: "stale_publish_time", ageSeconds: age, confBps };
   }
   if (BigInt(confBps) > MAX_CONF_BPS) {
