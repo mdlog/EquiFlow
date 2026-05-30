@@ -159,7 +159,7 @@ contract AuditBatchFixesTest is Test {
         vault.setMaxConfidenceWidth(address(tsla), ceiling);
         vault.setMaxConfidenceWidth(address(tsla), 0);
         // Above the ceiling the breaker cannot be loosened arbitrarily.
-        vm.expectRevert(bytes("width>ceiling"));
+        vm.expectRevert(EquiFlowVault.WidthAboveCeiling.selector);
         vault.setMaxConfidenceWidth(address(tsla), ceiling + 1);
         vm.stopPrank();
     }

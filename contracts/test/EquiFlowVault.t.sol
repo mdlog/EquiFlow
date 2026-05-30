@@ -353,7 +353,7 @@ contract EquiFlowVaultTest is Test {
         // ("no collateral") rather than StalePrice. Still fail-closed — the
         // borrow is blocked when collateral cannot be priced.
         vm.prank(alice);
-        vm.expectRevert(bytes("no collateral"));
+        vm.expectRevert(EquiFlowVault.NoCollateral.selector);
         vault.pledgeAndBorrow(address(tsla), 100e18, 1_000e18);
     }
 
