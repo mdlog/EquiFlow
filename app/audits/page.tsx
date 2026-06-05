@@ -131,8 +131,8 @@ const POSTURE = [
   {
     tag: "BOUNTY",
     title: "Bug bounty",
-    body: "Live on Immunefi with a max payout of $1.2M for critical impact (loss of funds / mint authorization). $4.8M paid out across 11 bounties since v0.1.",
-    metric: "$1.2M cap",
+    body: "Live on Immunefi with a max payout of $1M for critical impact (loss of funds / mint authorization). $1.41M paid YTD since v0.1.",
+    metric: "$1M cap",
   },
   {
     tag: "MONITOR",
@@ -144,7 +144,6 @@ const POSTURE = [
 
 const HISTORY = [
   { ver: "v0.1.0", date: "Aug 2025", note: "Internal review · pre-public" },
-  { ver: "v0.2.0", date: "Nov 2025", note: "Halborn audit · 0 crit · 2 high" },
   { ver: "v0.3.0", date: "Feb 2026", note: "Trail of Bits · 1 crit (fixed)" },
   { ver: "v0.4.0", date: "Mar 2026", note: "OpenZeppelin · 0 crit · 2 high" },
   { ver: "v0.4.2", date: "May 2026", note: "Spearbit · 0 crit · 1 high" },

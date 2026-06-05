@@ -682,7 +682,7 @@ function LedgerRow({
           style={{ fontSize: 13 }}
           title={
             derivedBorrowApr != null
-              ? "Derived from on-chain utilization via kinked two-slope IRM (Aave V3-style)"
+              ? "Flat borrow rate from vault.borrowApyBps() (5%); no kinked IRM is wired (irm()=0x0)."
               : "Reference borrow APR — utilization not yet loaded"
           }
         >

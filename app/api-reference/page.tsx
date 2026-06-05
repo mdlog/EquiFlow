@@ -730,18 +730,15 @@ curl -s ${BASE_URL}/markets \\
   -H "X-EquiFlow-Key: $EF_KEY" | jq '.data[].symbol'
 
 # → "TSLA"
-# → "NVDA"
-# → "AAPL"
-# → "MSFT"
-# → "GOOGL"
 # → "AMZN"
-# → "META"
-# → "SPY"`}</CodeBlock>
+# → "PLTR"
+# → "NFLX"
+# → "AMD"`}</CodeBlock>
             <div
               className="mt-3 font-mono text-ink-mute"
               style={{ fontSize: 10, letterSpacing: "0.06em" }}
             >
-              {">>"} 8 assets · 142 ms · cached at edge · no rate-limit hit
+              {">>"} 5 assets · 142 ms · cached at edge · no rate-limit hit
             </div>
           </div>
         </div>

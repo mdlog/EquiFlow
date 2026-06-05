@@ -30,7 +30,7 @@ const CONCEPTS = [
   {
     tag: "VAULT",
     title: "Vault",
-    body: "The USDG vault is a singleton ERC-4626-compatible liquidity pool. Lenders deposit USDC, mint vault shares, and earn the borrow APR distributed via a kinked two-slope IRM (Aave V3 style). Borrowers draw USDG against pledged collateral.",
+    body: "The USDG vault is a singleton ERC-4626-compatible liquidity pool. Lenders deposit USDG, mint vault shares, and earn the borrow APR distributed from the flat 5% borrow APY (net of the 10% reserve factor). Borrowers draw USDG against pledged collateral.",
     code: "vault.borrow(usdg, amount)",
   },
   {
@@ -48,7 +48,7 @@ const CONCEPTS = [
   {
     tag: "ORACLE",
     title: "Oracle",
-    body: "Prices come from Pyth Network via a custom PythPriceAdapter contract. The adapter enforces a max staleness of 60 seconds and an explicit confidence-interval check (σ/p ≤ 0.5%). Stale feeds revert the dependent call rather than degrading silently.",
+    body: "Prices come from Pyth Network via a custom PythPriceAdapter contract; on Robinhood Chain testnet the adapter is backed by a wire-compatible MockPyth (no live Hermes/Wormhole feed). The adapter enforces a max staleness of 60 seconds and an explicit confidence-interval check (σ/p ≤ 0.5%). Stale feeds revert the dependent call rather than degrading silently.",
     code: "adapter.getPrice(sym)",
   },
   {
@@ -81,7 +81,7 @@ const STEPS = [
     title: "Borrow USDG",
     body: "On the pledge confirmation screen, the LTV slider previews max borrow against the just-pledged collateral. Drawing USDG requires HF ≥ 1.150 at the moment of borrow — a 15% safety buffer above the liquidation threshold.",
     detail:
-      "Borrow APR is dynamic via a kinked two-slope IRM (Aave V3 style). Base rate 1%, slope1 +5% up to 85% utilization, slope2 +70% above 85%. Rate adjusts in real-time with vault utilization.",
+      "Borrow APR is a flat 5% (borrowApyBps()=500); no interest-rate model is wired on-chain (irm()=0x0), so the rate does not vary with utilization.",
     code: "vault.borrow(amount)",
   },
   {
@@ -106,7 +106,7 @@ const ARCH_LAYERS = [
   {
     layer: "L1",
     name: "Robinhood Chain",
-    role: "Settlement layer · OP-Stack rollup · 1.2s block target. RBN is the gas token; the protocol holds a fee abstraction paymaster so users transact in USDG.",
+    role: "Settlement layer · Arbitrum Orbit (Nitro) L3 · 1.2s block target. ETH is the gas token; the protocol holds a fee abstraction paymaster so users transact in USDG.",
     contracts: "Vault · USDG · PythAdapter · Treasury",
   },
   {
@@ -162,7 +162,7 @@ const FAQ = [
   },
   {
     q: "What chain is this deployed on?",
-    a: "Robinhood Chain testnet (an OP-Stack rollup with RBN gas token). Mainnet is targeted for Q3 2026 pending the final audit cycle.",
+    a: "Robinhood Chain testnet (an Arbitrum Orbit / Nitro L3, native ETH gas token). Mainnet is targeted for Q3 2026 pending the final audit cycle.",
   },
   {
     q: "How do I integrate as a liquidator bot?",

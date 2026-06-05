@@ -103,7 +103,7 @@ const CONTRACTS: Contract[] = [
       },
       {
         sig: "setBorrowRateBps(uint256 newRate)",
-        desc: "Base borrow rate (on-chain fallback). Frontend uses dynamic IRM: base 1%, slope1 5%, slope2 70%, kink at 85% utilization.",
+        desc: "Base borrow rate. Currently a flat 5% APR (borrowApyBps=500); the vault's irm() slot is unset (0x0), so the rate is not utilization-variable.",
         access: "onlyOwner",
       },
       {
@@ -154,7 +154,7 @@ const CONTRACTS: Contract[] = [
       },
       { slot: "2", layout: "address[]", desc: "listedAssets enumeration." },
       { slot: "3", layout: "uint256", desc: "totalBorrowedUsd (1e18)." },
-      { slot: "4", layout: "uint256", desc: "borrowRateBps (base rate, overridden by client-side IRM)." },
+      { slot: "4", layout: "uint256", desc: "borrowApyBps (flat 5% base rate; irm slot unset)." },
       {
         slot: "5",
         layout: "uint256 + uint256",
@@ -175,7 +175,7 @@ const CONTRACTS: Contract[] = [
     ],
     github: "https://github.com/equiflow-labs/equiflow/blob/main/contracts/src/USDGStable.sol",
     intro:
-      "Regulated dollar token, fully transferable. Mint and burn are gated to the EquiFlowVault address. Eighteen decimals to keep math aligned with the vault.",
+      "Regulated dollar token, fully transferable. Mint and burn are gated to the EquiFlowVault address. Six decimals (matches RBN testnet USDG). Internal vault accounting is normalized to 1e18 USD.",
     functions: [
       {
         sig: "mint(address to, uint256 amount)",
@@ -209,7 +209,7 @@ const CONTRACTS: Contract[] = [
       },
       {
         sig: "decimals() → uint8",
-        desc: "Returns 18.",
+        desc: "Returns 6.",
         access: "view",
       },
       {
@@ -451,7 +451,7 @@ const DEPLOYMENTS: {
     ts: "2026-05-04 07:24 UTC",
     block: 42_917_406,
     title: "v0.4.2 — superseded",
-    body: "PythPriceAdapter switched to lastObservation() fallback. Vault default borrow rate adjusted to 4.50% APR.",
+    body: "PythPriceAdapter switched to lastObservation() fallback. Vault default borrow rate adjusted to 5.00% APR.",
     type: "param",
   },
   {
@@ -1275,7 +1275,7 @@ function DeploymentTimeline() {
             className="font-mono text-ink-mute"
             style={{ fontSize: 10, letterSpacing: "0.08em" }}
           >
-            BLOCKS 39,241,007 → 42,917,406
+            BLOCKS 39,241,007 → 63,656,956
           </span>
         </div>
 

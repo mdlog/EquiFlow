@@ -160,7 +160,7 @@ export default function LiquidationsPage() {
                   vault.liquidate()
                 </span>{" "}
                 to repay their debt in exchange for their collateral at a 5%
-                bonus. Gas is sponsored for the first call to win the race.
+                bonus. Gas on the liquidation call is paymaster-sponsored.
               </p>
             </div>
             <div className="text-right shrink-0">
@@ -822,8 +822,8 @@ function LiquidatableTable({
               className="text-ink-mute mt-1.5 m-0"
               style={{ fontSize: 12 }}
             >
-              HF below 1.000. First caller wins. Gas sponsored for the first 3
-              ops per block.
+              HF below 1.000. First caller wins. Gas on the liquidation call is
+              paymaster-sponsored.
             </p>
           </div>
           <div className="flex gap-2">
@@ -1612,7 +1612,7 @@ function HowItWorks() {
     {
       n: "02",
       title: "Anyone calls vault.liquidate(borrower)",
-      body: "You repay up to 50% of the borrower's outstanding debt in USDG. Gas is sponsored for the first three callers per block.",
+      body: "You repay up to 50% of the borrower's outstanding debt in USDG. Gas on the call is sponsored via the AA paymaster.",
     },
     {
       n: "03",

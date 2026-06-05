@@ -79,7 +79,7 @@ const SEVERITY_TIERS: Array<{
 const SCOPE_ASSETS: ScopeAsset[] = [
   {
     name: "EquiFlowVault",
-    address: "0x7c4F12a1bE9dC30A41C0Ee14fB8eA0fF12B30002",
+    address: "0x86c4AC25524560799863505F7650B24014eDB0FB",
     loc: "src/vault/EquiFlowVault.sol · 2,840 LOC",
     audit: "Audited",
     auditFirms: ["Trail of Bits", "OpenZeppelin"],
@@ -89,7 +89,7 @@ const SCOPE_ASSETS: ScopeAsset[] = [
   },
   {
     name: "USDGStable",
-    address: "0x91a2c4FfB8a0E0d1c2F7d0e3a4B5C6D7e8F90123",
+    address: "0x7E955252E15c84f5768B83c41a71F9eba181802F",
     loc: "src/stable/USDGStable.sol · 720 LOC",
     audit: "Audited",
     auditFirms: ["OpenZeppelin", "Spearbit"],
@@ -232,7 +232,7 @@ const RECENT_REPORTS: ReportRow[] = [
   {
     id: "EQ-2026-109",
     date: "62 days ago",
-    severity: "High",
+    severity: "Critical",
     title: "Oracle staleness window allows stale-feed liquidation on TSLA",
     status: "RESOLVED",
     reward: 175_000,
@@ -452,7 +452,7 @@ export default function BugBountyPage() {
           >
             <PolicyChip
               k="Payout currency"
-              v="USDG · settled on Robinhood Chain L2"
+              v="USDG · settled on Robinhood Chain (Arbitrum Orbit L3)"
             />
             <PolicyChip
               k="Payout time"
@@ -555,7 +555,7 @@ export default function BugBountyPage() {
                     </td>
                     <td style={{ padding: "14px 14px" }}>
                       <a
-                        href="#"
+                        href={`https://explorer.testnet.chain.robinhood.com/address/${a.address}`}
                         className="font-mono no-underline text-ink"
                         style={{ fontSize: 11, fontWeight: 500 }}
                       >

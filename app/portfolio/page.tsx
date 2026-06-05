@@ -1262,7 +1262,7 @@ function OracleActivityLog({
             className="font-serif font-medium m-0"
             style={{ fontSize: 16, letterSpacing: "-0.02em" }}
           >
-            Pyth stream
+            Reference prices
           </h3>
         </div>
         <OraclePing label={null} size={5} />

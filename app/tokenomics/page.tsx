@@ -580,7 +580,7 @@ export default function TokenomicsPage() {
             {[
               ["Peg", "1.000 USD"],
               ["Standard", "ERC-20"],
-              ["Decimals", "18"],
+              ["Decimals", "6"],
               ["Status", "Live · v0.4.2"],
             ].map(([k, v]) => (
               <div key={k}>
