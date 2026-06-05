@@ -31,16 +31,7 @@ const COLUMNS: { title: string; links: [string, string][] }[] = [
       ["Smart contracts", "/contracts"],
       ["SDK · TypeScript", "/sdk"],
       ["API reference", "/api-reference"],
-      ["GitHub", "#"],
-    ],
-  },
-  {
-    title: "Community",
-    links: [
-      ["Discord", "#"],
-      ["Mirror", "#"],
-      ["Twitter / X", "#"],
-      ["Telegram", "#"],
+      ["GitHub", "https://github.com/mdlog/EquiFlow"],
     ],
   },
 ];
@@ -54,7 +45,7 @@ export function SiteFooter({ gap = true }: { gap?: boolean } = {}) {
   const live = block !== undefined;
   const blockLabel = live
     ? `BLOCK ${block.toLocaleString("en-US")}`
-    : "BLOCK 42,917,406";
+    : "BLOCK —";
 
   return (
     <footer
@@ -62,7 +53,7 @@ export function SiteFooter({ gap = true }: { gap?: boolean } = {}) {
       style={{ marginTop: gap ? 40 : 0 }}
     >
       <div className="max-w-[1320px] mx-auto px-4 sm:px-8">
-        <div className="grid gap-12 grid-cols-2 md:grid-cols-3 lg:[grid-template-columns:1.6fr_repeat(4,1fr)]">
+        <div className="grid gap-12 grid-cols-2 md:grid-cols-3 lg:[grid-template-columns:1.6fr_repeat(3,1fr)]">
           <div className="col-span-2 lg:col-span-1">
             <Wordmark size={16} />
             <p
@@ -74,9 +65,9 @@ export function SiteFooter({ gap = true }: { gap?: boolean } = {}) {
                 maxWidth: 320,
               }}
             >
-              Yield-generating stock collateralization on Robinhood Chain.
-              Pledge tokenized equities, borrow regulated stables, route to
-              yield — without selling a share.
+              Stock-collateralized borrowing on Robinhood Chain. Pledge
+              tokenized equities and borrow regulated stables — without selling
+              a share.
             </p>
           </div>
           {COLUMNS.map((c) => (
@@ -124,7 +115,7 @@ export function SiteFooter({ gap = true }: { gap?: boolean } = {}) {
             <span>·</span>
             <span>{`v${process.env.NEXT_PUBLIC_APP_VERSION ?? "0.5.0"} · BUILD ${process.env.NEXT_PUBLIC_GIT_SHA?.slice(0, 7) ?? "dev"}`}</span>
             <span>·</span>
-            <span title="Audit rounds completed">AUDIT v7</span>
+            <span title="No security audits completed yet">AUDIT · PENDING</span>
           </div>
           <div className="flex gap-[18px] items-center flex-wrap">
             <span>{blockLabel}</span>

@@ -35,7 +35,7 @@ const cells = [
   },
   {
     name: "Alchemy AA",
-    role: "Bundler · Gas Manager · 7702",
+    role: "Bundler · Gas Manager · ERC-4337",
     icon: (
       <svg viewBox="0 0 28 24" width="28" height="24" fill="currentColor">
         <path d="M2 6h4v12H2zM8 6h6v12H8zM16 12c0-3 2-6 6-6v3c-2 0-3 1-3 3s1 3 3 3v3c-4 0-6-3-6-6Z" />

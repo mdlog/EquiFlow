@@ -21,7 +21,7 @@ export function Hero() {
               className="font-mono text-ink-soft"
               style={{ fontSize: 11, letterSpacing: "0.06em" }}
             >
-              YIELD-GENERATING STOCK COLLATERAL · LIVE ON ROBINHOOD CHAIN
+              STOCK-COLLATERALIZED BORROWING · LIVE ON ROBINHOOD CHAIN
             </span>
           </div>
 
@@ -44,8 +44,8 @@ export function Hero() {
             Over 2,000 US equities and ETPs are tokenized on Arbitrum, but they
             generate no yield beyond price drift.{" "}
             <strong className="text-ink font-medium">EquiFlow</strong> turns
-            those holdings into productive collateral: pledge AAPL or SPY,
-            borrow regulated stablecoins, and earn yield from the borrow spread.{" "}
+            those holdings into productive collateral: pledge TSLA or AMD and
+            borrow regulated stablecoins against them — without selling a share.{" "}
             <strong className="text-ink font-medium">One signature.</strong>{" "}
             <strong className="text-ink font-medium">Sponsored gas.</strong>{" "}
             <strong className="text-ink font-medium">No taxable sale.</strong>

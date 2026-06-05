@@ -28,7 +28,7 @@ export function ChainTicker() {
           className="font-mono whitespace-nowrap"
           style={{ fontSize: 11, letterSpacing: "0.04em" }}
         >
-          RBN · Arbitrum L2{onChain ? "" : " · idle"}
+          RBN · Arbitrum L3{onChain ? "" : " · idle"}
         </span>
       </span>
       <span

@@ -3,35 +3,23 @@
 import Link from "next/link";
 import { Arrow } from "./shared";
 import { useStockPrice } from "@/lib/hooks/use-adapter-price";
-import { useListedAssets, useProtocolStats } from "@/lib/hooks/use-protocol-stats";
 import { findStock } from "@/lib/config/stocks";
 import { fmt } from "@/lib/format";
 
 export function FinalCta() {
-  const sym = "AAPL";
+  const sym = "TSLA";
   const shares = 100;
   const stock = findStock(sym);
   const { price } = useStockPrice(sym);
-  const listed = useListedAssets();
-  const stats = useProtocolStats(listed);
 
   const collateral = price * shares;
   const ltv = stock.ltv;
   const maxBorrow = collateral * ltv;
-  const vaultApr = stats.derived ? stats.derived.supplyAprBps / 10_000 : 0;
-  const borrowApr = stats.derived ? stats.derived.borrowAprBps / 10_000 : 0;
-  const netApr = vaultApr - borrowApr;
-  const yearlyNet = maxBorrow * netApr;
 
   const rows: Array<[string, string, string?]> = [
     ["Collateral value", fmt.usd(collateral, 0)],
     [`Max borrow (${(ltv * 100).toFixed(0)}% LTV)`, fmt.usd(maxBorrow, 0)],
-    [
-      "Net APR if routed to vault",
-      stats.derived ? fmt.pct(netApr * 100, 2, true) : "loading…",
-      netApr > 0 ? "var(--up)" : undefined,
-    ],
-    ["Estimated net / year", stats.derived ? fmt.usd(yearlyNet, 0) : "—"],
+    ["Borrow rate", "5% APR"],
     ["Signatures · gas you pay", "1 · $0.00"],
   ];
 
@@ -63,7 +51,7 @@ export function FinalCta() {
           >
             Pledge a single share.
             <br />
-            Watch it <em>start earning</em>.
+            Borrow <em>without selling</em>.
           </h2>
           <p
             style={{

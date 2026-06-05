@@ -1,7 +1,9 @@
 import { STOCKS } from "@/lib/config/stocks";
 import { SectionHead } from "./shared";
 
-const MAX_LTV = Math.max(...STOCKS.map((s) => s.ltv));
+// Only assets actually listed on-chain are pledgeable — exclude reference-only
+// rows (AAPL/NVDA/SPY) so the headline LTV reflects what a user can really lock.
+const MAX_LTV = Math.max(...STOCKS.filter((s) => s.liveOnRBN).map((s) => s.ltv));
 
 export function HowItWorks() {
   return (
@@ -11,7 +13,7 @@ export function HowItWorks() {
           eyebrow="How EquiFlow works"
           title="Three motions."
           titleEm="One signature."
-          intro="EquiFlow's smart wallets (ERC-4337 + EIP-7702 via Alchemy) bundle approve · lock · borrow into a single signature. Gas sponsored by the Alchemy Gas Manager — or pay in USDG via the ERC20 paymaster. No popups. No ETH required. No tax events. Yield routing to external vaults is on the roadmap."
+          intro="EquiFlow's smart wallets (ERC-4337 via Alchemy) bundle approve · lock · borrow into a single signature. Gas sponsored by the Alchemy Gas Manager — or pay in USDG via the ERC20 paymaster. No popups. No ETH required. Yield routing to external vaults is on the roadmap."
           right="PROTOCOL ARCHITECTURE"
         />
 
@@ -20,7 +22,7 @@ export function HowItWorks() {
             num="MOTION 01 · PLEDGE"
             title="Lock your stock"
             titleEm="tokens"
-            desc="Pledge tokenized shares — AAPL, TSLA, SPY, NVDA, MSFT, GOOGL, QQQ — into the EquiFlow vault. Custody stays on-chain, position stays in your name."
+            desc="Pledge tokenized shares — TSLA, AMZN, PLTR, NFLX, AMD — into the EquiFlow vault. Custody stays on-chain, position stays in your name."
             footLabel="Max LTV"
             footValue={`up to ${(MAX_LTV * 100).toFixed(0)}%`}
             viz={<PledgeViz />}
@@ -30,9 +32,9 @@ export function HowItWorks() {
             num="MOTION 02 · BORROW"
             title="Borrow regulated"
             titleEm="stables"
-            desc="Draw USDG against your collateral at competitive borrow rates. Funds hit your wallet — or skip your wallet entirely and route straight to yield."
-            footLabel="From"
-            footValue="variable APR"
+            desc="Draw USDG against your collateral at a flat, owner-set borrow rate. Funds hit your wallet — or skip your wallet entirely and route straight to yield."
+            footLabel="Borrow rate"
+            footValue="5% APR"
             viz={<BorrowViz />}
             isLast={false}
           />
@@ -40,7 +42,7 @@ export function HowItWorks() {
             num="MOTION 03 · EARN"
             title="Earn from"
             titleEm="borrow spread"
-            desc="LPs deposit USDG or WETH into the vault and earn yield from borrower interest. The protocol's utilization-based rate model ensures fair pricing — higher demand means higher LP returns."
+            desc="LPs deposit USDG into the vault and earn yield from borrower interest, paid pro-rata to suppliers. Higher utilization means higher LP returns."
             footLabel="LP APY"
             footValue="Variable"
             footValueClass="text-up"
@@ -168,11 +170,11 @@ function PledgeViz() {
         fill="#1A1814"
       >
         <rect x="6" y="14" width="46" height="22" fill="#FAF8F2" stroke="#1A1814" strokeWidth="1.2" />
-        <text x="29" y="29" textAnchor="middle">AAPL</text>
+        <text x="29" y="29" textAnchor="middle">TSLA</text>
         <rect x="6" y="40" width="46" height="22" fill="#FAF8F2" stroke="#1A1814" strokeWidth="1.2" />
-        <text x="29" y="55" textAnchor="middle">NVDA</text>
+        <text x="29" y="55" textAnchor="middle">AMZN</text>
         <rect x="6" y="66" width="46" height="22" fill="#FAF8F2" stroke="#1A1814" strokeWidth="1.2" />
-        <text x="29" y="81" textAnchor="middle">SPY</text>
+        <text x="29" y="81" textAnchor="middle">AMD</text>
       </g>
       <path
         d="M58 25 Q90 40 122 40 M58 51 L122 40 M58 77 Q90 60 122 40"
@@ -204,7 +206,7 @@ function BorrowViz() {
       </text>
       <line x1="76" y1="40" x2="160" y2="40" stroke="#857F72" strokeWidth="1" strokeDasharray="3 3" />
       <text x="118" y="34" fontFamily="JetBrains Mono" fontSize="9" fill="#857F72" textAnchor="middle">
-        borrow · variable APR
+        borrow · fixed APR
       </text>
       <path d="M156 36 L160 40 L156 44" stroke="#857F72" fill="none" strokeWidth="1" />
       <rect x="164" y="20" width="64" height="40" fill="#FAF8F2" stroke="#1A1814" strokeWidth="1.4" />
@@ -235,15 +237,15 @@ function EarnViz() {
       <circle cx="60" cy="40" r="8" fill="#FAF8F2" stroke="#1A1814">
         <animate attributeName="r" values="8;8.9;8" dur="2.2s" repeatCount="indefinite" />
       </circle>
-      <text x="60" y="43" fontFamily="JetBrains Mono" fontSize="7" fill="#1A1814" textAnchor="middle">USDC</text>
+      <text x="60" y="43" fontFamily="JetBrains Mono" fontSize="7" fill="#1A1814" textAnchor="middle">USDG</text>
       <circle cx="180" cy="22" r="6" fill="#FAF8F2" stroke="#1A1814">
         <animate attributeName="r" values="6;6.8;6" dur="4.1s" repeatCount="indefinite" />
       </circle>
-      <text x="180" y="25" fontFamily="JetBrains Mono" fontSize="6" fill="#1A1814" textAnchor="middle">GHO</text>
+      <text x="180" y="25" fontFamily="JetBrains Mono" fontSize="6" fill="#1A1814" textAnchor="middle">WETH</text>
       <circle cx="180" cy="58" r="7" fill="#FAF8F2" stroke="#1A1814">
         <animate attributeName="r" values="7;7.8;7" dur="3.4s" repeatCount="indefinite" />
       </circle>
-      <text x="180" y="61" fontFamily="JetBrains Mono" fontSize="6" fill="#1A1814" textAnchor="middle">USDR</text>
+      <text x="180" y="61" fontFamily="JetBrains Mono" fontSize="6" fill="#1A1814" textAnchor="middle">USDG</text>
       <line x1="68" y1="40" x2="98" y2="40" stroke="#857F72" strokeWidth="0.8" strokeDasharray="2 3" />
       <line x1="174" y1="24" x2="138" y2="32" stroke="#857F72" strokeWidth="0.8" strokeDasharray="2 3" />
       <line x1="173" y1="56" x2="138" y2="48" stroke="#857F72" strokeWidth="0.8" strokeDasharray="2 3" />
