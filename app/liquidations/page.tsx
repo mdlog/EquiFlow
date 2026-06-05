@@ -80,9 +80,9 @@ export default function LiquidationsPage() {
     [debtAtRiskBig],
   );
 
-  const fmtUsd1e18 = (v: bigint, dp = 0): string => {
+  const fmtUsd1e18 = (v: bigint, dp = 2): string => {
     const n = Number(v / 10n ** 12n) / 1e6;
-    return "$" + (dp === 0 ? fmt.abbr(n) : fmt.usd(n, dp));
+    return fmt.usd(n, dp);
   };
 
   return (
@@ -314,10 +314,13 @@ function RpcErrorBanner({
   atRiskError: Error | null;
   recentError: Error | null;
 }) {
-  const msg =
+  const rawMsg =
     atRiskError?.message ??
     recentError?.message ??
     "RPC request failed.";
+  // Strip RPC URLs from error text so API keys embedded in the URL don't
+  // surface in the UI (or in screenshots users share when filing bug reports).
+  const msg = rawMsg.replace(/https?:\/\/\S+/g, "[rpc]");
   return (
     <section
       className="border-b border-hairline"
@@ -1123,7 +1126,7 @@ function LiqRow({
           className="font-serif font-medium tabular"
           style={{ fontSize: 16, letterSpacing: "-0.02em" }}
         >
-          ${fmt.abbr(debtUsd)}
+          {fmt.usd(debtUsd, 2)}
         </div>
         <div
           className="font-mono text-ink-mute mt-0.5"
@@ -1139,7 +1142,7 @@ function LiqRow({
           className="font-serif font-medium tabular"
           style={{ fontSize: 16, letterSpacing: "-0.02em" }}
         >
-          ${fmt.abbr(collatUsd)}
+          {fmt.usd(collatUsd, 2)}
         </div>
         <div className="flex gap-1.5 mt-1.5">
           <span
@@ -1210,7 +1213,7 @@ function LiqRow({
               color: "var(--up)",
             }}
           >
-            +${fmt.abbr(bonusUsd)}
+            +{fmt.usd(bonusUsd, 2)}
           </div>
           <div
             className="font-mono text-ink-mute mt-0.5"
@@ -1401,7 +1404,7 @@ function RecentLiquidationsPanel({
                     className="font-mono tabular font-medium"
                     style={{ fontSize: 12 }}
                   >
-                    ${fmt.abbr(Number(e.debtRepaid / 10n ** 12n) / 1e6)}
+                    {fmt.usd(Number(e.debtRepaid / 10n ** 12n) / 1e6, 2)}
                   </div>
                   <div
                     className="font-mono text-ink-mute mt-0.5"
@@ -1415,7 +1418,7 @@ function RecentLiquidationsPanel({
                     className="font-mono tabular font-medium"
                     style={{ fontSize: 12, color: "var(--up)" }}
                   >
-                    +${fmt.abbr(Number(e.bonusUsd / 10n ** 12n) / 1e6)}
+                    +{fmt.usd(Number(e.bonusUsd / 10n ** 12n) / 1e6, 2)}
                   </span>
                 </td>
               </tr>
@@ -1556,8 +1559,8 @@ function LiquidatorBoard({ events }: { events: RecentLiquidation[] }) {
                     className="font-mono text-ink-mute mt-0.5"
                     style={{ fontSize: 10 }}
                   >
-                    {r.liqs} liquidation{r.liqs === 1 ? "" : "s"} · $
-                    {fmt.abbr(r.volUsd)} volume
+                    {r.liqs} liquidation{r.liqs === 1 ? "" : "s"} ·{" "}
+                    {fmt.usd(r.volUsd, 2)} volume
                   </div>
                 </div>
               </div>
@@ -1566,7 +1569,7 @@ function LiquidatorBoard({ events }: { events: RecentLiquidation[] }) {
                   className="font-mono tabular font-medium"
                   style={{ fontSize: 13, color: "var(--up)" }}
                 >
-                  +${fmt.abbr(r.bonusUsd)}
+                  +{fmt.usd(r.bonusUsd, 2)}
                 </div>
                 <div
                   className="font-mono text-ink-mute mt-0.5"

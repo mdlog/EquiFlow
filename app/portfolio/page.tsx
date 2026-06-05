@@ -106,17 +106,17 @@ export default function PositionsPage() {
           <div className="max-w-[1320px] mx-auto w-full grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5">
           <Kpi
             label="Collateral · total"
-            value={fmt.usd(collateralUsd, 0)}
+            value={fmt.usd(collateralUsd, 2)}
             sub={`${lines.length} asset${lines.length !== 1 ? "s" : ""} pledged`}
           />
           <Kpi
             label={`Debt · ${vault.borrowSymbol}`}
-            value={fmt.usd(borrowedUsd, 0)}
+            value={fmt.usd(borrowedUsd, 2)}
             sub={borrowApr != null ? `@ ${borrowApr.toFixed(2)}% APR` : "—"}
           />
           <Kpi
             label="Net equity"
-            value={fmt.usd(equity, 0)}
+            value={fmt.usd(equity, 2)}
             sub={`LTV ${ltvActual.toFixed(1)}% / cap ${ltvCap.toFixed(0)}%`}
           />
           <Kpi
@@ -712,7 +712,7 @@ function DebtPanel({
           className="font-mono tabular font-medium"
           style={{ fontSize: 14 }}
         >
-          {fmt.usd(borrowed, 0)}
+          {fmt.usd(borrowed, 2)}
         </span>
       </div>
       <div className="grid grid-cols-2 gap-3">
@@ -1692,7 +1692,7 @@ function Orbit({
             <div style={{ width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3 }}>
               <AssetLogo sym={vault.borrowSymbol} size={24} />
               <span style={{ fontFamily: "Source Serif 4", fontSize: 14, fontWeight: 500, color: "var(--paper)", letterSpacing: "-0.02em" }}>
-                ${fmt.abbr(borrowed)}
+                {fmt.usd(borrowed, 2)}
               </span>
               <span style={{ fontFamily: "JetBrains Mono", fontSize: 8, color: "var(--paper)", opacity: 0.5, letterSpacing: "0.06em" }}>
                 BORROWED

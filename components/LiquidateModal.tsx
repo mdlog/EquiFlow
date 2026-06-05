@@ -522,8 +522,8 @@ export function LiquidateModal({
     >
       {/* Snapshot */}
       <div className="grid grid-cols-3 border-b border-hairline-soft">
-        <SnapshotCell label="Debt" value={fmt.usd(borrowedUsdNum, 0)} />
-        <SnapshotCell label="Collateral" value={fmt.usd(collateralUsdNum, 0)} />
+        <SnapshotCell label="Debt" value={fmt.usd(borrowedUsdNum, 2)} />
+        <SnapshotCell label="Collateral" value={fmt.usd(collateralUsdNum, 2)} />
         <SnapshotCell
           label="Health"
           value={hfNum === Number.POSITIVE_INFINITY ? "∞" : hfNum.toFixed(3)}
