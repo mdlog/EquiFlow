@@ -116,7 +116,7 @@ export function AssetDetailClient({ sym }: Props) {
         "LTV source",
         ltvIsLive ? "on-chain · vault.assets()" : "reference · static",
       ],
-      ["Rate source", "on-chain · derived from utilization"],
+      ["Rate source", "on-chain · flat borrow, utilization-derived supply"],
     ],
     [
       effectiveLtv,

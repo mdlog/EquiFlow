@@ -19,4 +19,4 @@ export const BPS = 10_000 as const;
 /// `liqLtvBps` is not yet available client-side. This is a stop-gap — the
 /// canonical source is `vault.assets(token).liqLtvBps`. Track removal in
 /// docs/hardcoded-data-audit.md (C3).
-export const LIQ_LTV_CUSHION_BPS = 800 as const;
+export const LIQ_LTV_CUSHION_BPS = 1000 as const;

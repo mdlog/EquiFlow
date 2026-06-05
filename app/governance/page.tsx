@@ -201,7 +201,7 @@ const TOP_DELEGATES: Delegate[] = [
 
 const GOV_PARAMS: Array<[string, string, string]> = [
   ["Proposal threshold", "100,000 EQUI", "0.10% of supply · staked or delegated"],
-  ["Voting period", "5 days", "block-clock anchored to L2 finality"],
+  ["Voting period", "5 days", "block-clock anchored to L3 finality"],
   ["Voting delay", "1 day", "snapshot lag before voting opens"],
   ["Quorum target", "25,000,000 EQUI", "25% of circulating supply"],
   ["Approval threshold", "60% for", "of for + against, abstain ignored"],
