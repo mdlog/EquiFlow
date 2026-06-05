@@ -3,11 +3,14 @@
 import Link from "next/link";
 import { AssetLogo } from "@/components/AssetLogo";
 import { fmt } from "@/lib/format";
-import { STOCKS } from "@/lib/config/stocks";
+import { STOCKS, isLive } from "@/lib/config/stocks";
 import { SectionHead } from "./shared";
 import { useListedAssets, useProtocolStats } from "@/lib/hooks/use-protocol-stats";
 import { useMarkets24h } from "@/lib/hooks/use-market-history";
 import { useStockPrice } from "@/lib/hooks/use-adapter-price";
+
+const LIVE_COUNT = STOCKS.filter((s) => s.liveOnRBN).length;
+const COMING_COUNT = STOCKS.length - LIVE_COUNT;
 
 export function SupportedAssets() {
   const listed = useListedAssets();
@@ -15,8 +18,9 @@ export function SupportedAssets() {
   const h24 = useMarkets24h(STOCKS.map((s) => s.sym));
 
   // Borrow APR / Vault APR / Liquidity are vault-wide — a single borrow vault
-  // backs every collateral — so the same figure shows on each row, matching
-  // how /markets surfaces them. Null while the on-chain read is in flight.
+  // backs every collateral — so the same figure shows on each live row,
+  // matching how /markets surfaces them. Null while the on-chain read is in
+  // flight. Reference-only assets (not on-chain) render these as "—".
   const borrowApr = stats.derived ? stats.derived.borrowAprBps / 100 : null;
   const vaultApr = stats.derived ? stats.derived.supplyAprBps / 100 : null;
   const liquidityUsd =
@@ -26,7 +30,7 @@ export function SupportedAssets() {
     <section className="border-b border-hairline py-12 sm:py-20">
       <div className="max-w-[1320px] mx-auto px-4 sm:px-8">
         <SectionHead
-          eyebrow={`Supported assets · ${STOCKS.length} tokenized equities`}
+          eyebrow={`Supported assets · ${LIVE_COUNT} live · ${COMING_COUNT} coming`}
           title="Pledge any of these."
           titleEm="More coming."
           right="LIVE PRICES · TESTNET"
@@ -73,7 +77,7 @@ export function SupportedAssets() {
                   name={s.name}
                   sector={s.sector}
                   seedPrice={s.price}
-                  ltv={s.ltv}
+                  live={isLive(s.sym)}
                   change24h={h24.data?.[s.sym]?.changePct ?? null}
                   borrowApr={borrowApr}
                   vaultApr={vaultApr}
@@ -93,36 +97,38 @@ interface AssetRowProps {
   name: string;
   sector: string;
   seedPrice: number;
-  ltv: number;
+  live: boolean;
   change24h: number | null;
   borrowApr: number | null;
   vaultApr: number | null;
   liquidityUsd: number | null;
 }
 
+const DASH = <span className="text-ink-mute">—</span>;
+
 function AssetRow({
   sym,
   name,
   sector,
   seedPrice,
-  ltv,
+  live,
   change24h,
   borrowApr,
   vaultApr,
   liquidityUsd,
 }: AssetRowProps) {
-  // Live on-chain price; falls back to the seed reference price while the
-  // adapter read resolves (useStockPrice never returns null — it defaults to
-  // the config seed) so the column is always populated.
-  const { price } = useStockPrice(sym);
-  const ltvPct = Math.round(ltv * 100);
-  const has24h = change24h != null;
+  // Live on-chain price + LTV for listed assets; for reference-only assets
+  // useStockPrice falls back to the Pyth Hermes / seed price and config LTV,
+  // but we only surface vault figures (incl. LTV) for assets actually listed.
+  const { price, ltv } = useStockPrice(sym);
+  const ltvPct = live ? Math.round(ltv * 100) : null;
+  const has24h = live && change24h != null;
   const up24h = (change24h ?? 0) >= 0;
 
   return (
     <tr
       className="hover:bg-paper-alt transition-colors"
-      style={{ borderBottom: "1px solid var(--hairline-soft)" }}
+      style={{ borderBottom: "1px solid var(--hairline-soft)", opacity: live ? 1 : 0.72 }}
     >
       <td style={{ padding: 16 }}>
         <div className="flex items-center gap-3">
@@ -138,8 +144,25 @@ function AssetRow({
             <AssetLogo sym={sym} size={24} />
           </div>
           <div>
-            <div className="font-mono font-semibold" style={{ fontSize: 13 }}>
-              {sym}
+            <div className="flex items-center gap-2">
+              <span className="font-mono font-semibold" style={{ fontSize: 13 }}>
+                {sym}
+              </span>
+              {!live && (
+                <span
+                  className="font-mono uppercase text-ink-mute"
+                  style={{
+                    fontSize: 8.5,
+                    letterSpacing: "0.1em",
+                    padding: "2px 5px",
+                    border: "1px solid var(--hairline)",
+                    borderRadius: 2,
+                    background: "var(--paper-alt)",
+                  }}
+                >
+                  Soon
+                </span>
+              )}
             </div>
             <div className="text-ink-mute" style={{ fontSize: 11, marginTop: 2 }}>
               {name} · {sector}
@@ -154,42 +177,53 @@ function AssetRow({
         className="text-right font-mono tabular"
         style={{
           padding: 16,
-          color: has24h
-            ? up24h
-              ? "var(--up)"
-              : "var(--down)"
-            : "var(--ink-mute)",
+          color: has24h ? (up24h ? "var(--up)" : "var(--down)") : "var(--ink-mute)",
         }}
       >
         {has24h ? fmt.signedPct(change24h as number, 2) : "—"}
       </td>
       <td style={{ padding: 16 }}>
-        <div className="font-mono tabular">{ltvPct}%</div>
-        <div
-          className="mt-1.5"
-          style={{ height: 3, background: "var(--paper-deep)" }}
-        >
-          <div
-            style={{ height: "100%", width: `${ltvPct}%`, background: "var(--ink)" }}
-          />
-        </div>
+        {ltvPct != null ? (
+          <>
+            <div className="font-mono tabular">{ltvPct}%</div>
+            <div
+              className="mt-1.5"
+              style={{ height: 3, background: "var(--paper-deep)" }}
+            >
+              <div
+                style={{ height: "100%", width: `${ltvPct}%`, background: "var(--ink)" }}
+              />
+            </div>
+          </>
+        ) : (
+          DASH
+        )}
       </td>
       <td className="text-right font-mono tabular" style={{ padding: 16 }}>
-        {borrowApr != null ? `${borrowApr.toFixed(2)}%` : "—"}
+        {live && borrowApr != null ? `${borrowApr.toFixed(2)}%` : "—"}
       </td>
       <td
         className="text-right font-mono tabular text-up"
         style={{ padding: 16 }}
       >
-        {vaultApr != null ? `+${vaultApr.toFixed(2)}%` : "—"}
+        {live && vaultApr != null ? `+${vaultApr.toFixed(2)}%` : <span className="text-ink-mute">—</span>}
       </td>
       <td className="text-right font-mono tabular" style={{ padding: 16 }}>
-        {liquidityUsd != null ? fmt.usd(liquidityUsd, 2) : "—"}
+        {live && liquidityUsd != null ? fmt.usd(liquidityUsd, 2) : "—"}
       </td>
       <td className="text-right" style={{ padding: 16 }}>
-        <Link href={`/markets/${sym}`} className="btn-ghost btn-sm">
-          View
-        </Link>
+        {live ? (
+          <Link href={`/markets/${sym}`} className="btn-ghost btn-sm">
+            View
+          </Link>
+        ) : (
+          <span
+            className="font-mono text-ink-mute"
+            style={{ fontSize: 11 }}
+          >
+            Not listed
+          </span>
+        )}
       </td>
     </tr>
   );

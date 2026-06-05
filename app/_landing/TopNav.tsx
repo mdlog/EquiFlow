@@ -10,8 +10,8 @@ const NAV_LINKS = [
   { label: "Markets", href: "/markets" },
   { label: "Portfolio", href: "/portfolio" },
   { label: "Faucet", href: "/faucet" },
-  { label: "Docs", href: "#", muted: true },
-  { label: "Audits", href: "#", muted: true },
+  { label: "Docs", href: "/docs" },
+  { label: "Audits", href: "/audits" },
 ];
 
 export function TopNav() {
@@ -48,7 +48,7 @@ export function TopNav() {
               key={l.label}
               href={l.href}
               className="no-underline py-[18px] transition-colors hover:text-ink"
-              style={{ color: l.muted ? "var(--ink-mute)" : "var(--ink-soft)" }}
+              style={{ color: "var(--ink-soft)" }}
             >
               {l.label}
             </Link>
@@ -85,7 +85,7 @@ export function TopNav() {
               href={l.href}
               onClick={() => setMenuOpen(false)}
               className="no-underline py-2.5 px-2 rounded-[2px] transition-colors hover:bg-paper-alt"
-              style={{ fontSize: 14, color: l.muted ? "var(--ink-mute)" : "var(--ink-soft)" }}
+              style={{ fontSize: 14, color: "var(--ink-soft)" }}
             >
               {l.label}
             </Link>
