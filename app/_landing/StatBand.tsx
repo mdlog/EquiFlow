@@ -11,11 +11,11 @@ export function StatBand() {
 
   const tvl =
     stats.tvlUsd != null
-      ? "$" + fmt.abbr(Number(formatUnits(stats.tvlUsd, 18)))
+      ? fmt.usd(Number(formatUnits(stats.tvlUsd, 18)), 2)
       : "—";
   const borrowed =
     stats.borrowedUsd != null
-      ? "$" + fmt.abbr(Number(formatUnits(stats.borrowedUsd, 18)))
+      ? fmt.usd(Number(formatUnits(stats.borrowedUsd, 18)), 2)
       : "—";
   const utilization =
     stats.utilizationPct != null

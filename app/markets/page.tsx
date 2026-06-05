@@ -113,9 +113,9 @@ export default function MarketsPage() {
     return list;
   }, [sector, search, sortKey, sortDir, history24h.data]);
 
-  // Format 1e18 USD bigint into abbreviated USD string ("$1.24M").
+  // Format 1e18 USD bigint into a 2-decimal USD string ("$1,234.56").
   const fmtUsd1e18 = (v: bigint | null): string =>
-    v == null ? "—" : "$" + fmt.abbr(Number(v / 10n ** 12n) / 1e6);
+    v == null ? "—" : fmt.usd(Number(v / 10n ** 12n) / 1e6, 2);
   const kpis: Array<readonly [string, string, string]> = [
     [
       "Total Value Locked",
@@ -715,7 +715,7 @@ function LedgerRow({
       <div className="text-right">
         <div className="font-mono tabular font-medium" style={{ fontSize: 13 }}>
           {collateralVolumeUsd != null && collateralVolumeUsd > 0n
-            ? "$" + fmt.abbr(Number(collateralVolumeUsd / 10n ** 12n) / 1e6)
+            ? fmt.usd(Number(collateralVolumeUsd / 10n ** 12n) / 1e6, 2)
             : "—"}
         </div>
         <div className="text-ink-mute mt-0.5" style={{ fontSize: 10 }}>
