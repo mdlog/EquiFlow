@@ -9,6 +9,7 @@ import { Toaster } from "sonner";
 import { getWagmiConfig } from "@/lib/web3/wagmi";
 import { robinhoodChainTestnet } from "@/lib/config/chain";
 import { PriceKeeperMount } from "@/components/PriceKeeperMount";
+import { NetworkGuard } from "@/components/NetworkGuard";
 import { SmartWalletProvider } from "@/lib/aa/use-smart-wallet";
 import { VaultProvider } from "@/lib/hooks/use-vault-context";
 
@@ -42,6 +43,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
         >
           <SmartWalletProvider>
             <VaultProvider>
+              <NetworkGuard />
               <PriceKeeperMount />
               {children}
               <Toaster

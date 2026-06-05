@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test:lib": "node --experimental-strip-types --test lib/web3/market-hours.test.ts"
+    "test:lib": "node --experimental-strip-types --test lib/web3/market-hours.test.ts lib/web3/network.test.ts"
   },
   "dependencies": {
     "@rainbow-me/rainbowkit": "^2.2.11",
