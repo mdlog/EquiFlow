@@ -26,7 +26,7 @@ import { shortAddr, explorerAddr, explorerTx } from "@/lib/contracts";
 ///
 ///   1. PageNav (with live/30s-scan toggle in rightExtras)
 ///   2. Hero: kicker · headline · intro paragraph · LAST SCAN block
-///   3. KPI strip — 5 protocol-wide risk metrics
+///   3. KPI strip — 5 risk metrics (24h discovery window)
 ///   4. Risk distribution histogram + 24h timeline (2-col)
 ///   5. Liquidatable now table (primary CTA)
 ///   6. Watch zone table (HF 1.00 – 1.25)
@@ -34,17 +34,25 @@ import { shortAddr, explorerAddr, explorerTx } from "@/lib/contracts";
 ///   8. How-it-works strip + bot SDK CTA
 ///
 /// On-chain reads come from `useAtRiskPositions`, `useProtocolStats`,
-/// `useRecentLiquidations`. The leaderboard is synthesized — 30d aggregation
-/// across thousands of logs is infeasible on public RPCs.
+/// `useRecentLiquidations`. Every panel — including the risk-distribution
+/// histogram and the liquidator leaderboard — is derived from real on-chain
+/// data over the scanned ~24h window (event getLogs + per-borrower multicall).
 export default function LiquidationsPage() {
   const [target, setTarget] = useState<AtRiskPosition | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [lastScanSecs, setLastScanSecs] = useState(4);
 
-  const atRisk = useAtRiskPositions();
+  /// "Paused" genuinely halts the on-chain scans (not just the clock).
+  const atRisk = useAtRiskPositions({ paused: !autoRefresh });
   const listed = useListedAssets();
   const stats = useProtocolStats(listed);
-  const recent = useRecentLiquidations();
+  const recent = useRecentLiquidations({ paused: !autoRefresh });
+
+  /// Liquidation bonus read from the vault constant; 500 bps (5%) only as a
+  /// pre-resolution fallback. Used by both the KPI and the per-row math so the
+  /// whole page agrees on one number.
+  const bonusBps = stats.liquidationBonusBps ?? 500;
+  const bonusPct = bonusBps / 100;
 
   /// Ticking clock for the "last scan" display in the hero card.
   useEffect(() => {
@@ -76,8 +84,8 @@ export default function LiquidationsPage() {
   }, [liquidatable, watching]);
 
   const bonusPoolBig = useMemo(
-    () => (debtAtRiskBig * 5n) / 100n,
-    [debtAtRiskBig],
+    () => (debtAtRiskBig * BigInt(bonusBps)) / 10_000n,
+    [debtAtRiskBig, bonusBps],
   );
 
   const fmtUsd1e18 = (v: bigint, dp = 2): string => {
@@ -115,7 +123,7 @@ export default function LiquidationsPage() {
                   : "none",
               }}
             />
-            {autoRefresh ? "Live · 30s scan" : "Paused"}
+            {autoRefresh ? "Live" : "Paused"}
           </button>
         }
       />
@@ -159,8 +167,9 @@ export default function LiquidationsPage() {
                 >
                   vault.liquidate()
                 </span>{" "}
-                to repay their debt in exchange for their collateral at a 5%
-                bonus. Gas on the liquidation call is paymaster-sponsored.
+                to repay their debt in exchange for their collateral at a{" "}
+                {bonusPct}% bonus. For smart-wallet (AA) users, gas on the
+                liquidation call is paymaster-sponsored.
               </p>
             </div>
             <div className="text-right shrink-0">
@@ -180,7 +189,7 @@ export default function LiquidationsPage() {
                 className="font-mono text-ink-mute mt-1"
                 style={{ fontSize: 10 }}
               >
-                next in {autoRefresh ? `${30 - lastScanSecs}s` : "—"}
+                {autoRefresh ? "auto-refresh on" : "paused"}
               </div>
             </div>
           </div>
@@ -193,7 +202,7 @@ export default function LiquidationsPage() {
           <KpiCell
             label="Active borrowers"
             value={atRisk.activeBorrowers.toLocaleString()}
-            sub="non-zero debt protocol-wide"
+            sub="non-zero debt · 24h window"
           />
           <KpiCell
             label="Liquidatable now"
@@ -208,9 +217,9 @@ export default function LiquidationsPage() {
             color="var(--amber)"
           />
           <KpiCell
-            label="Bonus pool · 24h"
+            label="Bonus pool · at risk"
             value={fmtUsd1e18(bonusPoolBig)}
-            sub="5% of debt-at-risk"
+            sub={`${bonusPct}% of debt-at-risk now`}
             color="var(--up)"
           />
           <KpiCell
@@ -223,7 +232,7 @@ export default function LiquidationsPage() {
             sub={
               stats.liquidations7d
                 ? `${fmtUsd1e18(stats.liquidations7d.totalDebtUsd)} volume`
-                : "indexer offline"
+                : "scanning…"
             }
             last
           />
@@ -234,13 +243,13 @@ export default function LiquidationsPage() {
       <section className="border-b border-hairline">
         <div className="max-w-[1320px] mx-auto grid grid-cols-1 md:[grid-template-columns:1.3fr_1fr]">
           <RiskDistribution
-            liquidatable={liquidatable}
-            watching={watching}
+            positions={atRisk.positions}
             activeBorrowers={atRisk.activeBorrowers}
           />
           <LiqTimeline
             events={recent.events}
             liq24h={stats.liquidations7d?.count ?? recent.events.length}
+            activeBorrowers={atRisk.activeBorrowers}
           />
         </div>
       </section>
@@ -260,7 +269,7 @@ export default function LiquidationsPage() {
         isLoading={atRisk.isLoading}
         isError={atRisk.isError}
         onLiquidate={setTarget}
-        bonusBps={stats.liquidationBonusBps ?? 500}
+        bonusBps={bonusBps}
       />
 
       {/* ── 5. Watch zone table ─────────────────────────────── */}
@@ -268,7 +277,7 @@ export default function LiquidationsPage() {
         rows={watching}
         isError={atRisk.isError}
         onLiquidate={setTarget}
-        bonusBps={stats.liquidationBonusBps ?? 500}
+        bonusBps={bonusBps}
       />
 
       {/* ── 6. Recently liquidated + leaderboard ────────────── */}
@@ -276,6 +285,7 @@ export default function LiquidationsPage() {
         <div className="max-w-[1320px] mx-auto grid grid-cols-1 md:[grid-template-columns:1.4fr_1fr]">
           <RecentLiquidationsPanel
             events={recent.events.slice(0, 6)}
+            total={recent.events.length}
             isLoading={recent.isLoading}
             isError={recent.isError}
           />
@@ -284,7 +294,7 @@ export default function LiquidationsPage() {
       </section>
 
       {/* ── 7. How it works ─────────────────────────────────── */}
-      <HowItWorks />
+      <HowItWorks bonusPct={bonusPct} />
       </main>
 
       {/* Modal */}
@@ -409,81 +419,43 @@ function KpiCell({
 /* ── Risk distribution histogram ────────────────────────────── */
 
 function RiskDistribution({
-  liquidatable,
-  watching,
+  positions,
   activeBorrowers,
 }: {
-  liquidatable: AtRiskPosition[];
-  watching: AtRiskPosition[];
+  positions: AtRiskPosition[];
   activeBorrowers: number;
 }) {
   const buckets = useMemo(() => {
-    /// Histogram bins. The two "callable" bins below 1.10 are red; the next two
-    /// (up to 1.5) are amber; the rest are inkSoft / up.
-    const debtSum = (rows: AtRiskPosition[]) =>
-      rows.reduce(
-        (acc, r) => acc + Number(r.borrowedUsd / 10n ** 12n) / 1e6,
-        0,
-      );
-    const sub1 = liquidatable;
-    const lt110 = watching.filter((w) => w.hf < 1.1);
-    const lt125 = watching.filter((w) => w.hf >= 1.1 && w.hf < 1.25);
-    /// Anything beyond is approximated — the at-risk hook only tracks borrowers
-    /// it found in the Pledged scan. For the "≥ 2.00" bin we use the protocol-
-    /// wide active count minus what we know.
-    const known = sub1.length + lt110.length + lt125.length;
-    const remaining = Math.max(0, activeBorrowers - known);
-    /// Synthetic split of the remaining count across 3 safer bins, in a 1 : 6
-    /// : 12 ratio (matches the design's intuition that most positions are deep
-    /// in the safe zone).
-    const r1 = Math.round(remaining * (1 / 19));
-    const r2 = Math.round(remaining * (6 / 19));
-    const r3 = remaining - r1 - r2;
-    return [
-      {
-        label: "<1.00",
-        kind: "liquidatable",
-        n: sub1.length,
-        v: debtSum(sub1),
-        color: "var(--down)",
-      },
-      {
-        label: "1.00–1.10",
-        kind: "critical",
-        n: lt110.length,
-        v: debtSum(lt110),
-        color: "var(--down)",
-      },
-      {
-        label: "1.10–1.25",
-        kind: "watch",
-        n: lt125.length,
-        v: debtSum(lt125),
-        color: "var(--amber)",
-      },
-      {
-        label: "1.25–1.50",
-        kind: "caution",
-        n: r1,
-        v: r1 * 75_000,
-        color: "var(--amber)",
-      },
-      {
-        label: "1.50–2.00",
-        kind: "monitored",
-        n: r2,
-        v: r2 * 45_000,
-        color: "var(--ink-soft)",
-      },
-      {
-        label: "≥ 2.00",
-        kind: "healthy",
-        n: r3,
-        v: r3 * 22_000,
-        color: "var(--up)",
-      },
+    /// Six health-factor bins, ALL computed from real per-borrower data
+    /// (positionOf + healthFactor multicall in useAtRiskPositions). `n` is the
+    /// real position count in the bin, `v` the summed real debt (USD). No
+    /// synthetic fill — `positions` already carries every active borrower's HF.
+    const usd = (v: bigint) => Number(v / 10n ** 12n) / 1e6;
+    const defs: Array<{
+      label: string;
+      kind: string;
+      color: string;
+      lo: number;
+      hi: number;
+    }> = [
+      { label: "<1.00", kind: "liquidatable", color: "var(--down)", lo: -Infinity, hi: 1.0 },
+      { label: "1.00–1.10", kind: "critical", color: "var(--down)", lo: 1.0, hi: 1.1 },
+      { label: "1.10–1.25", kind: "watch", color: "var(--amber)", lo: 1.1, hi: 1.25 },
+      { label: "1.25–1.50", kind: "caution", color: "var(--amber)", lo: 1.25, hi: 1.5 },
+      { label: "1.50–2.00", kind: "monitored", color: "var(--ink-soft)", lo: 1.5, hi: 2.0 },
+      { label: "≥ 2.00", kind: "healthy", color: "var(--up)", lo: 2.0, hi: Infinity },
     ];
-  }, [liquidatable, watching, activeBorrowers]);
+    return defs.map((d) => {
+      const rows = positions.filter((p) => p.hf >= d.lo && p.hf < d.hi);
+      return {
+        label: d.label,
+        kind: d.kind,
+        color: d.color,
+        n: rows.length,
+        v: rows.reduce((acc, r) => acc + usd(r.borrowedUsd), 0),
+      };
+    });
+  }, [positions]);
 
   const W = 580;
   const H = 230;
@@ -656,9 +628,11 @@ function RiskDistribution({
 function LiqTimeline({
   events,
   liq24h,
+  activeBorrowers,
 }: {
   events: RecentLiquidation[];
   liq24h: number;
+  activeBorrowers: number;
 }) {
   const data = useMemo(() => bucketByHour(events), [events]);
   const max = Math.max(1, ...data.map((d) => d.count));
@@ -697,10 +671,10 @@ function LiqTimeline({
           className="font-mono tabular font-medium"
           style={{ fontSize: 13, color: "var(--up)" }}
         >
-          {total === 0
+          {total === 0 || activeBorrowers === 0
             ? "0%"
-            : ((total / Math.max(1, 5000)) * 100).toFixed(2) + "%"}{" "}
-          rate
+            : ((total / activeBorrowers) * 100).toFixed(2) + "%"}{" "}
+          of borrowers
         </span>
       </div>
       <svg
@@ -822,13 +796,14 @@ function LiquidatableTable({
               className="text-ink-mute mt-1.5 m-0"
               style={{ fontSize: 12 }}
             >
-              HF below 1.000. First caller wins. Gas on the liquidation call is
-              paymaster-sponsored.
+              HF below 1.000. First caller wins. For smart-wallet (AA) users,
+              gas on the liquidation call is paymaster-sponsored.
             </p>
           </div>
           <div className="flex gap-2">
-            <button
-              className="font-medium transition-colors"
+            <a
+              href="/sdk"
+              className="font-medium transition-colors no-underline inline-flex items-center"
               style={{
                 padding: "8px 14px",
                 fontSize: 12,
@@ -838,8 +813,8 @@ function LiquidatableTable({
                 borderRadius: 2,
               }}
             >
-              Download liquidator SDK
-            </button>
+              Liquidator SDK
+            </a>
             <button
               disabled={rows.length === 0}
               onClick={() => rows[0] && onLiquidate(rows[0])}
@@ -860,7 +835,7 @@ function LiquidatableTable({
                 className="font-mono"
                 style={{ fontSize: 10, opacity: 0.7 }}
               >
-                → 1 sig
+                →
               </span>
             </button>
           </div>
@@ -940,16 +915,12 @@ function WatchTable({
   onLiquidate: (p: AtRiskPosition) => void;
   bonusBps: number;
 }) {
-  const [sortBy, setSortBy] = useState<"hf" | "debt" | "drop">("hf");
+  const [sortBy, setSortBy] = useState<"hf" | "debt">("hf");
   const sorted = useMemo(() => {
     const cloned = [...rows];
     if (sortBy === "hf") cloned.sort((a, b) => a.hf - b.hf);
     else if (sortBy === "debt")
       cloned.sort((a, b) => Number(b.borrowedUsd - a.borrowedUsd));
-    else if (sortBy === "drop")
-      cloned.sort(
-        (a, b) => (1 - 1 / a.hf) - (1 - 1 / b.hf),
-      );
     return cloned;
   }, [rows, sortBy]);
 
@@ -988,9 +959,7 @@ function WatchTable({
             </span>
             <select
               value={sortBy}
-              onChange={(e) =>
-                setSortBy(e.target.value as "hf" | "debt" | "drop")
-              }
+              onChange={(e) => setSortBy(e.target.value as "hf" | "debt")}
               className="font-mono"
               style={{
                 padding: "6px 10px",
@@ -1003,7 +972,6 @@ function WatchTable({
             >
               <option value="hf">Health factor · asc</option>
               <option value="debt">Debt · desc</option>
-              <option value="drop">Drop to liquidation · asc</option>
             </select>
           </div>
         </div>
@@ -1219,7 +1187,7 @@ function LiqRow({
             className="font-mono text-ink-mute mt-0.5"
             style={{ fontSize: 10 }}
           >
-            5% bonus
+            {bonusBps / 100}% bonus
           </div>
         </td>
       ) : (
@@ -1264,8 +1232,11 @@ function LiqRow({
             </span>
           </button>
         ) : (
-          <button
-            className="font-medium inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+          <a
+            href={explorerAddr(p.user as Address)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-medium inline-flex items-center gap-1.5 transition-colors no-underline"
             style={{
               padding: "8px 12px",
               fontSize: 11,
@@ -1275,8 +1246,8 @@ function LiqRow({
               borderRadius: 2,
             }}
           >
-            Watch · alert
-          </button>
+            Track ↗
+          </a>
         )}
       </td>
     </tr>
@@ -1287,10 +1258,12 @@ function LiqRow({
 
 function RecentLiquidationsPanel({
   events,
+  total,
   isLoading,
   isError,
 }: {
   events: RecentLiquidation[];
+  total: number;
   isLoading: boolean;
   isError: boolean;
 }) {
@@ -1315,7 +1288,7 @@ function RecentLiquidationsPanel({
           className="font-mono text-ink-mute"
           style={{ fontSize: 10 }}
         >
-          {events.length} events
+          {total} events
         </span>
       </div>
 
@@ -1433,10 +1406,9 @@ function RecentLiquidationsPanel({
 /* ── Liquidator leaderboard ─────────────────────────────────── */
 
 function LiquidatorBoard({ events }: { events: RecentLiquidation[] }) {
-  /// Aggregate from real events when we have them — otherwise show empty state.
-  /// Bot vs EOA classification is heuristic: liquidators with 5+ events in 24h
-  /// or short repeating addresses are marked as bots. Tweak as the protocol
-  /// matures.
+  /// Aggregate from real on-chain Liquidated events (24h window); empty state
+  /// when none. Bot vs EOA is a simple count heuristic: 5+ liquidations in the
+  /// window is tagged "Bot". Refine as the protocol matures.
   const rows = useMemo(() => {
     const byAddr = new Map<
       string,
@@ -1602,7 +1574,7 @@ function LiquidatorBoard({ events }: { events: RecentLiquidation[] }) {
 
 /* ── How-it-works strip ─────────────────────────────────────── */
 
-function HowItWorks() {
+function HowItWorks({ bonusPct }: { bonusPct: number }) {
   const steps = [
     {
       n: "01",
@@ -1612,12 +1584,12 @@ function HowItWorks() {
     {
       n: "02",
       title: "Anyone calls vault.liquidate(borrower)",
-      body: "You repay up to 50% of the borrower's outstanding debt in USDG. Gas on the call is sponsored via the AA paymaster.",
+      body: "You repay part or all of the borrower's outstanding debt in USDG. For smart-wallet (AA) users, gas on the call is sponsored via the paymaster.",
     },
     {
       n: "03",
-      title: "You receive collateral + 5% bonus",
-      body: "The vault transfers the repaid value worth of the borrower's collateral plus a 5% bonus to your wallet. Settled atomically.",
+      title: `You receive collateral + ${bonusPct}% bonus`,
+      body: `The vault transfers the repaid value worth of the borrower's collateral plus a ${bonusPct}% bonus to your wallet. Settled atomically.`,
     },
     {
       n: "04",
@@ -1707,12 +1679,13 @@ function HowItWorks() {
             </span>
             <span style={{ fontSize: 13 }}>
               The TypeScript SDK has a one-line scanner. Run it against the
-              RPC and earn 5% on every call.
+              RPC and earn {bonusPct}% on every call.
             </span>
           </div>
           <div className="flex gap-2">
-            <button
-              className="font-medium transition-colors"
+            <a
+              href="/docs"
+              className="font-medium transition-colors no-underline inline-flex items-center"
               style={{
                 padding: "8px 14px",
                 fontSize: 12,
@@ -1723,9 +1696,10 @@ function HowItWorks() {
               }}
             >
               View docs
-            </button>
-            <button
-              className="font-medium transition-colors"
+            </a>
+            <a
+              href="/sdk"
+              className="font-medium transition-colors no-underline inline-flex items-center"
               style={{
                 padding: "8px 14px",
                 fontSize: 12,
@@ -1735,8 +1709,8 @@ function HowItWorks() {
                 borderRadius: 2,
               }}
             >
-              Download SDK
-            </button>
+              View SDK
+            </a>
           </div>
         </div>
       </div>

@@ -26,32 +26,32 @@ const sourceSerif = Source_Serif_4({
 
 const siteUrl =
   process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") ??
-  "https://equiflow.app";
+  "https://equiflow.xyz";
 
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
     default:
-      "EquiFlow · Yield-Generating Stock Collateralization · Robinhood Chain",
+      "EquiFlow · Stock-Collateralized Borrowing · Robinhood Chain",
     template: "%s · EquiFlow",
   },
   description:
-    "Pledge tokenized US equities as collateral on Robinhood Chain, borrow regulated stablecoins, and route them into Aave V3 yield. One signature, sponsored gas, no taxable sale.",
+    "Pledge tokenized US equities as collateral on Robinhood Chain (Arbitrum Orbit L3) and borrow regulated stablecoins. One signature, sponsored gas, no taxable sale.",
   applicationName: "EquiFlow",
   authors: [{ name: "EquiFlow" }],
   openGraph: {
     type: "website",
     siteName: "EquiFlow",
-    title: "EquiFlow — Yield-generating stock collateralization",
+    title: "EquiFlow — Stock-collateralized borrowing on Robinhood Chain",
     description:
-      "Pledge tokenized US equities, borrow USDG, route into yield. No taxable sale.",
+      "Pledge tokenized US equities and borrow USDG against them. One signature, sponsored gas, no taxable sale.",
     url: siteUrl,
   },
   twitter: {
     card: "summary_large_image",
-    title: "EquiFlow — Yield-generating stock collateralization",
+    title: "EquiFlow — Stock-collateralized borrowing on Robinhood Chain",
     description:
-      "Pledge tokenized US equities, borrow USDG, route into yield. No taxable sale.",
+      "Pledge tokenized US equities and borrow USDG against them. One signature, sponsored gas, no taxable sale.",
   },
 };
 
