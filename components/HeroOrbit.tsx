@@ -66,6 +66,28 @@ export function HeroOrbit() {
     Array(N).fill(null)
   );
   const [resetTick, setResetTick] = useState(0);
+  // `interactive` = devices with a real pointer (desktop). The magnifier lens
+  // renders a SECOND full copy of the orbit, so on touch — where the lens can
+  // never show — we skip it entirely (~halves the animation work on mobile).
+  // `reducedMotion` pauses the perpetual rotation + flow story.
+  const [interactive, setInteractive] = useState(false);
+  const [reducedMotion, setReducedMotion] = useState(false);
+
+  useEffect(() => {
+    const hoverMq = window.matchMedia("(hover: hover) and (pointer: fine)");
+    const motionMq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const apply = () => {
+      setInteractive(hoverMq.matches);
+      setReducedMotion(motionMq.matches);
+    };
+    apply();
+    hoverMq.addEventListener("change", apply);
+    motionMq.addEventListener("change", apply);
+    return () => {
+      hoverMq.removeEventListener("change", apply);
+      motionMq.removeEventListener("change", apply);
+    };
+  }, []);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -83,6 +105,10 @@ export function HeroOrbit() {
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+    if (reducedMotion) {
+      el.style.setProperty("--ef-hero-rot", "0deg");
+      return;
+    }
     let raf: number;
     const start = performance.now();
     const tick = () => {
@@ -93,9 +119,13 @@ export function HeroOrbit() {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, []);
+  }, [reducedMotion]);
 
   useEffect(() => {
+    if (reducedMotion) {
+      setPhase("idle");
+      return;
+    }
     let timer: ReturnType<typeof setTimeout>;
     let stepIdx = 0;
     let cur = 0;
@@ -136,7 +166,7 @@ export function HeroOrbit() {
     };
     tick();
     return () => clearTimeout(timer);
-  }, []);
+  }, [reducedMotion]);
 
   const stockIdx = cycle % N;
   const stableIdx = cycle % STABLES.length;
@@ -157,6 +187,13 @@ export function HeroOrbit() {
 
   const lensX = lens?.x ?? 0;
   const lensY = lens?.y ?? 0;
+
+  // The SVG scales via its 480 viewBox, but the HTML overlays (hub, badges)
+  // are authored in that same 480 coordinate space and must be scaled to match
+  // the measured container — otherwise the fixed-px overlays stay oversized on
+  // a narrow mobile column. 0 until measured (one frame) to avoid an overflow
+  // flash before the ResizeObserver fires.
+  const scale = size.w ? size.w / 480 : 0;
 
   const flow: Flow = {
     phase,
@@ -220,13 +257,14 @@ export function HeroOrbit() {
           aspectRatio: "1 / 1",
           marginTop: 18,
           marginBottom: 18,
-          cursor: "zoom-in",
+          cursor: interactive ? "zoom-in" : "default",
         }}
-        onMouseMove={handleMove}
-        onMouseLeave={handleLeave}
+        onMouseMove={interactive ? handleMove : undefined}
+        onMouseLeave={interactive ? handleLeave : undefined}
       >
-        <OrbitContent idSuffix="base" flow={flow} />
+        <OrbitContent idSuffix="base" flow={flow} scale={scale} />
 
+        {interactive && (
         <div
           className="absolute pointer-events-none"
           style={{
@@ -258,7 +296,7 @@ export function HeroOrbit() {
                 : "translate(0,0) scale(1)",
             }}
           >
-            <OrbitContent idSuffix="lens" flow={flow} />
+            <OrbitContent idSuffix="lens" flow={flow} scale={scale} />
           </div>
 
           <span
@@ -284,6 +322,7 @@ export function HeroOrbit() {
             }}
           />
         </div>
+        )}
       </div>
 
       <div
@@ -338,9 +377,11 @@ function LockGlyph({ size = 22 }: { size?: number }) {
 function OrbitContent({
   idSuffix,
   flow,
+  scale,
 }: {
   idSuffix: string;
   flow: Flow;
+  scale: number;
 }) {
   const glowId = `ef-orbit-glow-${idSuffix}`;
   const collateralActive =
@@ -496,6 +537,20 @@ function OrbitContent({
         </g>
       </svg>
 
+      {/* HTML overlays authored in the 480 coordinate space, scaled to match
+          the SVG viewBox so badges/hub shrink with the container on mobile. */}
+      <div
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          width: 480,
+          height: 480,
+          transformOrigin: "top left",
+          transform: `scale(${scale})`,
+          opacity: scale ? 1 : 0,
+        }}
+      >
       <div
         className="absolute inset-0"
         style={{
@@ -815,7 +870,7 @@ function OrbitContent({
           </div>
         </div>
       )}
-
+      </div>
     </>
   );
 }
