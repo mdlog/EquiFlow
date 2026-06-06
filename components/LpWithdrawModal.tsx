@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useId, useState } from "react";
-import { type Address, type Hex, encodeFunctionData } from "viem";
+import { type Address, type Hex, encodeFunctionData, formatUnits } from "viem";
 import {
   useReadContract,
   useWaitForTransactionReceipt,
@@ -123,10 +123,22 @@ export function LpWithdrawModal({ open, onClose }: Props) {
       ? Number(bookedRaw as bigint) / 10 ** stableDec
       : 0;
 
-  const shares = Math.max(0, Number(sharesStr) || 0);
-  const overShares = shares > sharesOwned + 1e-9;
-  const sharePct = sharesOwned > 0 ? shares / sharesOwned : 0;
+  // Work in raw bigint share units so a full-balance withdraw never
+  // overshoots. After a dust first-depositor event the share price can be
+  // ≈ $1e6/share, so any float round-trip (Number → toFixed → parseUnits)
+  // inflates the burn amount by real dollars — that is what tripped both
+  // "exceeds your share balance" and "not enough idle USDG" at once even
+  // though the position was fully redeemable. parseAmount round-trips a
+  // full-precision formatUnits string losslessly, so the buttons below feed
+  // exact share counts and validation compares bigints directly.
+  const rawShares = parseAmount(sharesStr, 18);
+  const shares = Number(rawShares) / 1e18; // display/labels only
+  const overShares = rawShares > sharesOwnedRaw;
+  const sharePct =
+    sharesOwnedRaw > 0n ? Number(rawShares) / Number(sharesOwnedRaw) : 0;
   const usdgOut = usdgValueTotal * sharePct;
+  const remainingRaw =
+    rawShares >= sharesOwnedRaw ? 0n : sharesOwnedRaw - rawShares;
   const insufficientIdle = usdgOut > vaultIdle + 0.001;
 
   const { writeContract, data: txHash, isPending, error, reset } =
@@ -186,10 +198,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
 
   function handleWithdraw() {
     if (!VAULT_ADDR) return;
-    const raw =
-      sharesStr.trim().length > 0
-        ? parseAmount(sharesStr, 18)
-        : 0n;
+    const raw = rawShares;
     if (raw <= 0n) return;
     const id = txPendingToast({
       action: `Burn ${fmtShares(shares)} LP shares${aaActive ? " (sponsored)" : ""}`,
@@ -363,9 +372,17 @@ export function LpWithdrawModal({ open, onClose }: Props) {
             <button
               key={frac}
               type="button"
-              // 10 decimals so micro-shares survive the percentage buttons
-              // after a dust first-depositor event skews the share price.
-              onClick={() => setSharesStr((sharesOwned * frac).toFixed(10))}
+              // Compute in raw bigint then format to a full-precision string
+              // so MAX round-trips to the exact balance (never overshoots)
+              // and 25/50/75% floor below it — survives a dust-skewed price.
+              onClick={() =>
+                setSharesStr(
+                  formatUnits(
+                    (sharesOwnedRaw * BigInt(Math.round(frac * 100))) / 100n,
+                    18,
+                  ),
+                )
+              }
               disabled={!isConnected || sharesOwned <= 0}
               className="bg-transparent border border-hairline rounded-[2px] hover:border-ink transition-colors"
               style={{ padding: "4px 9px", fontSize: 10 }}
@@ -390,7 +407,7 @@ export function LpWithdrawModal({ open, onClose }: Props) {
         />
         <PreviewRow
           k="Remaining shares"
-          v={fmtShares(sharesOwned - shares)}
+          v={fmtShares(Number(remainingRaw) / 1e18)}
         />
       </div>
     </ModalShell>
