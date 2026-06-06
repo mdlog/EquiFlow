@@ -241,7 +241,7 @@ export default function GovernancePage() {
       <PageNav />
 
       {/* ── Disclaimer banner ──────────────────────────────── */}
-      <div className="border-b border-hairline-soft" style={{ padding: "12px 32px", background: "var(--amber-soft)" }}>
+      <div className="border-b border-hairline-soft text-center" style={{ padding: "12px 32px", background: "var(--amber-soft)" }}>
         <span className="text-ink-soft font-mono uppercase" style={{ fontSize: 12, letterSpacing: "0.06em" }}>
           ILLUSTRATIVE &middot; This page shows sample governance data for demonstration purposes. No on-chain governance is active.
         </span>

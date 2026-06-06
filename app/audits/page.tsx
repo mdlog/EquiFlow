@@ -173,7 +173,7 @@ export default function AuditsPage() {
       <PageNav />
 
       <div
-        className="border-b border-hairline-soft"
+        className="border-b border-hairline-soft text-center"
         style={{ padding: "12px 32px", background: "var(--amber-soft)" }}
       >
         <span style={{ fontSize: 12, letterSpacing: "0.06em" }} className="text-ink-soft font-mono uppercase">
