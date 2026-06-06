@@ -63,12 +63,15 @@ export interface RecentLiquidation {
 const FALLBACK_BONUS_BPS = 500n;
 const SECS_PER_BLOCK = 0.25;
 
-export function useRecentLiquidations(): {
+export function useRecentLiquidations(options?: { paused?: boolean }): {
   events: RecentLiquidation[];
   isLoading: boolean;
   isError: boolean;
   error: Error | null;
 } {
+  /// When paused, keep cached events but stop the periodic getLogs rescan —
+  /// wired to the page's "Live / Paused" toggle.
+  const paused = options?.paused ?? false;
   const client = usePublicClient({ chainId: ROBINHOOD_CHAIN_TESTNET_ID });
   const { data: head } = useBlockNumber({
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
@@ -140,7 +143,7 @@ export function useRecentLiquidations(): {
     },
     enabled: !!client && !!EQUIFLOW_VAULT_ADDRESS && !!head,
     staleTime: 5 * 60_000,
-    refetchInterval: 5 * 60_000,
+    refetchInterval: paused ? false : 5 * 60_000,
     /// Backoff: 1s → 2s → 4s for the three retries. Public RPC blips recover
     /// fast; longer waits just leave the page empty.
     retry: 3,

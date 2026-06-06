@@ -71,7 +71,12 @@ export interface AtRiskResult {
   error: Error | null;
 }
 
-export function useAtRiskPositions(): AtRiskResult {
+export function useAtRiskPositions(
+  options?: { paused?: boolean },
+): AtRiskResult {
+  /// When paused, react-query keeps cached data but stops polling — wired to
+  /// the page's "Live / Paused" toggle so "Paused" actually halts scanning.
+  const paused = options?.paused ?? false;
   /// Stage 1: scan Pledged events to discover unique borrowers.
   const client = usePublicClient({ chainId: ROBINHOOD_CHAIN_TESTNET_ID });
   const { data: head } = useBlockNumber({
@@ -119,7 +124,7 @@ export function useAtRiskPositions(): AtRiskResult {
     },
     enabled: !!client && !!EQUIFLOW_VAULT_ADDRESS && !!head,
     staleTime: 5 * 60_000,
-    refetchInterval: 5 * 60_000,
+    refetchInterval: paused ? false : 5 * 60_000,
     retry: 3,
     retryDelay: (attempt) => Math.min(1000 * 2 ** attempt, 8000),
   });
@@ -150,7 +155,7 @@ export function useAtRiskPositions(): AtRiskResult {
     contracts,
     query: {
       enabled: contracts.length > 0,
-      refetchInterval: POLL_MS,
+      refetchInterval: paused ? false : POLL_MS,
     },
   });
 
