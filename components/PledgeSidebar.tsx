@@ -470,12 +470,18 @@ export function PledgeSidebar({ sym, open, onClose }: Props) {
     ctaLabel = "Sign once · bundle pledge";
     ctaAction = handleBundle;
   } else if (stage === "lock") {
-    ctaLabel = "Lock collateral";
+    // EOA flow, after the approve tx confirmed — this is the second of two
+    // separate transactions (an EOA can't atomically bundle approve + lock).
+    ctaLabel = "Lock collateral · step 2 of 2";
     ctaAction = handleLock;
   } else if (needsApproval || stage === "approve") {
-    ctaLabel = "Approve & lock";
+    // EOA flow, first of two txs: approve only. Labelled as step 1/2 so it's
+    // clear another signature (the lock) follows. Bundling into one signature
+    // is only possible with the smart wallet (see the aaActive branch above).
+    ctaLabel = "Approve · step 1 of 2";
     ctaAction = handleApprove;
   } else {
+    // Allowance already sufficient — a single lock tx, no separate approve.
     ctaLabel = "Lock collateral";
     ctaAction = handleLock;
   }
