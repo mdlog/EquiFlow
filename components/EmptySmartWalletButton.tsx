@@ -70,15 +70,32 @@ export function EmptySmartWalletButton() {
     },
   });
 
+  // Decimals read on-chain. The vault's USDG token is 6-decimals (USDC-style)
+  // even though VaultConfig.tokenDecimals is 18 (internal USD accounting), so a
+  // hardcoded 18 made USDG render as 0.0000 here. Static → cache forever.
+  const { data: rawDecimals } = useReadContracts({
+    allowFailure: true,
+    contracts: TOKENS.map((t) => ({
+      abi: ERC20_ABI,
+      address: t.address,
+      functionName: "decimals" as const,
+      chainId: ROBINHOOD_CHAIN_TESTNET_ID,
+    })),
+    query: { enabled: mode !== "off", staleTime: Infinity },
+  });
+
   const nonZero = useMemo(() => {
     if (!rawBalances) return [];
     return TOKENS.map((t, i) => {
       const r = rawBalances[i];
       const bal =
         r && r.status === "success" ? (r.result as bigint) : 0n;
-      return { ...t, balance: bal };
+      const d = rawDecimals?.[i];
+      const decimals =
+        d && d.status === "success" ? Number(d.result) : t.decimals;
+      return { ...t, decimals, balance: bal };
     }).filter((t) => t.balance > 0n);
-  }, [rawBalances]);
+  }, [rawBalances, rawDecimals]);
 
   if (mode === "off" || !smartAddress || !eoaAddress) return null;
 

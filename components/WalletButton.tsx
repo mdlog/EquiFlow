@@ -9,13 +9,12 @@ import {
   type SetStateAction,
 } from "react";
 import { ConnectButton } from "@rainbow-me/rainbowkit";
-import { useBalance, useReadContract } from "wagmi";
+import { useBalance } from "wagmi";
 import { formatUnits, type Address } from "viem";
-import { FAUCET_URL, ROBINHOOD_CHAIN_TESTNET_ID } from "@/lib/config/chain";
-import { explorerAddr, ERC20_ABI } from "@/lib/contracts";
+import { FAUCET_URL } from "@/lib/config/chain";
+import { explorerAddr } from "@/lib/contracts";
 import { useSmartWallet, type AAMode } from "@/lib/aa/use-smart-wallet";
 import { shortAddr } from "@/lib/contracts";
-import { useVaultContext } from "@/lib/hooks/use-vault-context";
 import { EmptySmartWalletButton } from "@/components/EmptySmartWalletButton";
 
 /// wagmi 3.x's `useBalance` returns `{ value, decimals, symbol }` — it dropped
@@ -38,38 +37,6 @@ function useDisplayBalance(address: Address | undefined): string | null {
     const dp = n < 1 ? 4 : n < 100 ? 2 : 1;
     return `${n.toFixed(dp)} ${data.symbol}`;
   }, [data]);
-}
-
-/// USDG (the vault's borrowable ERC-20) balance for `address`. The native
-/// `useBalance` above answers "can I pay gas?"; this answers "did my borrow
-/// land?". Without this the navbar only ever showed the native coin, so a
-/// successful borrow never changed the displayed number.
-function useUsdgBalance(address: Address | undefined): string | null {
-  const { vault } = useVaultContext();
-  const token = vault.tokenAddress;
-  const { data: balRaw } = useReadContract({
-    abi: ERC20_ABI,
-    address: token,
-    functionName: "balanceOf",
-    args: address ? [address] : undefined,
-    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!address && !!token, refetchInterval: 30_000 },
-  });
-  const { data: decRaw } = useReadContract({
-    abi: ERC20_ABI,
-    address: token,
-    functionName: "decimals",
-    chainId: ROBINHOOD_CHAIN_TESTNET_ID,
-    query: { enabled: !!token, staleTime: Infinity },
-  });
-  return useMemo(() => {
-    if (balRaw == null) return null;
-    const dec = typeof decRaw === "number" ? decRaw : vault.tokenDecimals;
-    const n = Number.parseFloat(formatUnits(balRaw as bigint, dec));
-    if (!Number.isFinite(n)) return null;
-    const dp = n < 1 ? 4 : n < 100 ? 2 : 1;
-    return `${n.toFixed(dp)} ${vault.borrowSymbol}`;
-  }, [balRaw, decRaw, vault.tokenDecimals, vault.borrowSymbol]);
 }
 
 export function WalletButton() {
@@ -223,7 +190,6 @@ function WalletButtonInner({
   openChainModal,
 }: WalletButtonInnerProps) {
   const displayBalance = useDisplayBalance(balanceAddress);
-  const usdgBalance = useUsdgBalance(balanceAddress);
 
   return (
     <div className="relative" ref={wrap}>
@@ -247,12 +213,10 @@ function WalletButtonInner({
           </span>
         )}
         <span className="font-mono">{displayLabel}</span>
-        {(usdgBalance ?? displayBalance) && (
+        {displayBalance && (
           <>
             <span className="w-px h-3 bg-white/20" />
-            <span className="font-mono tabular">
-              {usdgBalance ?? displayBalance}
-            </span>
+            <span className="font-mono tabular">{displayBalance}</span>
           </>
         )}
       </button>
@@ -277,24 +241,12 @@ function WalletButtonInner({
                 EOA owner · {shortAddr(account.address as `0x${string}`)}
               </div>
             )}
-            {(usdgBalance || displayBalance) && (
-              <div className="mt-2">
-                {usdgBalance && (
-                  <div
-                    className="font-serif tabular font-medium"
-                    style={{ fontSize: 18, letterSpacing: "-0.02em" }}
-                  >
-                    {usdgBalance}
-                  </div>
-                )}
-                {displayBalance && (
-                  <div
-                    className="font-mono text-ink-mute mt-0.5"
-                    style={{ fontSize: 10 }}
-                  >
-                    {usdgBalance ? `${displayBalance} · gas` : displayBalance}
-                  </div>
-                )}
+            {displayBalance && (
+              <div
+                className="font-serif tabular font-medium mt-2"
+                style={{ fontSize: 18, letterSpacing: "-0.02em" }}
+              >
+                {displayBalance}
               </div>
             )}
           </div>
