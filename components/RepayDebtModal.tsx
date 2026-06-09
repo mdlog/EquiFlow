@@ -152,10 +152,21 @@ export function RepayDebtModal({
     stableDec < 18
       ? usdgExact * 10n ** BigInt(18 - stableDec)
       : usdgExact / 10n ** BigInt(stableDec - 18);
-  const usdgNeeded = usdgExact + (amount > 0 ? 1n : 0n);
+  const balanceNeeded = usdgExact + (amount > 0 ? 1n : 0n);
+  // repayMax() pulls the LIVE (interest-grown) debt via _usdToUsdcCeil, not this
+  // snapshot. An exact approval (`floor6 + 1 wei`) leaves ~zero headroom, so any
+  // interest accrued during the approve→repay window pushes the live debt past
+  // the allowance — the second tx's gas estimate then reverts and the wallet
+  // shows a high fallback gas. Approve a bounded 0.5% buffer for the MAX path so
+  // the allowance covers that accrual (stays bounded — not maxUint256, see the
+  // deliberate exact-approval note in handleClick).
+  const approvalBuffer = useMax && amount > 0 ? usdgExact / 200n : 0n;
+  const usdgNeeded = balanceNeeded + approvalBuffer;
   const allowance = (allowanceRaw as bigint | undefined) ?? 0n;
   const userBalance = (balance as bigint | undefined) ?? 0n;
-  const insufficient = usdgNeeded > userBalance;
+  // Key the balance check off the near-exact need, NOT the buffered approval —
+  // approve() never moves tokens, so a just-enough wallet must not be blocked.
+  const insufficient = balanceNeeded > userBalance;
 
   const { writeContract, data: txHash, isPending, error, reset } =
     useWriteContract();
