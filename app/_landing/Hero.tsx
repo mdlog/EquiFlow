@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { HeroOrbit } from "@/components/HeroOrbit";
 import { Arrow } from "./shared";
+import { OracleStatus } from "./OracleStatus";
 
 export function Hero() {
   return (
@@ -21,7 +22,8 @@ export function Hero() {
               className="font-mono text-ink-soft"
               style={{ fontSize: 11, letterSpacing: "0.06em" }}
             >
-              STOCK-COLLATERALIZED BORROWING · LIVE ON ROBINHOOD CHAIN
+              THE FIRST LENDING MARKET FOR TOKENIZED US EQUITIES · LIVE ON
+              ROBINHOOD CHAIN
             </span>
           </div>
 
@@ -33,8 +35,7 @@ export function Hero() {
               letterSpacing: "-0.03em",
             }}
           >
-            Your tokenized stocks shouldn&apos;t <em>sit idle</em>. Put them to
-            work — without selling a share.
+            Don&apos;t sell your stocks. <em>Make them work.</em>
           </h1>
 
           <p
@@ -56,8 +57,8 @@ export function Hero() {
               Explore markets
               <Arrow />
             </Link>
-            <Link href="/portfolio" className="btn-ghost">
-              View portfolio
+            <Link href="/faucet" className="btn-ghost">
+              Get test tokens
             </Link>
           </div>
 
@@ -65,23 +66,42 @@ export function Hero() {
             className="mt-8 pt-6 flex gap-6 flex-wrap"
             style={{ borderTop: "1px dashed var(--hairline)" }}
           >
-            {[
-              ["Audits", "Pending"],
-              ["Chain", "Robinhood L3 · settled on Arbitrum"],
-              ["Oracle", "Pyth Network · 24/5 multi-session"],
-            ].map(([k, v]) => (
-              <div key={k} className="flex flex-col gap-0.5">
-                <span
-                  className="text-ink-mute uppercase"
-                  style={{ fontSize: 10, letterSpacing: "0.14em" }}
+            {(
+              [
+                {
+                  k: "Security",
+                  v: "169 Foundry tests · internal audit · 3rd-party pending",
+                  href: "/audits",
+                },
+                { k: "Chain", v: "Robinhood L3 · settled on Arbitrum" },
+                { k: "Oracle", v: <OracleStatus /> },
+              ] as { k: string; v: React.ReactNode; href?: string }[]
+            ).map(({ k, v, href }) => {
+              const cell = (
+                <div className="flex flex-col gap-0.5">
+                  <span
+                    className="text-ink-mute uppercase"
+                    style={{ fontSize: 10, letterSpacing: "0.14em" }}
+                  >
+                    {k}
+                  </span>
+                  <span className="font-mono" style={{ fontSize: 12 }}>
+                    {v}
+                  </span>
+                </div>
+              );
+              return href ? (
+                <Link
+                  key={k}
+                  href={href}
+                  className="no-underline text-ink hover:text-ink-soft"
                 >
-                  {k}
-                </span>
-                <span className="font-mono" style={{ fontSize: 12 }}>
-                  {v}
-                </span>
-              </div>
-            ))}
+                  {cell}
+                </Link>
+              ) : (
+                <div key={k}>{cell}</div>
+              );
+            })}
           </div>
         </div>
 

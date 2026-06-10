@@ -35,14 +35,14 @@ export function TopNav() {
             quiFlow
           </span>
           <span
-            className="font-mono text-ink-mute border-l border-hairline pl-2.5 ml-1 hidden sm:inline"
+            className="font-mono text-ink-mute border-l border-hairline pl-2.5 ml-1 hidden lg:inline whitespace-nowrap"
             style={{ fontSize: 10, letterSpacing: "0.08em" }}
           >
             PROTOCOL · TESTNET
           </span>
         </Link>
 
-        <nav className="hidden md:flex gap-7 text-[13px]">
+        <nav className="hidden lg:flex gap-7 text-[13px]">
           {NAV_LINKS.map((l) => (
             <Link
               key={l.label}
@@ -56,12 +56,12 @@ export function TopNav() {
         </nav>
 
         <div className="flex items-center gap-2 sm:gap-3">
-          <span className="hidden sm:inline-flex"><ChainTicker /></span>
+          <span className="hidden lg:inline-flex"><ChainTicker /></span>
           <WalletButton />
           <button
             type="button"
             onClick={() => setMenuOpen((v) => !v)}
-            className="md:hidden flex flex-col justify-center items-center w-9 h-9 border border-hairline rounded-[2px] bg-transparent"
+            className="lg:hidden flex flex-col justify-center items-center w-9 h-9 border border-hairline rounded-[2px] bg-transparent"
             aria-label="Toggle menu"
           >
             <span className="block w-4 h-[1.5px] bg-ink transition-transform" style={{
@@ -78,7 +78,7 @@ export function TopNav() {
       </div>
 
       {menuOpen && (
-        <nav className="md:hidden border-t border-hairline bg-paper px-4 py-3 flex flex-col gap-0.5">
+        <nav className="lg:hidden border-t border-hairline bg-paper px-4 py-3 flex flex-col gap-0.5">
           {NAV_LINKS.map((l) => (
             <Link
               key={l.label}
@@ -90,7 +90,7 @@ export function TopNav() {
               {l.label}
             </Link>
           ))}
-          <div className="pt-2 mt-1 border-t border-hairline-soft sm:hidden">
+          <div className="pt-2 mt-1 border-t border-hairline-soft lg:hidden">
             <ChainTicker />
           </div>
         </nav>

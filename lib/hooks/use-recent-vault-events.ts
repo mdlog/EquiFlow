@@ -73,11 +73,22 @@ function fmtTokenAmt(amount: bigint, decimals: number): string {
   return n.toFixed(2);
 }
 
-export function useRecentVaultEvents(): {
+export function useRecentVaultEvents(opts?: {
+  /// Look-back window in blocks. Default 7_200 (~30 min at 0.25s/block).
+  /// The landing page passes ~24h — a quiet testnet rarely has 30-min-fresh
+  /// activity, and real-but-older rows beat an empty feed.
+  windowBlocks?: bigint;
+  /// Override the getLogs chunk size. The vault address is sparse, so the
+  /// public RPC accepts the whole 24h range in one call — pass a chunk at
+  /// least as large as the window to avoid fanning out dozens of requests.
+  chunkBlocks?: bigint;
+}): {
   events: RecentVaultEvent[];
   isLoading: boolean;
   isError: boolean;
 } {
+  const windowBlocks = opts?.windowBlocks ?? RECENT_WINDOW_BLOCKS;
+  const chunkBlocks = opts?.chunkBlocks;
   const client = usePublicClient({ chainId: ROBINHOOD_CHAIN_TESTNET_ID });
   const { data: head } = useBlockNumber({
     chainId: ROBINHOOD_CHAIN_TESTNET_ID,
@@ -89,14 +100,14 @@ export function useRecentVaultEvents(): {
       "equiflow",
       "recent-vault-events",
       EQUIFLOW_VAULT_ADDRESS,
+      windowBlocks.toString(),
       // Bucket head by ~1min (240 blocks) — recent panel should feel live but
       // not refetch on every new block.
       head ? (head / 240n).toString() : "0",
     ],
     queryFn: async (): Promise<RecentVaultEvent[]> => {
       if (!client || !EQUIFLOW_VAULT_ADDRESS || !head) return [];
-      const fromBlock =
-        head > RECENT_WINDOW_BLOCKS ? head - RECENT_WINDOW_BLOCKS : 0n;
+      const fromBlock = head > windowBlocks ? head - windowBlocks : 0n;
       const now = Date.now();
 
       const [pledged, repaid, liquidated] = await Promise.all([
@@ -106,6 +117,7 @@ export function useRecentVaultEvents(): {
           event: PLEDGED_EVENT,
           fromBlock,
           toBlock: head,
+          chunkBlocks,
         }),
         getLogsChunked({
           client,
@@ -113,6 +125,7 @@ export function useRecentVaultEvents(): {
           event: REPAID_EVENT,
           fromBlock,
           toBlock: head,
+          chunkBlocks,
         }),
         getLogsChunked({
           client,
@@ -120,6 +133,7 @@ export function useRecentVaultEvents(): {
           event: LIQUIDATED_EVENT,
           fromBlock,
           toBlock: head,
+          chunkBlocks,
         }),
       ]);
 

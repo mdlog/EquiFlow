@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, JetBrains_Mono, Source_Serif_4 } from "next/font/google";
 import "./globals.css";
 import { Providers } from "./providers";
+import { SITE_URL } from "@/lib/site";
 
 const geist = Geist({
   variable: "--font-geist",
@@ -24,12 +25,8 @@ const sourceSerif = Source_Serif_4({
   display: "swap",
 });
 
-const siteUrl =
-  process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") ??
-  "https://equiflow.xyz";
-
 export const metadata: Metadata = {
-  metadataBase: new URL(siteUrl),
+  metadataBase: new URL(SITE_URL),
   title: {
     default:
       "EquiFlow · Stock-Collateralized Borrowing · Robinhood Chain",
@@ -45,7 +42,7 @@ export const metadata: Metadata = {
     title: "EquiFlow — Stock-collateralized borrowing on Robinhood Chain",
     description:
       "Pledge tokenized US equities and borrow USDG against them. One signature, sponsored gas, no taxable sale.",
-    url: siteUrl,
+    url: SITE_URL,
   },
   twitter: {
     card: "summary_large_image",

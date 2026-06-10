@@ -193,6 +193,12 @@ html, body {
   0%   { background-position: 200% 0; }
   100% { background-position: -200% 0; }
 }
+/* Travelling dashes for SVG flow connectors. -30 is a common multiple of the
+   "2 3" (5) and "3 3" (6) dash periods used by the HowItWorks diagrams, so
+   both loop seamlessly; negative offset moves dashes in path direction. */
+@keyframes ef-dash-flow {
+  to { stroke-dashoffset: -30; }
+}
 
 .animate-tick-up   { animation: ef-tick-up 0.9s ease-out; }
 .animate-tick-down { animation: ef-tick-down 0.9s ease-out; }

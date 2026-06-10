@@ -2,20 +2,24 @@
 
 import Link from "next/link";
 import { AssetLogo } from "@/components/AssetLogo";
+import { Sparkline } from "@/components/Sparkline";
 import { fmt } from "@/lib/format";
 import { STOCKS, isLive } from "@/lib/config/stocks";
 import { SectionHead } from "./shared";
 import { useListedAssets, useProtocolStats } from "@/lib/hooks/use-protocol-stats";
-import { useMarkets24h } from "@/lib/hooks/use-market-history";
-import { useStockPrice } from "@/lib/hooks/use-adapter-price";
+import { useMarkets24h, useMarketsSparkline } from "@/lib/hooks/use-market-history";
+import { useStockPrice, useLiveAdapterTick } from "@/lib/hooks/use-adapter-price";
 
 const LIVE_COUNT = STOCKS.filter((s) => s.liveOnRBN).length;
 const COMING_COUNT = STOCKS.length - LIVE_COUNT;
+// Module scope so the react-query keys stay stable across renders.
+const SYMS = STOCKS.map((s) => s.sym);
 
 export function SupportedAssets() {
   const listed = useListedAssets();
   const stats = useProtocolStats(listed);
-  const h24 = useMarkets24h(STOCKS.map((s) => s.sym));
+  const h24 = useMarkets24h(SYMS);
+  const sparkline = useMarketsSparkline(SYMS, 24);
 
   // Borrow APR / Vault APR / Liquidity are vault-wide — a single borrow vault
   // backs every collateral — so the same figure shows on each live row,
@@ -79,6 +83,11 @@ export function SupportedAssets() {
                   seedPrice={s.price}
                   live={isLive(s.sym)}
                   change24h={h24.data?.[s.sym]?.changePct ?? null}
+                  sparkData={
+                    sparkline.data?.enabled
+                      ? sparkline.data.series?.[s.sym]
+                      : undefined
+                  }
                   borrowApr={borrowApr}
                   vaultApr={vaultApr}
                   liquidityUsd={liquidityUsd}
@@ -99,6 +108,7 @@ interface AssetRowProps {
   seedPrice: number;
   live: boolean;
   change24h: number | null;
+  sparkData?: number[];
   borrowApr: number | null;
   vaultApr: number | null;
   liquidityUsd: number | null;
@@ -113,6 +123,7 @@ function AssetRow({
   seedPrice,
   live,
   change24h,
+  sparkData,
   borrowApr,
   vaultApr,
   liquidityUsd,
@@ -121,9 +132,13 @@ function AssetRow({
   // useStockPrice falls back to the Pyth Hermes / seed price and config LTV,
   // but we only surface vault figures (incl. LTV) for assets actually listed.
   const { price, ltv } = useStockPrice(sym);
+  // Tick direction for the price flash — wraps the same useStockPrice read,
+  // so wagmi dedupes the underlying call.
+  const tick = useLiveAdapterTick(sym);
   const ltvPct = live ? Math.round(ltv * 100) : null;
   const has24h = live && change24h != null;
   const up24h = (change24h ?? 0) >= 0;
+  const hasSpark = live && !!sparkData && sparkData.length >= 2;
 
   return (
     <tr
@@ -171,7 +186,18 @@ function AssetRow({
         </div>
       </td>
       <td className="text-right font-mono tabular" style={{ padding: 16 }}>
-        {fmt.usd(price ?? seedPrice)}
+        <span
+          key={`${tick.dir}-${(price ?? seedPrice).toFixed(2)}`}
+          className={`inline-block px-1.5 -mr-1.5 rounded-[2px] ${
+            tick.dir > 0
+              ? "animate-tick-up"
+              : tick.dir < 0
+                ? "animate-tick-down"
+                : ""
+          }`}
+        >
+          {fmt.usd(price ?? seedPrice)}
+        </span>
       </td>
       <td
         className="text-right font-mono tabular"
@@ -181,6 +207,17 @@ function AssetRow({
         }}
       >
         {has24h ? fmt.signedPct(change24h as number, 2) : "—"}
+        {hasSpark && (
+          <div className="flex justify-end mt-1">
+            <Sparkline
+              data={sparkData}
+              w={70}
+              h={16}
+              color={up24h ? "var(--up)" : "var(--down)"}
+              fill
+            />
+          </div>
+        )}
       </td>
       <td style={{ padding: 16 }}>
         {ltvPct != null ? (

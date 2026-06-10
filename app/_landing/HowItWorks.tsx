@@ -1,5 +1,7 @@
+import Link from "next/link";
 import { STOCKS } from "@/lib/config/stocks";
-import { SectionHead } from "./shared";
+import { SectionHead, Arrow } from "./shared";
+import { LiveBorrowApr } from "./LiveBorrowApr";
 
 // Only assets actually listed on-chain are pledgeable — exclude reference-only
 // rows (AAPL/NVDA/SPY) so the headline LTV reflects what a user can really lock.
@@ -32,9 +34,9 @@ export function HowItWorks() {
             num="MOTION 02 · BORROW"
             title="Borrow regulated"
             titleEm="stables"
-            desc="Draw USDG against your collateral at a flat, owner-set borrow rate. Funds hit your wallet — or skip your wallet entirely and route straight to yield."
-            footLabel="Borrow rate"
-            footValue="5% APR"
+            desc="Draw USDG against your collateral at a transparent on-chain rate. Funds hit your wallet — or skip your wallet entirely and route straight to yield."
+            footLabel="Borrow rate · live"
+            footValue={<LiveBorrowApr />}
             viz={<BorrowViz />}
             isLast={false}
           />
@@ -48,6 +50,7 @@ export function HowItWorks() {
             footValueClass="text-up"
             viz={<EarnViz />}
             isLast={true}
+            cta={{ label: "Supply USDG", href: "/portfolio" }}
           />
         </div>
       </div>
@@ -66,17 +69,19 @@ function Motion({
   viz,
   isLast,
   comingSoon = false,
+  cta,
 }: {
   num: string;
   title: string;
   titleEm: string;
   desc: string;
   footLabel: string;
-  footValue: string;
+  footValue: React.ReactNode;
   footValueClass?: string;
   viz: React.ReactNode;
   isLast: boolean;
   comingSoon?: boolean;
+  cta?: { label: string; href: string };
 }) {
   return (
     <div
@@ -156,6 +161,14 @@ function Motion({
           {footValue}
         </span>
       </div>
+      {cta && (
+        <div className="mt-4 flex">
+          <Link href={cta.href} className="btn-ghost btn-sm">
+            {cta.label}
+            <Arrow />
+          </Link>
+        </div>
+      )}
     </div>
   );
 }
@@ -182,6 +195,7 @@ function PledgeViz() {
         strokeWidth="0.9"
         fill="none"
         strokeDasharray="2 3"
+        style={{ animation: "ef-dash-flow 2.5s linear infinite" }}
       />
       <rect x="128" y="20" width="100" height="40" fill="#1A1814" />
       <text x="178" y="36" fontFamily="JetBrains Mono" fontSize="8" fill="#FAF8F2" textAnchor="middle" letterSpacing="0.12em">
@@ -204,9 +218,18 @@ function BorrowViz() {
       <text x="38" y="52" fontFamily="Source Serif 4" fontSize="11" fontWeight="500" fill="#FAF8F2" textAnchor="middle">
         Pledged
       </text>
-      <line x1="76" y1="40" x2="160" y2="40" stroke="#857F72" strokeWidth="1" strokeDasharray="3 3" />
+      <line
+        x1="76"
+        y1="40"
+        x2="160"
+        y2="40"
+        stroke="#857F72"
+        strokeWidth="1"
+        strokeDasharray="3 3"
+        style={{ animation: "ef-dash-flow 2.5s linear infinite" }}
+      />
       <text x="118" y="34" fontFamily="JetBrains Mono" fontSize="9" fill="#857F72" textAnchor="middle">
-        borrow · fixed APR
+        borrow · live APR
       </text>
       <path d="M156 36 L160 40 L156 44" stroke="#857F72" fill="none" strokeWidth="1" />
       <rect x="164" y="20" width="64" height="40" fill="#FAF8F2" stroke="#1A1814" strokeWidth="1.4" />

@@ -1,9 +1,6 @@
 import type { MetadataRoute } from "next";
 import { STOCKS } from "@/lib/config/stocks";
-
-const siteUrl =
-  process.env.NEXT_PUBLIC_SITE_URL?.replace(/\/$/, "") ??
-  "https://equiflow.app";
+import { SITE_URL } from "@/lib/site";
 
 const STATIC_ROUTES: readonly { path: string; priority: number; changeFrequency: MetadataRoute.Sitemap[number]["changeFrequency"] }[] = [
   { path: "/", priority: 1.0, changeFrequency: "weekly" },
@@ -24,13 +21,13 @@ const STATIC_ROUTES: readonly { path: string; priority: number; changeFrequency:
 export default function sitemap(): MetadataRoute.Sitemap {
   const now = new Date();
   const staticEntries: MetadataRoute.Sitemap = STATIC_ROUTES.map((r) => ({
-    url: `${siteUrl}${r.path}`,
+    url: `${SITE_URL}${r.path}`,
     lastModified: now,
     changeFrequency: r.changeFrequency,
     priority: r.priority,
   }));
   const assetEntries: MetadataRoute.Sitemap = STOCKS.map((s) => ({
-    url: `${siteUrl}/markets/${s.sym}`,
+    url: `${SITE_URL}/markets/${s.sym}`,
     lastModified: now,
     changeFrequency: "hourly",
     priority: 0.8,

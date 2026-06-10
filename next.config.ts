@@ -1,4 +1,22 @@
 import type { NextConfig } from "next";
+import { execSync } from "node:child_process";
+
+/// Build identifier shown in the site footer. Resolution order: explicit env
+/// (CI can set it), Vercel's commit sha, local git HEAD, empty string (the
+/// footer renders its own fallback when unset).
+function resolveGitSha(): string {
+  if (process.env.NEXT_PUBLIC_GIT_SHA) return process.env.NEXT_PUBLIC_GIT_SHA;
+  if (process.env.VERCEL_GIT_COMMIT_SHA) return process.env.VERCEL_GIT_COMMIT_SHA;
+  try {
+    return execSync("git rev-parse --short HEAD", {
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .toString()
+      .trim();
+  } catch {
+    return "";
+  }
+}
 
 /// Tight Content-Security-Policy. Update connect-src whenever a new upstream
 /// (RPC, bundler, oracle, analytics) is added — otherwise client-side calls
@@ -80,6 +98,9 @@ const SECURITY_HEADERS = [
 ];
 
 const nextConfig: NextConfig = {
+  env: {
+    NEXT_PUBLIC_GIT_SHA: resolveGitSha(),
+  },
   // Dev origins moved to env. Default to localhost-only.
   allowedDevOrigins: process.env.NEXT_DEV_ALLOWED_ORIGINS?.split(",").filter(
     Boolean,

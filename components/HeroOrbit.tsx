@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { formatUnits } from "viem";
 import { AssetLogo } from "@/components/AssetLogo";
-import { STOCKS } from "@/lib/config/stocks";
+import { STOCKS, findStock } from "@/lib/config/stocks";
 import { useProtocolStats, useListedAssets } from "@/lib/hooks/use-protocol-stats";
 import { fmt } from "@/lib/format";
 
@@ -325,15 +325,33 @@ export function HeroOrbit() {
         )}
       </div>
 
+      {/* Footer-left narrates the flow animation so a first-time visitor
+          knows what the orbit depicts: pledge → lock → borrow → settle.
+          Static line is the idle / reduced-motion fallback. */}
       <div
         className="pt-3.5 flex items-baseline justify-between"
         style={{ borderTop: "1px solid var(--hairline-soft)" }}
       >
         <span
+          key={reducedMotion ? "static" : phase}
           className="text-ink-mute uppercase"
-          style={{ fontSize: 10, letterSpacing: "0.12em" }}
+          style={{
+            fontSize: 10,
+            letterSpacing: "0.12em",
+            animation: reducedMotion
+              ? undefined
+              : "ef-fade-in 0.3s ease-out both",
+          }}
         >
-          1 protocol · {N} markets · 1 signature
+          {reducedMotion || phase === "idle"
+            ? `1 protocol · ${N} markets · 1 signature`
+            : phase === "deposit"
+              ? `Pledging ${stockSym} → vault`
+              : phase === "lock"
+                ? `Collateral locked · LTV ${Math.round(findStock(stockSym).ltv * 100)}%`
+                : phase === "borrow"
+                  ? `Borrowing ${stable.label} → wallet`
+                  : `${stable.label} settled · 1 signature · $0 gas`}
         </span>
         <span className="font-mono tabular text-ink" style={{ fontSize: 11 }}>
           {tvlLabel}
@@ -538,7 +556,10 @@ function OrbitContent({
       </svg>
 
       {/* HTML overlays authored in the 480 coordinate space, scaled to match
-          the SVG viewBox so badges/hub shrink with the container on mobile. */}
+          the SVG viewBox so badges/hub shrink with the container on mobile.
+          overflow-hidden: the rotating inner square's bounding box sweeps past
+          this box (√2× at 45°) and would otherwise widen the page's scroll
+          area — all visible content (ring, badges, hub) stays inside. */}
       <div
         style={{
           position: "absolute",
@@ -549,6 +570,7 @@ function OrbitContent({
           transformOrigin: "top left",
           transform: `scale(${scale})`,
           opacity: scale ? 1 : 0,
+          overflow: "hidden",
         }}
       >
       <div

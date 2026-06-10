@@ -66,7 +66,11 @@ export function AutoDefenderStat({ index = 4 }: { index?: number }) {
           }}
         />
         <span>
-          {display == null ? "loading" : display > 0 ? "session keys armed" : "Tier 3 ready"}
+          {display == null
+            ? "loading"
+            : display > 0
+              ? "dry-run · BETA"
+              : "BETA · awaiting first keeper"}
         </span>
       </div>
     </div>
