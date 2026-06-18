@@ -30,6 +30,29 @@ export function priceIdFor(symbol: string): Hex | undefined {
   return PYTH_PRICE_IDS[symbol.toUpperCase()];
 }
 
+/// ─── Pyth Network — xStock (Backed tokenized equities) 24/7 feeds ──────────
+/// `Crypto.<TICKER>X/USD` feeds track the tokenized version of the stock and
+/// publish 24/7 (sub-second even pre/post-market and weekends), unlike the
+/// `Equity.US.<TICKER>/USD` feeds which freeze outside 09:30–16:00 ET. EquiFlow
+/// uses these for LIVE off-hours DISPLAY pricing only. Coverage is partial —
+/// only the tickers below have an xStock feed; the rest fall back to the equity
+/// feed (live in regular hours, last close off-hours). On-chain adapters + the
+/// keeper are unchanged and still use the regular equity priceId.
+export const PYTH_XSTOCK_IDS: Record<string, Hex> = {
+  TSLA:  "0x47a156470288850a440df3a6ce85a55917b813a19bb5b31128a33a986566a362",
+  NFLX:  "0x02a67e6184e6c9dd65e14745a2a80df8b2b3d2ca91b4b191404936003d9929ae",
+  AAPL:  "0x978e6cc68a119ce066aa830017318563a9ed04ec3a0a6439010fc11296a58675",
+  NVDA:  "0x4244d07890e4610f46bbde67de8f43a4bf8b569eebe904f136b469f148503b7f",
+  GOOGL: "0xb911b0329028cd0283e4259c33809d62942bd2716a58084e5f31d64c00b5424e",
+  META:  "0xbf3e5871be3f80ab7a4d1f1fd039145179fb58569e159aee1ccd472868ea5900",
+  SPY:   "0x2817b78438c769357182c04346fddaad1178c82f4048828fe0997c3c64624e14",
+};
+
+/// Returns the xStock (24/7) priceId for a ticker, or undefined if none exists.
+export function xStockIdFor(symbol: string): Hex | undefined {
+  return PYTH_XSTOCK_IDS[symbol.toUpperCase()];
+}
+
 /// Pyth session identifier — retained as a stable union for the
 /// /api/pyth/by-symbol response and the SessionBadge UI.
 ///

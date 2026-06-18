@@ -12,6 +12,7 @@ import {
 import { ROBINHOOD_CHAIN_TESTNET_ID } from "@/lib/config/chain";
 import { PYTH_ADAPTER_ABI } from "@/lib/web3/pyth";
 import { STOCKS, findStock } from "@/lib/config/stocks";
+import { MARKET_OPEN_FRESH_SEC } from "@/lib/web3/market-hours";
 
 export interface AdapterPrice {
   /** Decimal USD price (e.g. 348.51). Null while loading / unconfigured. */
@@ -30,32 +31,55 @@ export interface AdapterPrice {
 const POLL_MS = 5_000;
 const ALL_SYMS = STOCKS.map((s) => s.sym).sort().join(",");
 
-// ── Pyth Hermes prices (off-chain, all symbols) ────────────────────────────
-// Fetches current prices from Pyth Hermes via /api/markets/24h for ALL known
-// symbols. This covers assets without on-chain adapters (AAPL, NVDA, SPY).
-// Cached for 60s — same as the endpoint's edge cache.
-function useHermesPrices(): Record<string, number> {
-  const { data } = useQuery<Record<string, { now: number | null }>>({
-    queryKey: ["hermes-prices", ALL_SYMS],
-    staleTime: 60_000,
-    refetchInterval: 60_000,
+// ── Pyth live prices (off-chain, all symbols, freshest of equity + xStock) ──
+// Fetches from /api/markets/live, which returns the freshest of each symbol's
+// equity feed and (when available) its 24/7 xStock feed. Covers assets without
+// on-chain adapters AND keeps xStock-covered tickers live off-hours. Polled
+// every 5s for a real-time-ish cadence.
+interface LiveQuote {
+  price: number;
+  publishTime: number; // unix seconds — true data age (not the keeper stamp)
+  source: "xstock" | "equity";
+}
+
+function useLivePrices(): Record<string, LiveQuote> {
+  const { data } = useQuery<
+    Record<string, { price: number | null; publishTime: number | null; source: string | null }>
+  >({
+    queryKey: ["live-prices", ALL_SYMS],
+    staleTime: 5_000,
+    refetchInterval: 5_000,
     refetchOnWindowFocus: false,
     queryFn: async () => {
-      const res = await fetch(
-        `/api/markets/24h?syms=${encodeURIComponent(ALL_SYMS)}&parsed=true`,
-      );
+      const res = await fetch(`/api/markets/live?syms=${encodeURIComponent(ALL_SYMS)}`);
       if (!res.ok) return {};
-      return (await res.json()) as Record<string, { now: number | null }>;
+      return (await res.json()) as Record<
+        string,
+        { price: number | null; publishTime: number | null; source: string | null }
+      >;
     },
   });
   return useMemo(() => {
-    const out: Record<string, number> = {};
+    const out: Record<string, LiveQuote> = {};
     if (!data) return out;
-    for (const [sym, h] of Object.entries(data)) {
-      if (h.now != null) out[sym] = h.now;
+    for (const [sym, q] of Object.entries(data)) {
+      if (q.price != null && q.publishTime != null && q.source) {
+        out[sym] = {
+          price: q.price,
+          publishTime: q.publishTime,
+          source: q.source === "xstock" ? "xstock" : "equity",
+        };
+      }
     }
     return out;
   }, [data]);
+}
+
+/// A Hermes quote is "live" when its publish_time is within the market-open
+/// freshness window. xStock feeds publish 24/7 so they stay live; equity feeds
+/// only pass this during 09:30–16:00 ET (else the market is closed).
+function isLiveFresh(publishTimeSec: number): boolean {
+  return Math.floor(Date.now() / 1000) - publishTimeSec <= MARKET_OPEN_FRESH_SEC;
 }
 
 // ── On-chain adapter price (single symbol) ──────────────────────────────────
@@ -121,7 +145,12 @@ export function useAdapterPrice(symbol: string): AdapterPrice {
   };
 }
 
-/// Price fallback chain: on-chain adapter > Pyth Hermes > static reference.
+/// Display price resolution: a FRESH Hermes quote (xStock 24/7, or live equity
+/// during regular hours) wins so the UI shows live prices even when the on-chain
+/// adapter holds a frozen last-close off-hours. Falls back to the on-chain close,
+/// then the static seed. LTV / liq-threshold ALWAYS come from on-chain (they
+/// drive the lending UI) — never from the display price — so health-factor logic
+/// is untouched.
 export function useStockPrice(symbol: string): {
   price: number;
   ltv: number;
@@ -131,11 +160,12 @@ export function useStockPrice(symbol: string): {
   updatedAt: number;
 } {
   const onchain = useAdapterPrice(symbol);
-  const hermes = useHermesPrices();
+  const live = useLivePrices();
   const fallback = findStock(symbol);
-  const hermesPrice = hermes[symbol];
+  const q = live[symbol];
+  const liveFresh = q ? isLiveFresh(q.publishTime) : false;
   return {
-    price: onchain.price ?? hermesPrice ?? fallback.price,
+    price: liveFresh ? q!.price : onchain.price ?? q?.price ?? fallback.price,
     ltv: onchain.ltvBps != null ? onchain.ltvBps / 10_000 : fallback.ltv,
     // On-chain from vault.assets(token).liqThresholdBps when listed;
     // estimate LTV + 8pp for display-only assets not listed in the vault.
@@ -143,9 +173,11 @@ export function useStockPrice(symbol: string): {
       onchain.liqThresholdBps != null
         ? onchain.liqThresholdBps / 10_000
         : fallback.ltv + 0.08,
-    isLive: onchain.price !== null || hermesPrice !== undefined,
+    isLive: liveFresh || onchain.price !== null,
     ltvIsLive: onchain.ltvBps != null,
-    updatedAt: onchain.updatedAt,
+    // Prefer the Hermes publish_time (true data age) so freshness badges read
+    // correctly; fall back to the on-chain stamp when no Hermes quote exists.
+    updatedAt: q ? q.publishTime : onchain.updatedAt,
   };
 }
 
@@ -179,7 +211,7 @@ export function useLiveAdapterTick(
 /// Hermes > static reference. High-density UIs (marquee, markets table) use
 /// this instead of per-symbol hooks.
 export function useStockPrices(): Record<string, { price: number; isLive: boolean; updatedAt: number }> {
-  const hermes = useHermesPrices();
+  const live = useLivePrices();
 
   const liveTokens = useMemo(
     () =>
@@ -234,18 +266,9 @@ export function useStockPrices(): Record<string, { price: number; isLive: boolea
 
   return useMemo(() => {
     const out: Record<string, { price: number; isLive: boolean; updatedAt: number }> = {};
-    // Seed: static fallback for all symbols
-    for (const s of STOCKS) {
-      out[s.sym] = { price: s.price, isLive: false, updatedAt: 0 };
-    }
-    // Layer 1: Pyth Hermes (off-chain) — covers ALL symbols including
-    // those without on-chain adapters (AAPL, NVDA, SPY)
-    for (const s of STOCKS) {
-      if (hermes[s.sym] != null) {
-        out[s.sym] = { price: hermes[s.sym], isLive: true, updatedAt: 0 };
-      }
-    }
-    // Layer 2: on-chain adapter — highest priority, overwrites Hermes
+
+    // On-chain adapter values (last close; updatedAt is the keeper stamp).
+    const onchainBySym: Record<string, { price: number; updatedAt: number }> = {};
     if (rounds) {
       let cursor = 0;
       for (const a of adapters) {
@@ -253,13 +276,36 @@ export function useStockPrices(): Record<string, { price: number; isLive: boolea
         const r = rounds[cursor++];
         if (r.status !== "success") continue;
         const tuple = r.result as readonly [bigint, bigint, bigint, bigint, bigint];
-        out[a.sym] = {
+        onchainBySym[a.sym] = {
           price: Number(tuple[1]) / 1e8,
-          isLive: true,
           updatedAt: Number(tuple[3]),
         };
       }
     }
+
+    // Priority per symbol: fresh Hermes (xStock 24/7 or live equity) > on-chain
+    // last close > stale Hermes > static seed.
+    for (const s of STOCKS) {
+      const q = live[s.sym];
+      const oc = onchainBySym[s.sym];
+      const liveFresh = q ? isLiveFresh(q.publishTime) : false;
+      if (liveFresh) {
+        out[s.sym] = { price: q!.price, isLive: true, updatedAt: q!.publishTime };
+      } else if (oc) {
+        // Market closed & no live feed — on-chain last close. updatedAt uses the
+        // Hermes publish_time (real data age) when available so the row can show
+        // a "closed" state instead of a misleadingly fresh keeper stamp.
+        out[s.sym] = {
+          price: oc.price,
+          isLive: false,
+          updatedAt: q ? q.publishTime : oc.updatedAt,
+        };
+      } else if (q) {
+        out[s.sym] = { price: q.price, isLive: false, updatedAt: q.publishTime };
+      } else {
+        out[s.sym] = { price: s.price, isLive: false, updatedAt: 0 };
+      }
+    }
     return out;
-  }, [adapters, rounds, hermes]);
+  }, [adapters, rounds, live]);
 }
