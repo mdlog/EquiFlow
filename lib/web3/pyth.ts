@@ -6,10 +6,10 @@ import { type Address, type Hex, encodeAbiParameters } from "viem";
 /// On RBN we run MockPyth (Pyth not deployed there). On Arbitrum Sepolia the
 /// real Pyth contract lives at 0x4374e5a8b9C22271E9EB878A2AA31DE97DF15DAF.
 ///
-/// Each ticker also has separate priceIds for "POST MARKET", "PRE MARKET",
-/// "OVERNIGHT HOURS" sessions — query Hermes for the full table if needed.
-
-export type StreamSession = "regular" | "extended" | "overnight";
+/// NOTE: Pyth also published per-session feeds (PRE/POST/OVERNIGHT) for these
+/// tickers but DEPRECATED them ~2026-06 (they stopped publishing; Hermes still
+/// serves a >40h-stale last value). EquiFlow now uses ONLY the regular feed
+/// below — see the PythSession note further down.
 
 export const PYTH_PRICE_IDS: Record<string, Hex> = {
   TSLA: "0x16dad506d7db8da01c87581c87ca897a012a153557d4d578c3b9c9e1bc0632f1",
@@ -30,60 +30,17 @@ export function priceIdFor(symbol: string): Hex | undefined {
   return PYTH_PRICE_IDS[symbol.toUpperCase()];
 }
 
-/// US equity tickers publish on 4 separate Pyth feeds covering 24/5:
-///   - regular   09:30–16:00 ET (Mon-Fri)
-///   - pre       04:00–09:30 ET
-///   - post      16:00–20:00 ET
-///   - overnight 20:00–04:00 ET (& weekend gap)
+/// Pyth session identifier — retained as a stable union for the
+/// /api/pyth/by-symbol response and the SessionBadge UI.
 ///
-/// EquiFlow adapters are deployed against the REGULAR priceId. Because the
-/// on-chain Pyth oracle on RBN is MockPyth (verbatim, no Wormhole sig check),
-/// the keeper can transparently substitute the freshest session's price into
-/// a payload tagged with the adapter's registered (regular) priceId. The
-/// adapter caches it without complaint.
-///
-/// For mainnet deployment against real Pyth this trick wouldn't work — each
-/// session would need its own adapter contract, and the vault would route to
-/// the active one (or deploy 4 adapters + a session-router contract).
+/// HISTORY: Pyth used to publish 4 feeds per US-equity ticker (regular / pre /
+/// post / overnight) for 24/5 coverage. As of ~2026-06 the pre/post/overnight
+/// equity feeds were DEPRECATED and stopped publishing — only the regular
+/// `Equity.US.<TICKER>/USD` feed (PYTH_PRICE_IDS above) stays live, 09:30–16:00
+/// ET. EquiFlow therefore sources every price from the regular feed; during
+/// off-hours the keeper holds the last close via its allowStale path. In
+/// practice only "regular" is ever the active session.
 export type PythSession = "regular" | "pre" | "post" | "overnight";
-
-export const PYTH_PRICE_IDS_BY_SESSION: Record<string, Record<PythSession, Hex>> = {
-  TSLA: {
-    regular:   "0x16dad506d7db8da01c87581c87ca897a012a153557d4d578c3b9c9e1bc0632f1",
-    pre:       "0x42676a595d0099c381687124805c8bb22c75424dffcaa55e3dc6549854ebe20a",
-    post:      "0x2a797e196973b72447e0ab8e841d9f5706c37dc581fe66a0bd21bcd256cdb9b9",
-    overnight: "0x713631e41c06db404e6a5d029f3eebfd5b885c59dce4a19f337c024e26584e26",
-  },
-  AMZN: {
-    regular:   "0xb5d0e0fa58a1f8b81498ae670ce93c872d14434b72c364885d4fa1b257cbb07a",
-    pre:       "0x82c59e36a8e0247e15283748d6cd51f5fa1019d73fbf3ab6d927e17d9e357a7f",
-    post:      "0x62731dfcc8b8542e52753f208248c3e73fab2ec15422d6f65c2decda71ccea0d",
-    overnight: "0x4ec1330b56eca05037c6b5a51d05f73db79bf3b4d29899881acd27966af184b4",
-  },
-  PLTR: {
-    regular:   "0x11a70634863ddffb71f2b11f2cff29f73f3db8f6d0b78c49f2b5f4ad36e885f0",
-    pre:       "0xbd8a8e449278ad0b6512695b1c558f816309f045d4e3da21dfc19448281840e8",
-    post:      "0xb11610f59456057d9bc82b0795c6d7aea6e2e075fc3e1991abc05e2b2861abb2",
-    overnight: "0x3a4c922ec7e8cd86a6fa4005827e723a134a16f4ffe836eac91e7820c61f75a1",
-  },
-  NFLX: {
-    regular:   "0x8376cfd7ca8bcdf372ced05307b24dced1f15b1afafdeff715664598f15a3dd2",
-    pre:       "0x81a3f7f89a88e9a0279b705f5a6670ad6d3702b9a7d3741423233a85d6758bab",
-    post:      "0xf3ae7810a11854aed92499250f89edd22409075dce2c17305fc33653522424c6",
-    overnight: "0xa68f6030142bf1370f0963cd2d33b8aef33e4777a0331a63b383b88b2fd92dd7",
-  },
-  AMD: {
-    regular:   "0x3622e381dbca2efd1859253763b1adc63f7f9abb8e76da1aa8e638a57ccde93e",
-    pre:       "0x441bc31e56932a8764a3bdb90059ca540e41c669dc0641e38b57b5e0606301ed",
-    post:      "0x6969003ef4c5fbb3b57a6be3883102362d05572c2dc7f72b767ad48f4206204b",
-    overnight: "0x7178689d88cdd76574b64438fc57f4e57efaf0bf5f9593ee19c10e46a3c5b5cf",
-  },
-};
-
-/// Returns all 4 session priceIds for a symbol, or undefined if not multi-session.
-export function sessionPriceIdsFor(symbol: string): Record<PythSession, Hex> | undefined {
-  return PYTH_PRICE_IDS_BY_SESSION[symbol.toUpperCase()];
-}
 
 /// ─── PythPriceAdapter ABI ─────────────────────────────────────────────────
 export const PYTH_ADAPTER_ABI = [

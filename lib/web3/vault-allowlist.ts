@@ -1,6 +1,6 @@
 import { type Address, type PublicClient } from "viem";
 import { EQUIFLOW_VAULT_ABI, EQUIFLOW_VAULT_ADDRESS } from "@/lib/contracts";
-import { PYTH_PRICE_IDS_BY_SESSION, PYTH_PRICE_IDS } from "@/lib/web3/pyth";
+import { PYTH_PRICE_IDS } from "@/lib/web3/pyth";
 import { STOCK_TOKEN_ADDRESSES } from "@/lib/contracts";
 
 /// Cached allowlist of (adapter, priceId) tuples derived from the on-chain
@@ -10,7 +10,7 @@ import { STOCK_TOKEN_ADDRESSES } from "@/lib/contracts";
 
 export interface CacheEntry {
   adapters: Set<string>; // lowercased adapter addresses
-  priceIds: Set<string>; // lowercased priceIds (regular + per-session)
+  priceIds: Set<string>; // lowercased priceIds (regular feeds)
   fetchedAtMs: number;
   /// True when EQUIFLOW_VAULT_ADDRESS was unset at refresh time — the cache
   /// is otherwise empty for a legitimate reason (no vault deployed) and the
@@ -30,12 +30,10 @@ async function refresh(client: PublicClient): Promise<CacheEntry> {
   const adapters = new Set<string>();
   const priceIds = new Set<string>();
 
-  // Seed priceIds from the in-process table (regular + sessions) so attacker
-  // can't push to a session priceId that isn't in our registry.
+  // Seed priceIds from the in-process table so a caller can't push to a
+  // priceId that isn't in our registry. (Pyth's per-session feeds were
+  // deprecated ~2026-06; only the regular feed IDs remain.)
   for (const id of Object.values(PYTH_PRICE_IDS)) priceIds.add(id.toLowerCase());
-  for (const sessions of Object.values(PYTH_PRICE_IDS_BY_SESSION)) {
-    for (const id of Object.values(sessions)) priceIds.add(id.toLowerCase());
-  }
 
   if (!EQUIFLOW_VAULT_ADDRESS) {
     return { adapters, priceIds, fetchedAtMs: Date.now(), vaultMissing: true };

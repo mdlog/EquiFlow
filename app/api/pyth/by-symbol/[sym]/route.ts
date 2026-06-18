@@ -1,9 +1,5 @@
 import { NextResponse } from "next/server";
-import {
-  PYTH_PRICE_IDS,
-  PYTH_PRICE_IDS_BY_SESSION,
-  type PythSession,
-} from "@/lib/web3/pyth";
+import { PYTH_PRICE_IDS } from "@/lib/web3/pyth";
 import { ApiError, withErrorHandler } from "@/lib/api/handler";
 import {
   fetchWithTimeout,
@@ -29,45 +25,26 @@ export const GET = withErrorHandler(async (req: Request, ctx: Params) => {
   const upper = sym.toUpperCase();
   if (!SYM_RE.test(upper)) throw new ApiError(400, "invalid_symbol");
 
-  // Multi-session table only covers tickers with pre/post/overnight feed IDs
-  // filled in (TSLA, AMZN, PLTR, NFLX, AMD). For everything else (AAPL, NVDA,
-  // SPY, GOOGL, MSFT, META) fall back to the single regular-session feed.
-  const sessions = PYTH_PRICE_IDS_BY_SESSION[upper];
-  const singleId = PYTH_PRICE_IDS[upper];
-  if (!sessions && !singleId) throw new ApiError(404, "unknown_symbol");
+  // Pyth deprecated the per-session (pre/post/overnight) equity feeds ~2026-06,
+  // so every symbol resolves to its single regular-session feed. `activeSession`
+  // is kept ("regular") for response-shape compatibility with existing clients.
+  const id = PYTH_PRICE_IDS[upper];
+  if (!id) throw new ApiError(404, "unknown_symbol");
 
-  const entries: Array<[PythSession, `0x${string}`]> = sessions
-    ? (Object.entries(sessions) as Array<[PythSession, `0x${string}`]>)
-    : [["regular", singleId as `0x${string}`]];
-  const idsQS = entries.map(([, id]) => `ids[]=${id}`).join("&");
-  const url = `${HERMES}/v2/updates/price/latest?${idsQS}&parsed=true`;
+  const url = `${HERMES}/v2/updates/price/latest?ids[]=${id}&parsed=true`;
 
   try {
     const res = await fetchWithTimeout(url, { cache: "no-store", timeoutMs: 5_000 });
     if (!res.ok) throw new ApiError(502, "hermes_unavailable");
     const data = (await res.json()) as { parsed: ParsedFeed[] };
-    if (!data.parsed?.length) throw new ApiError(502, "no_price_data");
+    const feed = data.parsed?.[0];
+    if (!feed) throw new ApiError(502, "no_price_data");
 
-    const idToSession = new Map<string, PythSession>();
-    for (const [session, id] of entries) {
-      idToSession.set(id.toLowerCase().replace(/^0x/, ""), session);
-    }
-
-    let best: { feed: ParsedFeed; session: PythSession } | null = null;
-    for (const f of data.parsed) {
-      const session = idToSession.get(f.id.toLowerCase());
-      if (!session) continue;
-      if (!best || f.price.publish_time > best.feed.price.publish_time) {
-        best = { feed: f, session };
-      }
-    }
-    if (!best) throw new ApiError(502, "no_matching_session");
-
-    const p = best.feed.price;
+    const p = feed.price;
     return NextResponse.json(
       {
         symbol: upper,
-        activeSession: best.session,
+        activeSession: "regular",
         price: p.price,
         conf: p.conf,
         expo: p.expo,
