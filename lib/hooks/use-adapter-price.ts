@@ -145,6 +145,28 @@ export function useAdapterPrice(symbol: string): AdapterPrice {
   };
 }
 
+/// Where the currently displayed price comes from:
+///   - "xstock"  live 24/7 Pyth xStock feed (tokenized equity)
+///   - "equity"  live Pyth equity feed (NYSE regular hours)
+///   - "closed"  market shut — showing the last on-chain/equity close
+///   - "static"  no live data — static seed (dev sim / unconfigured)
+export type PriceSource = "xstock" | "equity" | "closed" | "static";
+
+/// UI label + accent colour for a price source. Single source of truth so the
+/// markets table, asset detail, and SessionBadge stay consistent.
+export function priceSourceMeta(source: PriceSource): { label: string; color: string } {
+  switch (source) {
+    case "xstock":
+      return { label: "Pyth · xStock 24/7", color: "var(--up)" };
+    case "equity":
+      return { label: "Pyth · NYSE live", color: "var(--up)" };
+    case "closed":
+      return { label: "NYSE · last close", color: "var(--amber)" };
+    default:
+      return { label: "Off-chain · sim", color: "var(--ink-mute)" };
+  }
+}
+
 /// Display price resolution: a FRESH Hermes quote (xStock 24/7, or live equity
 /// during regular hours) wins so the UI shows live prices even when the on-chain
 /// adapter holds a frozen last-close off-hours. Falls back to the on-chain close,
@@ -158,12 +180,20 @@ export function useStockPrice(symbol: string): {
   isLive: boolean;
   ltvIsLive: boolean;
   updatedAt: number;
+  source: PriceSource;
 } {
   const onchain = useAdapterPrice(symbol);
   const live = useLivePrices();
   const fallback = findStock(symbol);
   const q = live[symbol];
   const liveFresh = q ? isLiveFresh(q.publishTime) : false;
+  const source: PriceSource = liveFresh
+    ? q!.source === "xstock"
+      ? "xstock"
+      : "equity"
+    : onchain.price !== null || q
+      ? "closed"
+      : "static";
   return {
     price: liveFresh ? q!.price : onchain.price ?? q?.price ?? fallback.price,
     ltv: onchain.ltvBps != null ? onchain.ltvBps / 10_000 : fallback.ltv,
@@ -178,6 +208,7 @@ export function useStockPrice(symbol: string): {
     // Prefer the Hermes publish_time (true data age) so freshness badges read
     // correctly; fall back to the on-chain stamp when no Hermes quote exists.
     updatedAt: q ? q.publishTime : onchain.updatedAt,
+    source,
   };
 }
 
@@ -187,8 +218,8 @@ export function useStockPrice(symbol: string): {
 export function useLiveAdapterTick(
   symbol: string,
   format: (v: number) => string = (v) => v.toFixed(2),
-): { value: number; formatted: string; dir: -1 | 0 | 1; isLive: boolean } {
-  const { price, isLive } = useStockPrice(symbol);
+): { value: number; formatted: string; dir: -1 | 0 | 1; isLive: boolean; source: PriceSource } {
+  const { price, isLive, source } = useStockPrice(symbol);
   const prevRef = useRef<number>(price);
   const [dir, setDir] = useState<-1 | 0 | 1>(0);
 
@@ -204,6 +235,7 @@ export function useLiveAdapterTick(
     formatted: format(price),
     dir,
     isLive,
+    source,
   };
 }
 

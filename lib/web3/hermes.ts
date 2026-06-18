@@ -1,4 +1,4 @@
-import { PYTH_PRICE_IDS, type PythSession } from "@/lib/web3/pyth";
+import { PYTH_PRICE_IDS, PYTH_XSTOCK_IDS, type PythSession } from "@/lib/web3/pyth";
 import { fetchWithTimeout } from "@/lib/api/security";
 
 // Server-side Hermes (Pyth Network) client. Returns the freshest available
@@ -75,24 +75,35 @@ export function validatePythQuote(
 }
 
 export async function fetchFreshestPyth(symbol: string): Promise<PythQuote | null> {
-  // Pyth deprecated the per-session (pre/post/overnight) equity feeds ~2026-06,
-  // so the regular feed is the only live source. `session` is always "regular".
-  const id = PYTH_PRICE_IDS[symbol.toUpperCase()];
-  if (!id) return null;
+  // Candidate feeds: the regular equity feed + (when available) the 24/7 xStock
+  // feed. Pick the FRESHEST by publish_time so xStock-covered tickers stay live
+  // around the clock — driving 24/7 on-chain pricing and an OPEN market gate —
+  // while the rest use the equity feed (live only during NYSE regular hours).
+  const upper = symbol.toUpperCase();
+  const ids: string[] = [];
+  const eq = PYTH_PRICE_IDS[upper];
+  const xs = PYTH_XSTOCK_IDS[upper];
+  if (eq) ids.push(eq);
+  if (xs) ids.push(xs);
+  if (ids.length === 0) return null;
   try {
+    const idsQS = ids.map((id) => `ids[]=${id}`).join("&");
     const res = await fetchWithTimeout(
-      `${HERMES}/v2/updates/price/latest?ids[]=${id}&parsed=true`,
+      `${HERMES}/v2/updates/price/latest?${idsQS}&parsed=true`,
       { cache: "no-store", timeoutMs: HERMES_TIMEOUT_MS },
     );
     if (!res.ok) return null;
-    const data = (await res.json()) as { parsed: ParsedFeed[] };
-    const f = data.parsed?.[0];
-    if (!f) return null;
+    const data = (await res.json()) as { parsed?: ParsedFeed[] };
+    let best: ParsedFeed | null = null;
+    for (const f of data.parsed ?? []) {
+      if (!best || f.price.publish_time > best.price.publish_time) best = f;
+    }
+    if (!best) return null;
     return {
-      price: BigInt(f.price.price),
-      expo: f.price.expo,
-      publishTime: f.price.publish_time,
-      conf: BigInt(f.price.conf),
+      price: BigInt(best.price.price),
+      expo: best.price.expo,
+      publishTime: best.price.publish_time,
+      conf: BigInt(best.price.conf),
       session: "regular",
     };
   } catch {

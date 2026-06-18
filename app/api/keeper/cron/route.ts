@@ -14,6 +14,7 @@ import {
   craftMockPythUpdate,
 } from "@/lib/web3/pyth";
 import { fetchFreshestPyth, validatePythQuote } from "@/lib/web3/hermes";
+import { inferMarketOpen } from "@/lib/web3/market-hours";
 import { EQUIFLOW_VAULT_ABI, EQUIFLOW_VAULT_ADDRESS } from "@/lib/contracts";
 import { STOCK_TOKEN_ADDRESSES } from "@/lib/contracts";
 import { recordPrice } from "@/lib/web3/price-history";
@@ -220,7 +221,12 @@ export const GET = withErrorHandler(async (req: Request) => {
       continue;
     }
 
-    const validation = validatePythQuote(quote, nowSec);
+    // xStock-covered symbols read fresh 24/7 => market OPEN. Equity-only symbols
+    // are stale off-hours => market CLOSED, in which case we still push the last
+    // close (allowStale) with a fresh on-chain stamp so collateral keeps a
+    // valuation through the closed session instead of going stale and reverting.
+    const isMarketOpen = inferMarketOpen(quote.publishTime, nowSec);
+    const validation = validatePythQuote(quote, nowSec, { allowStale: !isMarketOpen });
     if (!validation.ok) {
       console.warn(
         `[keeper/cron] quote_rejected sym=${symbol} reason=${validation.reason} ` +
@@ -262,6 +268,42 @@ export const GET = withErrorHandler(async (req: Request) => {
         nonce,
       });
       await recordPrice(symbol, priceForLog, publishTime);
+
+      // Sync the market-hours gate (only on an OPEN<->CLOSED transition, rare).
+      // xStock-sourced symbols read fresh => OPEN 24/7; equity-only symbols flip
+      // CLOSED off-hours. Non-fatal — the price push already landed.
+      const desiredStatus = isMarketOpen ? 0 : 1;
+      try {
+        const current = Number(
+          await publicClient.readContract({
+            abi: EQUIFLOW_VAULT_ABI,
+            address: vault,
+            functionName: "marketStatus",
+            args: [token],
+          }),
+        );
+        if (current !== desiredStatus) {
+          const sNonce = await acquireNonce(publicClient, account.address);
+          await walletClient.writeContract({
+            abi: EQUIFLOW_VAULT_ABI,
+            address: vault,
+            functionName: "setMarketStatus",
+            args: [token, desiredStatus],
+            nonce: sNonce,
+          });
+          console.log(
+            `[keeper/cron] marketStatus ${symbol} -> ${desiredStatus === 0 ? "OPEN" : "CLOSED"}`,
+          );
+        }
+      } catch (e) {
+        const { code } = sanitizeError(e);
+        if (code === "nonce_error") resyncNonce();
+        console.warn(
+          `[keeper/cron] marketStatus_sync_failed sym=${symbol}:`,
+          (e as Error).message,
+        );
+      }
+
       results.push({
         symbol,
         token,

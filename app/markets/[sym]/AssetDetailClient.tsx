@@ -17,7 +17,7 @@ import { PledgeSidebar } from "@/components/PledgeSidebar";
 import { findStock, stockAddress, isLive } from "@/lib/config/stocks";
 import { LIQ_LTV_CUSHION_BPS } from "@/lib/config/constants";
 import { fmt } from "@/lib/format";
-import { useLiveAdapterTick, useStockPrice } from "@/lib/hooks/use-adapter-price";
+import { useLiveAdapterTick, useStockPrice, priceSourceMeta } from "@/lib/hooks/use-adapter-price";
 import { useLiveTick } from "@/lib/hooks/use-live-tick";
 import { useRecommendedLtv } from "@/lib/hooks/use-recommended-ltv";
 import {
@@ -254,9 +254,9 @@ export function AssetDetailClient({ sym }: Props) {
             </div>
             <div className="mt-2 flex justify-end items-center gap-2">
               <OraclePing
-                color={adapterTick.isLive ? "var(--up)" : "var(--ink-mute)"}
+                color={priceSourceMeta(adapterTick.source).color}
                 size={5}
-                label={adapterTick.isLive ? "Pyth · on-chain" : "Off-chain · sim"}
+                label={priceSourceMeta(adapterTick.source).label}
               />
               {adapterTick.isLive && (
                 <SessionBadge symbol={stock.sym} variant="full" size={9} />

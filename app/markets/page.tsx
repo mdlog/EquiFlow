@@ -10,7 +10,7 @@ import { Sparkline } from "@/components/Sparkline";
 import { STOCKS, type Stock, stockAddress } from "@/lib/config/stocks";
 import { fmt } from "@/lib/format";
 import { useLiveTick } from "@/lib/hooks/use-live-tick";
-import { useLiveAdapterTick, useStockPrice } from "@/lib/hooks/use-adapter-price";
+import { useLiveAdapterTick, useStockPrice, priceSourceMeta } from "@/lib/hooks/use-adapter-price";
 import {
   useListedAssets,
   useProtocolStats,
@@ -688,12 +688,12 @@ function LedgerRow({
         </div>
         <div className="mt-0.5 flex justify-end gap-1.5 items-center">
           <OraclePing
-            color={adapterTick.isLive ? "var(--up)" : "var(--ink-mute)"}
+            color={priceSourceMeta(adapterTick.source).color}
             size={5}
             label={null}
           />
           <span className="font-mono text-ink-mute" style={{ fontSize: 10 }}>
-            {adapterTick.isLive ? "Pyth · on-chain" : "Off-chain · sim"}
+            {priceSourceMeta(adapterTick.source).label}
           </span>
           {adapterTick.isLive && (
             <SessionBadge symbol={stock.sym} variant="dense" />
@@ -984,12 +984,12 @@ function LedgerCard({
         </div>
         <div className="mt-1 flex gap-1.5 items-center">
           <OraclePing
-            color={adapterTick.isLive ? "var(--up)" : "var(--ink-mute)"}
+            color={priceSourceMeta(adapterTick.source).color}
             size={5}
             label={null}
           />
           <span className="font-mono text-ink-mute" style={{ fontSize: 10 }}>
-            {adapterTick.isLive ? "Pyth · on-chain" : "Off-chain · sim"}
+            {priceSourceMeta(adapterTick.source).label}
           </span>
           {adapterTick.isLive && (
             <SessionBadge symbol={stock.sym} variant="dense" />

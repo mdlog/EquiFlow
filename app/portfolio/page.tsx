@@ -32,7 +32,7 @@ import { LIQ_LTV_CUSHION_BPS } from "@/lib/config/constants";
 import { usePosition, type LiveCollateralLine } from "@/lib/hooks/use-position";
 import { usePositionEvents } from "@/lib/hooks/use-position-events";
 import { useActiveWallet } from "@/lib/hooks/use-active-wallet";
-import { useLiveAdapterTick, useStockPrices } from "@/lib/hooks/use-adapter-price";
+import { useLiveAdapterTick, useStockPrices, priceSourceMeta } from "@/lib/hooks/use-adapter-price";
 import { SessionBadge } from "@/components/SessionBadge";
 import type { Address } from "viem";
 import { VaultSelector } from "@/components/VaultSelector";
@@ -644,7 +644,7 @@ function CollatRow({
               fontSize: 12,
               padding: "1px 4px",
             }}
-            title={live.isLive ? "Pyth · on-chain" : "Static reference price"}
+            title={priceSourceMeta(live.source).label}
           >
             {live.formatted}
           </span>

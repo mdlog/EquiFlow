@@ -1,47 +1,40 @@
 "use client";
 
-import { useSessionInfo, type PythSession } from "@/lib/hooks/use-session-info";
+import { useStockPrice, type PriceSource } from "@/lib/hooks/use-adapter-price";
 
-/// Compact pill showing which Pyth session is currently driving the price.
-/// Color-coded so users can tell at a glance whether they're looking at live
-/// regular-hours liquidity or thin overnight pricing.
+/// Compact pill showing where the displayed price comes from and whether it is
+/// live. Color-coded so users can tell at a glance whether they're looking at
+/// a live feed (xStock 24/7 or NYSE regular hours) or a frozen last close.
 ///
 /// Variants:
-///   - `dense` — single short label (e.g. "OVN"), good for tight cells
-///   - `full` — short label + freshness ago (e.g. "OVERNIGHT · 4s")
+///   - `dense` — single short label (e.g. "xS"), good for tight cells
+///   - `full` — short label + freshness (e.g. "xSTOCK · LIVE · 3s")
 
-const STYLE: Record<PythSession, { bg: string; fg: string; label: string; full: string }> = {
-  regular: {
+const STYLE: Record<PriceSource, { bg: string; fg: string; label: string; full: string }> = {
+  xstock: {
     bg: "rgba(63, 152, 95, 0.14)",
     fg: "var(--up)",
-    label: "REG",
-    full: "REGULAR",
+    label: "xS",
+    full: "xSTOCK · LIVE",
   },
-  pre: {
-    bg: "rgba(48, 99, 153, 0.14)",
-    fg: "oklch(0.45 0.10 240)",
-    label: "PRE",
-    full: "PRE-MARKET",
+  equity: {
+    bg: "rgba(63, 152, 95, 0.14)",
+    fg: "var(--up)",
+    label: "NYSE",
+    full: "NYSE · LIVE",
   },
-  post: {
+  closed: {
     bg: "rgba(151, 92, 47, 0.14)",
     fg: "var(--amber)",
-    label: "POST",
-    full: "POST-MARKET",
+    label: "CLD",
+    full: "CLOSED",
   },
-  overnight: {
-    bg: "rgba(26, 24, 20, 0.10)",
-    fg: "var(--ink)",
-    label: "OVN",
-    full: "OVERNIGHT",
+  static: {
+    bg: "var(--hairline-soft)",
+    fg: "var(--ink-mute)",
+    label: "—",
+    full: "OFFLINE",
   },
-};
-
-const NEUTRAL = {
-  bg: "var(--hairline-soft)",
-  fg: "var(--ink-mute)",
-  label: "—",
-  full: "OFFLINE",
 };
 
 interface Props {
@@ -53,12 +46,10 @@ interface Props {
 }
 
 export function SessionBadge({ symbol, variant = "dense", size = 9 }: Props) {
-  const info = useSessionInfo(symbol);
-  const style = info.session ? STYLE[info.session] : NEUTRAL;
+  const { source, updatedAt } = useStockPrice(symbol);
+  const style = STYLE[source];
   const ageSec =
-    info.publishTime > 0
-      ? Math.max(0, Math.floor(Date.now() / 1000) - info.publishTime)
-      : null;
+    updatedAt > 0 ? Math.max(0, Math.floor(Date.now() / 1000) - updatedAt) : null;
   const ageLabel =
     ageSec === null
       ? ""
@@ -86,11 +77,11 @@ export function SessionBadge({ symbol, variant = "dense", size = 9 }: Props) {
         whiteSpace: "nowrap",
       }}
       title={
-        info.error
-          ? `Session info error: ${info.error}`
-          : info.session
-            ? `${style.full} · last update ${ageLabel} ago${info.price ? ` · Hermes $${info.price.toFixed(2)}` : ""}`
-            : "Session offline — using last on-chain price"
+        source === "closed"
+          ? `Market closed — showing last NYSE close${ageLabel ? ` (${ageLabel} ago)` : ""}`
+          : source === "static"
+            ? "No live price — using static reference"
+            : `${style.full}${ageLabel ? ` · updated ${ageLabel} ago` : ""}`
       }
     >
       {text}
